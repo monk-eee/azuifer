@@ -65,7 +65,11 @@ pub(crate) fn entity_response(status: StatusCode, entity: Entity) -> Result<Resp
 }
 
 pub(crate) fn download_response(download: Download) -> Result<(Response, Metadata)> {
-    let Download { info, range, payload } = download;
+    let Download {
+        info,
+        range,
+        payload,
+    } = download;
     let status = if range.is_some() {
         StatusCode::PARTIAL_CONTENT
     } else {
@@ -108,6 +112,10 @@ pub(crate) fn retain_download_permit(response: &mut Response, permit: OwnedSemap
         let _permit = &permit;
         item
     }));
+}
+
+pub(crate) fn unsatisfied_range(headers: &mut HeaderMap, length: u64) -> Result<()> {
+    set(headers, "content-range", &format!("bytes */{length}"))
 }
 
 /// Minimal XML writer shared by every XML-speaking service.

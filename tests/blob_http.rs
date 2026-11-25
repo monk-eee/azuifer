@@ -57,7 +57,7 @@ impl Drop for TestProcess {
 
 struct Emulator {
     process: TestProcess,
-    blob: String,
+    blob: Option<String>,
     dfs: Option<String>,
     admin: String,
     client: Client,
@@ -141,7 +141,7 @@ impl Emulator {
             .unwrap();
         let started = Self {
             process,
-            blob: lines.remove("blob").expect("Blob listener URL"),
+            blob: lines.remove("blob"),
             dfs: lines.remove("dfs"),
             admin: lines.remove("admin").expect("admin listener URL"),
             client,
@@ -171,7 +171,11 @@ impl Emulator {
         body: &[u8],
         key: &[u8],
     ) -> Response {
-        self.request_at(&self.blob, method, path, extra, body, key)
+        self.request_at(self.blob_url(), method, path, extra, body, key)
+    }
+
+    fn blob_url(&self) -> &str {
+        self.blob.as_deref().expect("Blob listener URL")
     }
 
     fn dfs(&self, method: Method, path: &str, extra: &[(&str, &str)], body: &[u8]) -> Response {
@@ -222,7 +226,7 @@ impl Emulator {
     }
 
     fn start_partial_upload(&self, path: &str, length: usize, bytes: &[u8]) -> TcpStream {
-        let url = Url::parse(&format!("{}{path}", self.blob)).unwrap();
+        let url = Url::parse(&format!("{}{path}", self.blob_url())).unwrap();
         let address = url.socket_addrs(|| None).unwrap()[0];
         let mut socket = TcpStream::connect(address).unwrap();
         let headers = signed(
@@ -522,7 +526,7 @@ fn rejects_unsigned_stale_and_tampered_requests_and_enforces_content_limits() {
     server.create_container();
     let unsigned = server
         .client
-        .get(format!("{}{CONTAINER}", server.blob))
+        .get(format!("{}{CONTAINER}", server.blob_url()))
         .header("x-ms-version", VERSION)
         .send()
         .unwrap();
@@ -1265,17 +1269,35 @@ fn dfs_requires_hns_and_authentication() {
 }
 
 #[test]
+fn hns_configuration_rejects_an_account_that_does_not_exist() {
+    let result = emulator_command()
+        .args(["serve", "--hns-accounts", "unconfigured"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .contains("HNS account `unconfigured` is not configured")
+    );
+}
+
+#[test]
 fn dfs_filesystems_and_blob_bytes_share_the_same_persistent_store() {
     const FILESYSTEM: &str = "/testaccount/container?resource=filesystem";
     let location = tempfile::tempdir().unwrap();
-    let start = || {
+    let start = |services| {
         Emulator::start_services(
             Some(location.path()),
-            "blob,dfs",
+            services,
             &["--hns-accounts", ACCOUNT, "--skip-api-version-check"],
         )
     };
-    let server = start();
+    let server = start("blob,dfs");
+    dfs_error(
+        server.dfs(Method::PUT, FILESYSTEM, &[], b"not allowed"),
+        400,
+        "ContentLengthMustBeZero",
+    );
     let created = server.dfs(Method::PUT, FILESYSTEM, &[], b"");
     assert_eq!(created.status(), 201);
     assert_eq!(created.headers()["x-ms-namespace-enabled"], "true");
@@ -1310,8 +1332,12 @@ fn dfs_filesystems_and_blob_bytes_share_the_same_persistent_store() {
         b"",
     );
     assert_eq!(page.status(), 200);
-    let marker = page.headers()["x-ms-continuation"].to_str().unwrap().to_owned();
+    let marker = page.headers()["x-ms-continuation"]
+        .to_str()
+        .unwrap()
+        .to_owned();
     let listed: serde_json::Value = serde_json::from_slice(&page.bytes().unwrap()).unwrap();
+    assert_eq!(listed["filesystems"].as_array().unwrap().len(), 1);
     assert_eq!(listed["filesystems"][0]["name"], "container");
     assert_eq!(listed["filesystems"][0]["eTag"], container_tag);
     let next = server.dfs(
@@ -1324,12 +1350,22 @@ fn dfs_filesystems_and_blob_bytes_share_the_same_persistent_store() {
     assert!(!next.headers().contains_key("x-ms-continuation"));
     let listed: serde_json::Value = serde_json::from_slice(&next.bytes().unwrap()).unwrap();
     assert_eq!(listed["filesystems"][0]["name"], "second");
+    dfs_error(
+        server.dfs(
+            Method::GET,
+            "/testaccount?resource=account&continuation=*invalid*",
+            &[],
+            b"",
+        ),
+        400,
+        "InvalidQueryParameterValue",
+    );
 
     let written = server.put(BLOB, &[("x-ms-meta-origin", "blob")], b"shared bytes");
     assert_eq!(written.status(), 201);
     let tag = etag(&written);
     drop(server);
-    let server = start();
+    let server = start("dfs");
     let metadata = server.dfs(Method::HEAD, BLOB, &[], b"");
     assert_eq!(metadata.status(), 200);
     assert_eq!(metadata.headers()["x-ms-resource-type"], "file");
@@ -1338,16 +1374,31 @@ fn dfs_filesystems_and_blob_bytes_share_the_same_persistent_store() {
     assert_eq!(etag(&metadata), tag);
     assert!(metadata.bytes().unwrap().is_empty());
 
+    let full = server.dfs(Method::GET, BLOB, &[], b"");
+    assert_eq!(full.status(), 200);
+    assert_eq!(etag(&full), tag);
+    assert_eq!(full.bytes().unwrap().as_ref(), b"shared bytes");
+    let unchanged = server.dfs(Method::GET, BLOB, &[("if-none-match", &tag)], b"");
+    assert_eq!(unchanged.status(), 304);
+    assert!(unchanged.bytes().unwrap().is_empty());
+
     let ranged = server.dfs(
         Method::GET,
         BLOB,
-        &[("range", "bytes=7-11"), ("if-match", &tag), ("x-ms-version", "2026-04-06")],
+        &[
+            ("range", "bytes=7-11"),
+            ("if-match", &tag),
+            ("x-ms-version", "2026-04-06"),
+        ],
         b"",
     );
     assert_eq!(ranged.status(), 206);
     assert_eq!(ranged.headers()["x-ms-version"], VERSION);
     assert_eq!(ranged.headers()["content-range"], "bytes 7-11/12");
     assert_eq!(ranged.bytes().unwrap().as_ref(), b"bytes");
+    let bad_range = server.dfs(Method::GET, BLOB, &[("range", "bytes=12-")], b"");
+    assert_eq!(bad_range.headers()["content-range"], "bytes */12");
+    dfs_error(bad_range, 416, "InvalidRange");
     dfs_error(
         server.dfs(Method::GET, BLOB, &[("if-match", "\"not-current\"")], b""),
         412,
@@ -1358,8 +1409,30 @@ fn dfs_filesystems_and_blob_bytes_share_the_same_persistent_store() {
         404,
         "PathNotFound",
     );
-    assert_eq!(server.dfs(Method::DELETE, FILESYSTEM, &[], b"").status(), 202);
-    error(server.request(Method::GET, BLOB, &[], b""), 404, "ContainerNotFound");
+    let unsupported = server.dfs(
+        Method::HEAD,
+        &format!("{BLOB}?action=getAccessControl"),
+        &[],
+        b"",
+    );
+    assert_eq!(unsupported.status(), 501);
+    assert_eq!(unsupported.headers()["x-ms-error-code"], "NotImplemented");
+    drop(server);
+    let server = start("blob,dfs");
+    assert_eq!(
+        server.dfs(Method::DELETE, FILESYSTEM, &[], b"").status(),
+        202
+    );
+    error(
+        server.request(Method::GET, BLOB, &[], b""),
+        404,
+        "ContainerNotFound",
+    );
+    dfs_error(
+        server.dfs(Method::GET, BLOB, &[], b""),
+        404,
+        "FilesystemNotFound",
+    );
 }
 
 fn dfs_error(response: Response, status: u16, code: &str) {

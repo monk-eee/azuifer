@@ -6,9 +6,11 @@
 
 [![CI](https://github.com/monk-eee/azuifer/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/monk-eee/azuifer/actions/workflows/rust.yml)
 
-**Run Azure Storage clients locally.** Azuifer is a Rust emulator for Azure Storage. The goal is **100% wire compatibility** across Blob, Data Lake Storage Gen2 (DFS), Azure Files FileREST, Queue, and Table: change the endpoint, not your application.
+**Run Azure Storage clients locally.** Azuifer is a high-fidelity Azure Storage emulator for Blob, Data Lake Storage Gen2 (DFS), Azure Files FileREST, Queue, and Table.
 
-Blob is available now: create containers, upload and download block blobs, read byte ranges, and keep data across restarts. The primary runtime is a non-root Azure Linux container.
+**Wire compatibility is the contract:** supported operations are expected to produce the same observable HTTP behavior and storage state as Azure Storage. Compatibility is published by service, operation, and API version in the [conformance manifests](specs/conformance/), and an operation is only marked as matching Azure once it has been compared against a real Azure account.
+
+Blob is available now: create containers, upload and download block blobs, read byte ranges, and keep data across restarts. Queue, Table, DFS, and Azure Files are landing next. The primary runtime is a non-root Azure Linux container.
 
 [Docker quickstart](#run-locally) | [Connect an SDK](#connect-an-sdk) | [Supported operations](#what-works) | [Compatibility evidence](#verify-compatibility)
 
@@ -72,19 +74,20 @@ Stop the container with `docker stop azuifer-quickstart` when you're done.
 
 ## What works
 
-| Blob workflow | Available on Azuifer |
+| Workflow | Available on Azuifer |
 | --- | --- |
 | Authentication | Shared Key at a path-style endpoint |
-| Containers | Create, list, read properties, and delete |
+| Blob containers | Create, list, read properties, and delete |
 | Block blobs | Upload, read, list, delete, stage blocks, and get or commit block lists |
 | Reads and writes | Byte ranges, ETag conditions, upload checksums, and metadata on writes |
+| Data Lake (DFS) | Create, list, inspect, and delete filesystems; read Blob-written files and their properties on HNS-enabled accounts |
 | Storage | In-memory or SQLite metadata with persistent payloads |
 
-Use the [Blob compatibility guide](docs/compatibility/blob.md) for operation details, limits, and CLI flags. The [product specification](docs/specs/azuifer.md) tracks DFS, Files, Queue, and Table. The storage design uses one namespace for Blob and DFS on hierarchical namespace (HNS) accounts.
+Use the [Blob guide](docs/compatibility/blob.md) and [Data Lake guide](docs/compatibility/dfs.md) for supported operations, flags, and limits. Blob and DFS see the same data and ETags on hierarchical namespace (HNS) accounts. The [product specification](docs/specs/azuifer.md) tracks the full set of operations.
 
 ## Verify compatibility
 
-The [required CI check](https://github.com/monk-eee/azuifer/actions/workflows/rust.yml) runs the current pinned Azure CLI release and its three predecessors against fresh Azuifer containers. It checks bytes, range results, metadata, rejected overwrites, ETags, and a hash-matching multipart upload and download of **256 MiB + 1 byte**. Each run publishes the image IDs and per-version outcomes as `azure-cli-compatibility`.
+The [required CI check](https://github.com/monk-eee/azuifer/actions/workflows/rust.yml) runs the current pinned Azure CLI release and its three predecessors against fresh Azuifer containers. It checks bytes, ranges, metadata, rejected overwrites, ETags, and a hash-matching multipart transfer of **256 MiB + 1 byte**. It also checks `az storage fs` and uses the CLI image's Data Lake SDK to read CLI-uploaded bytes over the DFS endpoint. Each run publishes the image IDs and per-version outcomes as `azure-cli-compatibility`.
 
 See [how to run the same matrix locally](docs/compatibility/blob.md#azure-cli). To see the operation inventory from your built image:
 

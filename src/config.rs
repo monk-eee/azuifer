@@ -274,8 +274,14 @@ impl Config {
             for name in value.split(',').map(str::trim) {
                 let account = AccountName::parse(name)
                     .map_err(|_| anyhow::anyhow!("invalid name in hns-accounts"))?;
-                ensure!(accounts.contains_key(&account), "HNS account `{name}` is not configured");
-                ensure!(hns_accounts.insert(account), "duplicate HNS account `{name}`");
+                ensure!(
+                    accounts.contains_key(&account),
+                    "HNS account `{name}` is not configured"
+                );
+                ensure!(
+                    hns_accounts.insert(account),
+                    "duplicate HNS account `{name}`"
+                );
             }
         }
         let manifest: Manifest =

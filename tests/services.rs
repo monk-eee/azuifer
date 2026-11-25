@@ -84,7 +84,7 @@ fn every_enabled_service_listens_on_its_own_port() {
     assert_eq!(ports.len(), 6, "each listener has its own address");
 
     let client = client();
-    for name in ["queue", "table", "dfs", "file"] {
+    for name in ["queue", "table", "file"] {
         let response = client
             .get(format!("{}/devstoreaccount1", server.urls[name]))
             .send()
@@ -97,6 +97,16 @@ fn every_enabled_service_listens_on_its_own_port() {
             .contains("json");
         assert_eq!(json, name == "table", "{name} error format");
     }
+    let dfs = client
+        .get(format!(
+            "{}/devstoreaccount1?resource=account",
+            server.urls["dfs"]
+        ))
+        .header("x-ms-version", "2023-11-03")
+        .send()
+        .unwrap();
+    assert_eq!(dfs.status(), 403);
+    assert_eq!(dfs.headers()["x-ms-error-code"], "AuthorizationFailure");
     let blob = client
         .get(format!("{}/devstoreaccount1", server.urls["blob"]))
         .send()

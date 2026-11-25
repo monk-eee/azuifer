@@ -39,18 +39,18 @@ pub(crate) async fn serve(config: Config, shutdown_on_stdin_eof: bool) -> anyhow
         .await
         .context("could not bind the admin listener")?;
     let admin_address = admin.local_addr()?;
-    let namespace = if config.services.contains(&Service::Blob)
-        || config.services.contains(&Service::Dfs)
-    {
-        let location = config.location.clone();
-        let memory_limit = config.memory_limit;
-        let store = tokio::task::spawn_blocking(move || Store::open(location.as_deref(), memory_limit))
-            .await
-            .context("storage initialization did not complete")??;
-        Some((store, Arc::new(Semaphore::new(16))))
-    } else {
-        None
-    };
+    let namespace =
+        if config.services.contains(&Service::Blob) || config.services.contains(&Service::Dfs) {
+            let location = config.location.clone();
+            let memory_limit = config.memory_limit;
+            let store =
+                tokio::task::spawn_blocking(move || Store::open(location.as_deref(), memory_limit))
+                    .await
+                    .context("storage initialization did not complete")??;
+            Some((store, Arc::new(Semaphore::new(16))))
+        } else {
+            None
+        };
     let mut services = Vec::new();
     for service in Service::ALL {
         if !config.services.contains(&service) {
@@ -555,12 +555,7 @@ fn error_response(error: Error) -> Response {
     };
     let mut response = wire::xml_error(status, code, message);
     if let Error::InvalidRange(length) = error
-        && set(
-            response.headers_mut(),
-            "content-range",
-            &format!("bytes */{length}"),
-        )
-        .is_err()
+        && wire::unsatisfied_range(response.headers_mut(), length).is_err()
     {
         return error_response(Error::Internal);
     }

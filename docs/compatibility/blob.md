@@ -31,7 +31,7 @@ Blob names are case-sensitive database keys, not filenames. The [HTTP suite](../
 
 The [Azure CLI matrix](../../tests/azure_cli_matrix.py) tests the newest pinned stable release and the three before it. Each official CLI image is [pinned by digest](../../tests/azure_cli_versions.json), and the suite checks the installed version before running the same [storage workflows](../../tests/azure_cli.py): create/list, upload, rejected overwrite, ETag-conditioned read and delete, exact byte ranges, metadata, and a SHA-256-verified multipart transfer of 256 MiB plus one byte.
 
-Each CLI gets a fresh non-root Azuifer container with a read-only root, isolated loopback, and a synthetic Shared Key. The [CI workflow](../../.github/workflows/rust.yml) fails if any version fails and uploads `azure-cli-compatibility`, a JSON report identifying the tested images, Blob API baseline, and results. This proves these CLI workflows against the container; tests against real Azure are separate.
+Each CLI gets a fresh non-root Azuifer container with a read-only root, isolated loopback, and a synthetic Shared Key. The matrix also checks that `az storage fs` and the [DFS endpoint](dfs.md) can read the same data. The [CI workflow](../../.github/workflows/rust.yml) fails if any version fails and uploads `azure-cli-compatibility`, a JSON report identifying the tested images, API baseline, and results. This proves these workflows against the container; tests against real Azure are separate.
 
 Run the same gate locally with Docker and Python:
 
