@@ -209,11 +209,20 @@ pub(crate) fn xml_error(status: StatusCode, code: &'static str, message: &str) -
     response
 }
 
+fn json_error_value(code: &str, message: &str) -> serde_json::Value {
+    serde_json::json!({
+        "odata.error": { "code": code, "message": { "lang": "en-US", "value": message } }
+    })
+}
+
+/// The JSON error document shared by top-level and batch-part Table errors.
+pub(crate) fn json_error_body(code: &str, message: &str) -> String {
+    json_error_value(code, message).to_string()
+}
+
 /// Azure-shaped JSON error used by the Table service.
 pub(crate) fn json_error(status: StatusCode, code: &'static str, message: &str) -> Response {
-    let body = serde_json::json!({
-        "odata.error": { "code": code, "message": { "lang": "en-US", "value": message } }
-    });
+    let body = json_error_value(code, message);
     let mut response = json_response(
         status,
         body,

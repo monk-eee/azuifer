@@ -93,19 +93,24 @@ fn every_enabled_service_listens_on_its_own_port() {
         .unwrap();
     assert_eq!(queue.status(), 403, "Queue rejects anonymous requests");
     assert_eq!(queue.headers()["x-ms-error-code"], "AuthenticationFailed");
-    for name in ["table", "file"] {
-        let response = client
-            .get(format!("{}/devstoreaccount1", server.urls[name]))
-            .send()
-            .unwrap();
-        assert_eq!(response.status(), 501, "{name}");
-        assert_eq!(response.headers()["x-ms-error-code"], "NotImplemented");
-        let json = response.headers()["content-type"]
+    let table = client
+        .get(format!("{}/devstoreaccount1/Tables", server.urls["table"]))
+        .send()
+        .unwrap();
+    assert_eq!(table.status(), 403, "Table rejects anonymous requests");
+    assert_eq!(table.headers()["x-ms-error-code"], "AuthenticationFailed");
+    assert!(
+        table.headers()["content-type"]
             .to_str()
             .unwrap()
-            .contains("json");
-        assert_eq!(json, name == "table", "{name} error format");
-    }
+            .contains("json")
+    );
+    let file = client
+        .get(format!("{}/devstoreaccount1", server.urls["file"]))
+        .send()
+        .unwrap();
+    assert_eq!(file.status(), 501, "file");
+    assert_eq!(file.headers()["x-ms-error-code"], "NotImplemented");
     let dfs = client
         .get(format!(
             "{}/devstoreaccount1?resource=account",
