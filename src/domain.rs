@@ -1,4 +1,4 @@
-use crate::{conditions::Guard, lease::LeaseView};
+use crate::{blob_tags::Tags, conditions::Guard, lease::LeaseView, stamp::Ticks};
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
@@ -67,6 +67,10 @@ pub(crate) enum Error {
     CorsPreflight,
     SourceConditionNotMet,
     Page(crate::blob_page::PageError),
+    SnapshotsPresent,
+    InvalidTag,
+    TagsTooLarge,
+    InvalidInput,
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -273,6 +277,8 @@ pub(crate) struct Entity {
     pub(crate) id: Uuid,
     pub(crate) tag: Uuid,
     pub(crate) modified: u64,
+    /// The version id of a blob in an account with versioning enabled.
+    pub(crate) version: Option<Ticks>,
 }
 
 impl Entity {
@@ -473,6 +479,8 @@ pub(crate) struct BlobWrite {
     pub(crate) copy: Option<CopyRecord>,
     /// The `x-ms-blob-content-md5` property, which replaces the computed digest.
     pub(crate) md5: Option<[u8; 16]>,
+    /// The `x-ms-tags` blob index tags; a write replaces the blob's tags with these.
+    pub(crate) tags: Tags,
 }
 
 pub(crate) struct BlobInfo {
@@ -489,6 +497,8 @@ pub(crate) struct BlobInfo {
     /// True for a blob that exists only as uncommitted blocks (listings only).
     pub(crate) uncommitted: bool,
     pub(crate) kind: crate::blob_page::BlobKind,
+    /// Blob index tags of a blob read for a single-blob operation; empty in listings.
+    pub(crate) tags: Tags,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -557,6 +567,10 @@ pub(crate) enum Include {
     Metadata,
     Copy,
     Uncommitted,
+    Snapshots,
+    Versions,
+    Deleted,
+    Tags,
 }
 
 pub(crate) struct ListRequest {

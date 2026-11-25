@@ -6,6 +6,7 @@ use crate::{
     blob_auth::Credentials,
     blob_copy,
     blob_sas::Connection,
+    blob_snapshot,
     checksum::{Checksums, Hasher},
     domain::{AccountName, BlobInfo, BlobWrite, BlockList, CopyRecord, Error, Result},
     lease::LeaseAction,
@@ -119,6 +120,9 @@ pub(crate) async fn execute(
             Ok(empty(StatusCode::ACCEPTED))
         }
         Operation::ListBlobs(key, request, lease) => {
+            if blob_snapshot::is_extended(&request.include) {
+                return blob_snapshot::list(app, key, request, lease).await;
+            }
             let endpoint = storage_endpoint(app, key.account.as_str());
             let name = key.name.as_str().to_owned();
             let prefix = request.page.prefix.clone();
@@ -238,8 +242,10 @@ pub(crate) async fn execute(
         Operation::CopyBlob(key, options, request) => {
             let replace_metadata = request.replace_metadata;
             let resolved = resolve_source(app, ctx, &request).await?;
-            if let Some(response) =
-                page::copy_ranges(app, &key, &options, &resolved, &request).await?
+            // Snapshots and versions only hold block blobs, so a selected source never copies ranges.
+            if resolved.selector.is_none()
+                && let Some(response) =
+                    page::copy_ranges(app, &key, &options, &resolved, &request).await?
             {
                 return Ok(response);
             }
@@ -260,15 +266,15 @@ pub(crate) async fn execute(
             store.abort_copy(key, copy_id, lease).await?;
             Ok(empty(StatusCode::NO_CONTENT))
         }
-        Operation::DeleteBlob(key, guard) => {
-            store.delete_path(key, guard).await?;
-            Ok(empty(StatusCode::ACCEPTED))
+        Operation::DeleteBlob(key, guard, removal) => {
+            blob_snapshot::delete_response(store.delete_path(key, guard, removal).await?)
         }
         Operation::Page(operation) => page::execute(app, operation, body, ctx).await,
+        other => blob_snapshot::execute(app, other, body, ctx).await,
     }
 }
 
-fn storage_endpoint(app: &App, account: &str) -> String {
+pub(crate) fn storage_endpoint(app: &App, account: &str) -> String {
     format!("http://{}/{account}/", app.address)
 }
 
@@ -308,7 +314,12 @@ async fn read_resolved(
 ) -> Result<(SourceBytes, String)> {
     let source = app
         .store
-        .read_source(resolved.key.clone(), request.guard, request.range)
+        .read_source(
+            resolved.key.clone(),
+            resolved.selector,
+            request.guard,
+            request.range,
+        )
         .await
         .map_err(|error| match error {
             Error::BlobMissing | Error::ContainerMissing => Error::CopySourceMissing,
@@ -363,7 +374,7 @@ fn lease_response(action: LeaseAction, result: LeaseResult) -> Result<Response> 
     Ok(response)
 }
 
-fn block_list_response(list: BlockList) -> Result<Response> {
+pub(crate) fn block_list_response(list: BlockList) -> Result<Response> {
     let mut xml = Xml::root("BlockList", &[]);
     for (tag, blocks) in [
         ("CommittedBlocks", list.committed),
@@ -401,7 +412,7 @@ async fn receive_upload(app: &App, body: Body, options: &UploadOptions) -> Resul
 }
 
 /// Reads a small body (XML) completely and verifies its checksum.
-async fn read_bounded(
+pub(crate) async fn read_bounded(
     app: &App,
     body: Body,
     options: &UploadOptions,

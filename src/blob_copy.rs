@@ -6,6 +6,7 @@ use crate::{
     auth::Query,
     blob_auth::{self, Authorization, Credentials, Target},
     blob_sas::{Connection, Need, Public, Resource, Token},
+    blob_snapshot::{self, Selector},
     config::Config,
     domain::{AccountName, BlobKey, BlobPath, ContainerKey, ContainerName, Error, Result},
     protocol::parse_query,
@@ -32,6 +33,8 @@ pub(crate) struct Resolved {
     pub(crate) key: BlobKey,
     /// The source URL without its query, recorded as the destination's copy source.
     pub(crate) display: String,
+    /// The snapshot or version the source URL names, if any.
+    pub(crate) selector: Option<Selector>,
     sas: Option<Query>,
 }
 
@@ -80,12 +83,17 @@ impl CopySource {
             .map_err(|_| Error::InvalidHeader)?;
         let blob = BlobPath::parse(segments.next().ok_or(Error::InvalidHeader)?.to_owned())
             .map_err(|_| Error::InvalidHeader)?;
-        let sas = self
+        let query = self
             .query
             .as_deref()
             .map(|query| parse_query(Some(query)))
+            .transpose()?;
+        let selector = query
+            .as_ref()
+            .map(blob_snapshot::selector)
             .transpose()?
-            .filter(|query| query.contains_key("sig"));
+            .flatten();
+        let sas = query.filter(|query| query.contains_key("sig"));
         let scheme_free = format!("http://{authority}{}", self.path);
         Ok(Resolved {
             key: BlobKey {
@@ -96,6 +104,7 @@ impl CopySource {
                 path: blob,
             },
             display: scheme_free,
+            selector,
             sas,
         })
     }

@@ -149,6 +149,7 @@ mod tests {
             tier: None,
             copy: None,
             md5: None,
+            tags: Default::default(),
         };
         store
             .create_paged(key.clone(), options, Creation::Append)
@@ -203,6 +204,7 @@ mod tests {
             tier: None,
             copy: None,
             md5: None,
+            tags: Default::default(),
         };
         store
             .create_paged(key("a/b/log"), options(), Creation::Append)

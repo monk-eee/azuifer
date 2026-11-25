@@ -2,7 +2,7 @@ use super::{
     Content, ContentSource, Mode, Store, Uploaded, UploadedData, blob, blob_params,
     blobs::guard_write, check_memory_quota, container, db_error, internal, io_error, namespace,
     open_extent, pages::block_length, read_memory_slice, reclaim, remove_staged, row_uint,
-    save_blob, sqlite_int, staging_file,
+    save_blob, snapshots, sqlite_int, staging_file,
 };
 use crate::{
     blob_page::require_block,
@@ -148,7 +148,16 @@ impl Store {
                 data: assembled,
                 computed_md5: None,
             };
+            let version = snapshots::begin_write(
+                &tx,
+                mode,
+                &key,
+                old.as_ref(),
+                snapshots::Change::Content,
+                now,
+            )?;
             let entity = save_blob(&tx, mode, &key, &options, content, now)?;
+            let entity = snapshots::finish_write(&tx, &key, entity, version, Some(&options.tags))?;
             let discard = remove_staged(&tx, &key)?;
             {
                 let [account, container, name] = blob_params(&key);
@@ -214,6 +223,7 @@ impl Store {
             }
             let entity = blob.map(|blob| blob.entity);
             guard.conditions.check(entity, true)?;
+            guard.conditions.check_tags(blob.map(|blob| &blob.tags))?;
             let committed = if kind == BlockListKind::Uncommitted {
                 None
             } else if let Some(blob) = blob {

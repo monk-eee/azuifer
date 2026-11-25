@@ -2,6 +2,7 @@
 
 use crate::{
     auth::header,
+    blob_tags::{TagFilter, Tags},
     domain::{ETag, Entity, Error, Result},
     lease::LeaseId,
 };
@@ -39,6 +40,7 @@ pub(crate) struct Conditions {
     if_none_match: Option<TagMatch>,
     if_modified_since: Option<u64>,
     if_unmodified_since: Option<u64>,
+    if_tags: Option<TagFilter>,
 }
 
 /// Header names for one set of conditions, e.g. the destination or the copy source.
@@ -47,6 +49,7 @@ pub(crate) struct ConditionHeaders {
     pub(crate) if_none_match: &'static str,
     pub(crate) if_modified_since: &'static str,
     pub(crate) if_unmodified_since: &'static str,
+    pub(crate) if_tags: &'static str,
 }
 
 pub(crate) const STANDARD: ConditionHeaders = ConditionHeaders {
@@ -54,6 +57,7 @@ pub(crate) const STANDARD: ConditionHeaders = ConditionHeaders {
     if_none_match: "if-none-match",
     if_modified_since: "if-modified-since",
     if_unmodified_since: "if-unmodified-since",
+    if_tags: "x-ms-if-tags",
 };
 
 pub(crate) const SOURCE: ConditionHeaders = ConditionHeaders {
@@ -61,6 +65,7 @@ pub(crate) const SOURCE: ConditionHeaders = ConditionHeaders {
     if_none_match: "x-ms-source-if-none-match",
     if_modified_since: "x-ms-source-if-modified-since",
     if_unmodified_since: "x-ms-source-if-unmodified-since",
+    if_tags: "x-ms-source-if-tags",
 };
 
 fn http_seconds(value: &str) -> Result<u64> {
@@ -80,7 +85,19 @@ impl Conditions {
             if_none_match: tag(names.if_none_match)?,
             if_modified_since: date(names.if_modified_since)?,
             if_unmodified_since: date(names.if_unmodified_since)?,
+            if_tags: header(headers, names.if_tags)?
+                .map(|text| TagFilter::parse(text, false).map_err(|_| Error::InvalidHeader))
+                .transpose()?,
         })
+    }
+
+    /// Evaluates `x-ms-if-tags` against the blob's tags; `None` means the blob is absent.
+    pub(crate) fn check_tags(&self, tags: Option<&Tags>) -> Result<()> {
+        match (&self.if_tags, tags) {
+            (None, _) => Ok(()),
+            (Some(filter), Some(tags)) if filter.matches(tags) => Ok(()),
+            _ => Err(Error::ConditionNotMet),
+        }
     }
 
     /// True for `If-None-Match: *`, which Put Blob answers with `BlobAlreadyExists`.
@@ -153,6 +170,7 @@ mod tests {
             id: Uuid::from_u128(n),
             tag: Uuid::from_u128(n),
             modified,
+            version: None,
         }
     }
 

@@ -262,7 +262,9 @@ async fn execute(store: &Store, op: Operation) -> Result<Response> {
             list_paths(entity, page)
         }
         Operation::DeletePath(key, guard) => {
-            store.delete_path(key, guard).await?;
+            store
+                .delete_path(key, guard, crate::blob_snapshot::Removal::default())
+                .await?;
             Ok(empty(StatusCode::ACCEPTED))
         }
         Operation::ReadPath(key, options) => {

@@ -677,7 +677,7 @@ fn listing_uses_opaque_markers_and_rejects_unimplemented_options() {
     error(
         server.request(
             Method::GET,
-            "/testaccount/container?restype=container&comp=list&include=snapshots",
+            "/testaccount/container?restype=container&comp=list&include=immutabilitypolicy",
             &[],
             b"",
         ),
@@ -695,7 +695,7 @@ fn listing_uses_opaque_markers_and_rejects_unimplemented_options() {
         "InvalidHeaderValue",
     );
     error(
-        server.request(Method::PUT, &format!("{BLOB}?comp=snapshot"), &[], b""),
+        server.request(Method::PUT, &format!("{BLOB}?comp=expiry"), &[], b""),
         501,
         "NotImplemented",
     );
@@ -807,7 +807,7 @@ fn newer_version_fallback_is_opt_in_and_does_not_change_auth_or_operations() {
         "AuthenticationFailed",
     );
     error(
-        compatible.request(Method::PUT, &format!("{BLOB}?comp=snapshot"), &newer, b""),
+        compatible.request(Method::PUT, &format!("{BLOB}?comp=expiry"), &newer, b""),
         501,
         "NotImplemented",
     );

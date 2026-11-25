@@ -54,7 +54,11 @@ pub(crate) fn entity_response(status: StatusCode, entity: Entity) -> Result<Resp
 
 pub(crate) fn entity_headers(headers: &mut HeaderMap, entity: Entity) -> Result<()> {
     set(headers, "etag", entity.etag().as_str())?;
-    set(headers, "last-modified", &http_date(entity.modified)?)
+    set(headers, "last-modified", &http_date(entity.modified)?)?;
+    if let Some(version) = entity.version {
+        set(headers, "x-ms-version-id", &version.text())?;
+    }
+    Ok(())
 }
 
 /// Adds a checksum header and the encryption flag Put operations report.
@@ -143,6 +147,12 @@ fn blob_headers(
     set(headers, "x-ms-blob-type", info.kind.name())?;
     kind_headers(headers, info.kind)?;
     set(headers, "x-ms-server-encrypted", "true")?;
+    if !info.tags.is_empty() {
+        set(headers, "x-ms-tag-count", &info.tags.len().to_string())?;
+    }
+    if info.entity.version.is_some() {
+        set(headers, "x-ms-is-current-version", "true")?;
+    }
     headers.insert("accept-ranges", HeaderValue::from_static("bytes"));
     lease_headers(headers, info.lease)?;
     match info.tier {
@@ -388,6 +398,7 @@ pub(crate) fn list_blobs(
                     &info,
                     include.contains(&Include::Copy),
                     hierarchical,
+                    &[],
                 )?;
                 if include.contains(&Include::Metadata) && !info.uncommitted {
                     xml.metadata(info.metadata);
@@ -411,7 +422,14 @@ pub(crate) fn list_blobs(
     Ok(xml.finish("EnumerationResults", StatusCode::OK))
 }
 
-fn blob_properties(xml: &mut Xml, info: &BlobInfo, copy: bool, hierarchical: bool) -> Result<()> {
+/// `extra` adds elements (such as `DeletedTime`) to the end of `Properties`.
+pub(crate) fn blob_properties(
+    xml: &mut Xml,
+    info: &BlobInfo,
+    copy: bool,
+    hierarchical: bool,
+    extra: &[(&str, String)],
+) -> Result<()> {
     xml.open("Properties");
     if info.uncommitted {
         xml.element("Content-Length", "0");
@@ -461,6 +479,9 @@ fn blob_properties(xml: &mut Xml, info: &BlobInfo, copy: bool, hierarchical: boo
         xml.element("CopyCompletionTime", &http_date(copy.completed)?);
     }
     xml.element("ServerEncrypted", "true");
+    for (name, value) in extra {
+        xml.element(name, value);
+    }
     xml.close("Properties");
     Ok(())
 }
@@ -745,6 +766,26 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
             S::NOT_FOUND,
             "CannotVerifyCopySource",
             "Could not verify the copy source: the source does not exist.",
+        ),
+        Error::SnapshotsPresent => (
+            S::CONFLICT,
+            "SnapshotsPresent",
+            "This operation is not permitted while the blob has snapshots.",
+        ),
+        Error::InvalidTag => (
+            S::BAD_REQUEST,
+            "InvalidTag",
+            "The tags specified are invalid. They contain characters that are not permitted.",
+        ),
+        Error::TagsTooLarge => (
+            S::BAD_REQUEST,
+            "TagsTooLarge",
+            "The tags specified exceed the permitted number or length.",
+        ),
+        Error::InvalidInput => (
+            S::BAD_REQUEST,
+            "InvalidInput",
+            "One of the request inputs is not valid.",
         ),
         Error::CorsPreflight => (
             S::FORBIDDEN,

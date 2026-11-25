@@ -84,10 +84,50 @@ CREATE TABLE IF NOT EXISTS blob_extents (
     id BLOB NOT NULL PRIMARY KEY, length INTEGER NOT NULL, bytes BLOB NOT NULL
 ) STRICT;";
 
+/// Version 3 (ADR-0018, ADR-0019): snapshots, versions, and soft-deleted blobs as
+/// `blob_history` rows that reference the same immutable content as the current
+/// blob; their committed block lists; blob index tags; and the accounts that
+/// keep versions. `blobs.version_id` holds the current version's ticks (0: none).
+/// `blob_history.kind` is 1 snapshot, 2 version, 3 soft-deleted blob; `state_id`
+/// is the snapshot or version ticks (0 for a deleted blob); `deleted_at` and
+/// `expires_at` (Unix milliseconds) mark a soft-deleted row until retention ends.
+/// `blob_tags.state` is 0 for the current blob or a version's ticks.
+const V3: &str = "
+ALTER TABLE blobs ADD COLUMN version_id INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS blob_history (
+    account TEXT NOT NULL, container TEXT NOT NULL, name TEXT NOT NULL,
+    kind INTEGER NOT NULL, state_id INTEGER NOT NULL, content_id BLOB NOT NULL,
+    modified INTEGER NOT NULL, etag BLOB NOT NULL, created INTEGER NOT NULL, length INTEGER NOT NULL,
+    content_type TEXT NOT NULL, content_encoding TEXT NOT NULL, content_language TEXT NOT NULL,
+    content_disposition TEXT NOT NULL, cache_control TEXT NOT NULL, md5 TEXT NOT NULL,
+    metadata TEXT NOT NULL, access_tier TEXT NOT NULL, access_tier_changed INTEGER NOT NULL,
+    copy_id TEXT NOT NULL, copy_source TEXT NOT NULL, copy_completed INTEGER NOT NULL,
+    bytes BLOB, deleted_at INTEGER, expires_at INTEGER,
+    PRIMARY KEY (account, container, name, kind, state_id),
+    FOREIGN KEY (account, container) REFERENCES containers (account, name) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX IF NOT EXISTS blob_history_content ON blob_history (content_id);
+CREATE TABLE IF NOT EXISTS history_blocks (
+    account TEXT NOT NULL, container TEXT NOT NULL, name TEXT NOT NULL,
+    kind INTEGER NOT NULL, state_id INTEGER NOT NULL,
+    position INTEGER NOT NULL, block_id TEXT NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL,
+    PRIMARY KEY (account, container, name, kind, state_id, position),
+    FOREIGN KEY (account, container, name, kind, state_id)
+        REFERENCES blob_history (account, container, name, kind, state_id) ON DELETE CASCADE
+) STRICT;
+CREATE TABLE IF NOT EXISTS blob_tags (
+    account TEXT NOT NULL, container TEXT NOT NULL, name TEXT NOT NULL,
+    state INTEGER NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+    PRIMARY KEY (account, container, name, state, key),
+    FOREIGN KEY (account, container) REFERENCES containers (account, name) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX IF NOT EXISTS blob_tags_lookup ON blob_tags (account, key, value);
+CREATE TABLE IF NOT EXISTS versioned_accounts (account TEXT NOT NULL PRIMARY KEY) STRICT;";
+
 /// Each migration is keyed by the `PRAGMA user_version` it leaves behind. Numbers
-/// need not be consecutive here: branches that add migrations in parallel reserve
-/// their own number, and a database applies every migration above its version.
-const MIGRATIONS: &[(i64, &str)] = &[(1, V1), (2, super::namespace::SCHEMA), (4, V4)];
+/// need not be consecutive: branches that add migrations in parallel reserve their
+/// own number, and a database applies every migration above its version.
+const MIGRATIONS: &[(i64, &str)] = &[(1, V1), (2, super::namespace::SCHEMA), (3, V3), (4, V4)];
 
 pub(super) fn migrate(db: &mut Connection) -> rusqlite::Result<()> {
     db.execute_batch(BASE)?;
@@ -163,5 +203,46 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM blob_ranges", [], |row| row.get(0))
             .unwrap();
         assert_eq!(ranges, 0, "deleting a blob drops its ranges");
+    }
+
+    #[test]
+    fn snapshot_history_tags_and_versioned_accounts_arrive_with_their_migration() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(BASE).unwrap();
+        db.execute_batch(V1).unwrap();
+        db.pragma_update(None, "user_version", 1).unwrap();
+        db.execute_batch(
+            "INSERT INTO containers (account, name, id, modified) VALUES ('acct', 'box', x'01', 5);
+             INSERT INTO blobs (account, container, name, id, modified, length, content_type, md5, metadata)
+             VALUES ('acct', 'box', 'a', x'02', 7, 3, 'text/plain', '', '{}');",
+        )
+        .unwrap();
+        migrate(&mut db).unwrap();
+        db.execute_batch(
+            "INSERT INTO versioned_accounts VALUES ('acct');
+             INSERT INTO blob_tags VALUES ('acct', 'box', 'a', 0, 'k', 'v');",
+        )
+        .unwrap();
+        let (version_id, history): (i64, i64) = db
+            .query_row(
+                "SELECT (SELECT version_id FROM blobs), (SELECT COUNT(*) FROM blob_history)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((version_id, history), (0, 0));
+    }
+
+    #[test]
+    fn a_migration_applies_after_a_gap_in_the_numbering() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(BASE).unwrap();
+        db.execute_batch(V1).unwrap();
+        db.execute_batch("PRAGMA user_version = 2").unwrap();
+        migrate(&mut db).unwrap();
+        let version: i64 = db
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
     }
 }

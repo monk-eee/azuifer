@@ -8,13 +8,17 @@ mod namespace;
 mod pages;
 mod schema;
 mod service;
+mod snapshots;
+mod tags;
 
+use crate::blob_tags::Tags;
 use crate::checksum::{Checksum, Checksums, Hasher};
 use crate::clock::Clock;
 use crate::domain::{
     BlobInfo, BlobKey, ContainerKey, ContentHeaders, ContentLength, CopyInfo, Entity, Error, Result,
 };
 use crate::lease::{LeaseId, LeaseKind, StoredLease};
+use crate::stamp::Ticks;
 use anyhow::Context as _;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::{Connection, OptionalExtension as _, Row, params};
@@ -34,6 +38,8 @@ pub(crate) use append::Appended;
 pub(crate) use containers::LeaseResult;
 pub(crate) use copy::SourceBytes;
 pub(crate) use pages::{PageRanges, PageWritten, RangeBody};
+pub(crate) use snapshots::{Deletion, ExtendedListing, Listed, Selected};
+pub(crate) use tags::TaggedBlob;
 
 #[derive(Clone)]
 pub(crate) struct Store(Arc<Inner>);
@@ -46,14 +52,23 @@ struct Inner {
 }
 
 enum Mode {
-    Disk { extents: PathBuf, _lock: File },
-    Memory { limit: u64 },
+    Disk {
+        extents: PathBuf,
+        _lock: File,
+        /// Extents that snapshots, versions, or soft-deleted blobs still reference.
+        pinned: snapshots::Pinned,
+    },
+    Memory {
+        limit: u64,
+    },
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum ContentSource {
     Blob,
     StagedBlock,
+    /// Bytes held by a history row; only the in-memory backend keeps them in the row.
+    History,
 }
 
 pub(crate) struct Upload {
@@ -144,6 +159,7 @@ impl Store {
                 Mode::Disk {
                     extents,
                     _lock: lock,
+                    pinned: Default::default(),
                 },
             )
         } else {
@@ -157,9 +173,12 @@ impl Store {
         db.pragma_update(None, "foreign_keys", true)?;
         schema::migrate(&mut db).context("could not migrate metadata")?;
         namespace::restore_parents(&mut db, &hns_accounts, clock.now_millis())?;
+        snapshots::load_pins(&db, &mode).context("could not load retained content")?;
         if let Mode::Disk { extents, .. } = &mode {
             recover(&db, extents).context("could not recover unreferenced content")?;
         }
+        snapshots::purge_at_open(&db, &mode, clock.now_millis())
+            .context("could not purge expired deleted content")?;
         Ok(Self(Arc::new(Inner {
             db: Mutex::new(db),
             mode,
@@ -322,6 +341,10 @@ fn read_memory_slice(
         ContentSource::StagedBlock => {
             "SELECT COALESCE(substr(bytes, ?2, ?3), bytes) FROM staged_blocks WHERE id=?1"
         }
+        ContentSource::History => {
+            "SELECT COALESCE(substr(bytes, ?2, ?3), bytes) FROM blob_history
+             WHERE content_id=?1 AND bytes IS NOT NULL LIMIT 1"
+        }
     };
     let bytes: Vec<u8> = db
         .query_row(
@@ -360,7 +383,8 @@ fn remove_staged(db: &Connection, key: &BlobKey) -> Result<Vec<Uuid>> {
 fn check_memory_quota(db: &Connection, mode: &Mode, removed: u64, added: u64) -> Result<()> {
     if let Mode::Memory { limit } = mode {
         let stored = db.query_row(
-            "SELECT (SELECT COALESCE(SUM(length),0) FROM blobs WHERE blob_type=0) + (SELECT COALESCE(SUM(length),0) FROM staged_blocks) + (SELECT COALESCE(SUM(length),0) FROM blob_extents)",
+            "SELECT (SELECT COALESCE(SUM(length),0) FROM blobs WHERE blob_type=0) + (SELECT COALESCE(SUM(length),0) FROM staged_blocks) + (SELECT COALESCE(SUM(length),0) FROM blob_extents)
+                    + (SELECT COALESCE(SUM(length),0) FROM blob_history WHERE bytes IS NOT NULL)",
             [], |row| row_uint(row, 0),
         ).map_err(db_error)?;
         let remaining = stored
@@ -492,17 +516,27 @@ fn container(db: &Connection, key: &ContainerKey) -> Result<Entity> {
 }
 
 fn blob(db: &Connection, key: &BlobKey, now: i64) -> Result<Option<BlobRow>> {
-    db.query_row(
-        &format!("SELECT {BLOB_COLUMNS} FROM blobs WHERE account=?1 AND container=?2 AND name=?3"),
-        params![
-            key.container.account.as_str(),
-            key.container.name.as_str(),
-            key.path.as_str()
-        ],
-        |row| blob_row(row, now),
-    )
-    .optional()
-    .map_err(db_error)
+    let row = db
+        .query_row(
+            &format!(
+                "SELECT {BLOB_COLUMNS}, version_id FROM blobs
+                 WHERE account=?1 AND container=?2 AND name=?3"
+            ),
+            params![
+                key.container.account.as_str(),
+                key.container.name.as_str(),
+                key.path.as_str()
+            ],
+            |row| {
+                let mut blob = blob_row(row, now)?;
+                let version: i64 = row.get(BLOB_COLUMN_COUNT)?;
+                blob.info.entity.version = (version != 0).then_some(Ticks(version));
+                Ok(blob)
+            },
+        )
+        .optional()
+        .map_err(db_error)?;
+    row.map(|row| tags::attach(db, key, row)).transpose()
 }
 
 fn require_blob(db: &Connection, key: &BlobKey, now: i64) -> Result<BlobRow> {
@@ -519,6 +553,7 @@ fn entity_row(row: &Row<'_>) -> rusqlite::Result<Entity> {
         id: row.get(0)?,
         modified: row_uint(row, 1)?,
         tag: row.get(2)?,
+        version: None,
     })
 }
 
@@ -613,6 +648,7 @@ fn blob_row(row: &Row<'_>, now: i64) -> rusqlite::Result<BlobRow> {
                 row.get(23)?,
                 row.get(24)?,
             ),
+            tags: Tags::new(),
         },
         lease,
     })
@@ -624,6 +660,7 @@ fn new_entity(now: i64) -> Result<Entity> {
         id,
         tag: id,
         modified: seconds(now)?,
+        version: None,
     })
 }
 
@@ -664,7 +701,8 @@ fn recover(db: &Connection, dir: &Path) -> anyhow::Result<()> {
             .and_then(|id| Uuid::parse_str(id).ok())
         {
             !db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM blobs WHERE id=?1 UNION ALL SELECT 1 FROM staged_blocks WHERE id=?1 UNION ALL SELECT 1 FROM blob_ranges WHERE extent=?1)",
+                "SELECT EXISTS(SELECT 1 FROM blobs WHERE id=?1 UNION ALL SELECT 1 FROM staged_blocks WHERE id=?1 UNION ALL SELECT 1 FROM blob_ranges WHERE extent=?1
+                 UNION ALL SELECT 1 FROM blob_history WHERE content_id=?1)",
                 [id],
                 |row| row.get::<_, bool>(0),
             )?
@@ -679,7 +717,10 @@ fn recover(db: &Connection, dir: &Path) -> anyhow::Result<()> {
 }
 
 fn reclaim(mode: &Mode, id: Uuid) {
-    if let Mode::Disk { extents, .. } = mode
+    if let Mode::Disk {
+        extents, pinned, ..
+    } = mode
+        && !snapshots::is_pinned(pinned, id)
         && let Err(error) = fs::remove_file(extent(extents, id))
         && error.kind() != std::io::ErrorKind::NotFound
     {

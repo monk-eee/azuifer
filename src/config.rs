@@ -56,6 +56,9 @@ pub(crate) struct Options {
     /// Comma-separated configured accounts with the DFS namespace enabled.
     #[arg(long, env = "AZUIFER_HNS_ACCOUNTS", global = true)]
     hns_accounts: Option<String>,
+    /// Comma-separated configured accounts with Blob versioning enabled.
+    #[arg(long, env = "AZUIFER_VERSIONING_ACCOUNTS", global = true)]
+    versioning_accounts: Option<String>,
     #[arg(long, env = "AZUIFER_FILE_PORT", global = true)]
     file_port: Option<u16>,
 }
@@ -125,6 +128,7 @@ struct FileConfig {
     table_port: Option<u16>,
     dfs_port: Option<u16>,
     hns_accounts: Option<String>,
+    versioning_accounts: Option<String>,
     file_port: Option<u16>,
     accounts: Vec<AccountConfig>,
 }
@@ -159,6 +163,7 @@ pub(crate) struct Config {
     pub(crate) skip_api_version_check: bool,
     pub(crate) accounts: HashMap<AccountName, Vec<Vec<u8>>>,
     pub(crate) hns_accounts: HashSet<AccountName>,
+    pub(crate) versioning_accounts: HashSet<AccountName>,
     pub(crate) api_version: ApiVersion,
 }
 
@@ -300,6 +305,11 @@ impl Config {
                 );
             }
         }
+        let versioning_accounts = account_list(
+            options.versioning_accounts.or(file.versioning_accounts),
+            &accounts,
+            "versioning-accounts",
+        )?;
         let test_clock = options.test_clock.or(file.test_clock).unwrap_or(false);
         ensure!(
             !test_clock || binding.is_loopback(),
@@ -330,9 +340,38 @@ impl Config {
                 .unwrap_or(false),
             accounts,
             hns_accounts,
+            versioning_accounts,
             api_version,
         })
     }
+}
+
+fn account_list(
+    value: Option<String>,
+    accounts: &HashMap<AccountName, Vec<Vec<u8>>>,
+    option: &str,
+) -> Result<HashSet<AccountName>> {
+    let mut selected = HashSet::new();
+    for name in value
+        .iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+    {
+        if name.is_empty() {
+            continue;
+        }
+        let account =
+            AccountName::parse(name).map_err(|_| anyhow::anyhow!("invalid name in {option}"))?;
+        ensure!(
+            accounts.contains_key(&account),
+            "account `{name}` in {option} is not configured"
+        );
+        ensure!(
+            selected.insert(account),
+            "duplicate account `{name}` in {option}"
+        );
+    }
+    Ok(selected)
 }
 
 fn load_accounts(

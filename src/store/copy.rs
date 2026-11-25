@@ -1,8 +1,9 @@
 use super::{
-    ContentSource, Mode, Store, Uploaded, UploadedData, io_error, open_extent, read_memory_slice,
-    require_blob, staging_file,
+    Mode, Store, Uploaded, UploadedData, io_error, open_extent, read_memory_slice, snapshots,
+    staging_file,
 };
 use crate::{
+    blob_snapshot::Selector,
     checksum::Hasher,
     conditions::Guard,
     domain::{AccessTier, BlobInfo, BlobKey, ByteRange, ContentLength, Error, Result},
@@ -19,17 +20,26 @@ pub(crate) struct SourceBytes {
 impl Store {
     /// Reads a source blob (or a range of it) into a staged upload that Put Blob,
     /// Put Block, or a copy can publish. Source conditions and its lease are
-    /// checked here; a failed condition is `SourceConditionNotMet`.
+    /// checked here; a failed condition is `SourceConditionNotMet`. A selector
+    /// reads a snapshot or version instead of the current blob.
     pub(crate) async fn read_source(
         &self,
         key: BlobKey,
+        selector: Option<Selector>,
         guard: Guard,
         range: Option<ByteRange>,
     ) -> Result<SourceBytes> {
         self.run(move |db, mode, now| {
-            let row = require_blob(db, &key, now)?;
+            let (row, source) = snapshots::resolve_source(db, &key, selector, now)?;
             row.lease
                 .check(guard.lease, LeaseNeed::Optional, LeaseOwner::Blob, now)?;
+            guard
+                .conditions
+                .check_tags(Some(&row.info.tags))
+                .map_err(|error| match error {
+                    Error::ConditionNotMet => Error::SourceConditionNotMet,
+                    other => other,
+                })?;
             guard
                 .conditions
                 .check(Some(row.info.entity), false)
@@ -70,13 +80,8 @@ impl Store {
                     UploadedData::Disk(temp)
                 }
                 Mode::Memory { .. } => {
-                    let bytes = read_memory_slice(
-                        db,
-                        ContentSource::Blob,
-                        info.entity.id,
-                        window.start,
-                        length,
-                    )?;
+                    let bytes =
+                        read_memory_slice(db, source, info.entity.id, window.start, length)?;
                     hasher.update(&bytes);
                     UploadedData::Memory(bytes)
                 }

@@ -57,6 +57,16 @@ pub(crate) async fn serve(config: Config, shutdown_on_stdin_eof: bool) -> anyhow
             })
             .await
             .context("storage initialization did not complete")??;
+            store
+                .enable_versioning(
+                    config
+                        .versioning_accounts
+                        .iter()
+                        .map(|account| account.as_str().to_owned())
+                        .collect(),
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("could not apply the versioning settings"))?;
             Some((store, Arc::new(Semaphore::new(16))))
         } else {
             None

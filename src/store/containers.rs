@@ -1,6 +1,6 @@
 use super::{
     Store, db_error, entity_row, internal, lease_row, metadata_column, new_entity, reclaim,
-    sqlite_int, write_lease,
+    snapshots, sqlite_int, write_lease,
 };
 use crate::{
     conditions::Guard,
@@ -241,13 +241,15 @@ impl Store {
                 Vec::new()
             };
             reclaimed.extend(super::pages::retire_container(&tx, mode, &key)?);
+            let retained = snapshots::history_ids(&tx, &key)?;
             tx.execute(
                 "DELETE FROM containers WHERE account=?1 AND name=?2",
                 values,
             )
             .map_err(db_error)?;
             tx.commit().map_err(db_error)?;
-            for id in reclaimed {
+            snapshots::unpin_all(mode, &retained);
+            for id in reclaimed.into_iter().chain(retained) {
                 reclaim(mode, id);
             }
             Ok(())

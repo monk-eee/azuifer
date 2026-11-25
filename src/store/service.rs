@@ -37,7 +37,10 @@ impl Store {
     }
 }
 
-fn stored(db: &rusqlite::Connection, account: &AccountName) -> Result<ServiceProperties> {
+pub(super) fn stored(
+    db: &rusqlite::Connection,
+    account: &AccountName,
+) -> Result<ServiceProperties> {
     let json: Option<String> = db
         .query_row(
             "SELECT service_properties FROM account_settings WHERE account=?1",

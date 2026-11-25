@@ -2,8 +2,11 @@ use crate::{
     address,
     auth::{Query, header},
     blob_auth::{self, Credentials, Presented, Target},
+    blob_batch,
     blob_copy::CopySource,
     blob_sas::{self, Need, Public},
+    blob_snapshot::{self, Removal, Selector},
+    blob_tags::TagFilter,
     checksum::Checksum,
     conditions::{self, Conditions, Guard, lease_id},
     config::Config,
@@ -14,6 +17,7 @@ use crate::{
         PageRequest, PublicAccess, RangeChecksum, Result, xml_safe,
     },
     lease::{LeaseAction, LeaseDuration, LeaseId},
+    stamp::Ticks,
 };
 use axum::http::{HeaderMap, Method, request::Parts};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -26,6 +30,7 @@ mod page;
 const MAX_BLOCK_LIST_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_XML_BODY_BYTES: u64 = 1024 * 1024;
 const MAX_COMMITTED_BLOCKS: usize = 50_000;
+const MAX_BATCH_BYTES: u64 = 4 * 1024 * 1024;
 
 const CONDITIONS: &[&str] = &[
     "if-match",
@@ -35,6 +40,8 @@ const CONDITIONS: &[&str] = &[
 ];
 const DATE_CONDITIONS: &[&str] = &["if-modified-since", "if-unmodified-since"];
 const LEASE: &[&str] = &["x-ms-lease-id"];
+const TAGS: &[&str] = &["x-ms-tags"];
+const TAG_CONDITION: &[&str] = &["x-ms-if-tags"];
 const CHECKSUMS: &[&str] = &["content-md5", "x-ms-content-crc64"];
 const BLOB_PROPERTIES: &[&str] = &[
     "x-ms-blob-content-type",
@@ -92,6 +99,9 @@ const READ_BLOB: Need = need(Some("r"), Some(('o', "r")), Public::Blob);
 const CREATE_BLOB: Need = need(Some("wc"), Some(('o', "wc")), Public::Never);
 const WRITE_BLOB: Need = need(Some("w"), Some(('o', "w")), Public::Never);
 const DELETE_BLOB: Need = need(Some("d"), Some(('o', "d")), Public::Never);
+const BLOB_TAGS: Need = need(Some("t"), Some(('o', "t")), Public::Never);
+const FIND_BLOBS_ACCOUNT: Need = need(None, Some(('o', "f")), Public::Never);
+const FIND_BLOBS_CONTAINER: Need = need(Some("f"), Some(('o', "f")), Public::Never);
 
 pub(crate) enum ContainerView {
     Properties,
@@ -106,6 +116,12 @@ pub(crate) struct SourceRequest {
     pub(crate) copy_properties: bool,
     /// Copy Blob: any `x-ms-meta-*` header replaces the source metadata.
     pub(crate) replace_metadata: bool,
+}
+
+/// The parsed envelope of a Submit Batch request.
+pub(crate) struct BatchRequest {
+    pub(crate) boundary: String,
+    pub(crate) upload: UploadOptions,
 }
 
 pub(crate) enum Operation {
@@ -128,7 +144,16 @@ pub(crate) enum Operation {
     PutBlockFromUrl(BlobKey, BlockId, Option<LeaseId>, SourceRequest),
     PutBlockList(BlobKey, UploadOptions, BlobWrite),
     GetBlockList(BlobKey, BlockListKind, Guard),
+    BlocksSelected(BlobKey, Selector, BlockListKind, Guard),
     ReadBlob(BlobKey, BlobRead),
+    /// A read of a snapshot or version; the flag asks for metadata only.
+    ReadSelected(BlobKey, Selector, BlobRead, bool),
+    SnapshotBlob(BlobKey, Option<Metadata>, Guard),
+    UndeleteBlob(BlobKey),
+    SetBlobTags(BlobKey, Option<Ticks>, UploadOptions, Guard),
+    GetBlobTags(BlobKey, Option<Ticks>, Guard),
+    FindBlobs(AccountName, Option<ContainerKey>, TagFilter, PageRequest),
+    SubmitBatch(Option<ContainerKey>, BatchRequest),
     BlobMetadata(BlobKey, Guard),
     SetBlobProperties(
         BlobKey,
@@ -143,7 +168,7 @@ pub(crate) enum Operation {
     LeaseBlob(BlobKey, LeaseAction, Conditions),
     CopyBlob(BlobKey, BlobWrite, SourceRequest),
     AbortCopy(BlobKey, String, Option<LeaseId>),
-    DeleteBlob(BlobKey, Guard),
+    DeleteBlob(BlobKey, Guard, Removal),
     Page(crate::blob_page::PageOperation),
 }
 
@@ -214,6 +239,26 @@ struct Request<'a> {
 }
 
 pub(crate) fn parse(parts: &Parts, config: &Config, now: SystemTime) -> Result<ParsedRequest> {
+    parse_with(parts, config, now, None)
+}
+
+/// Parses a Submit Batch sub-request. It carries no `x-ms-version` of its own
+/// and runs at the version of the batch request.
+pub(crate) fn parse_batched(
+    parts: &Parts,
+    config: &Config,
+    now: SystemTime,
+    version: &str,
+) -> Result<ParsedRequest> {
+    parse_with(parts, config, now, Some(version))
+}
+
+fn parse_with(
+    parts: &Parts,
+    config: &Config,
+    now: SystemTime,
+    inherited: Option<&str>,
+) -> Result<ParsedRequest> {
     let headers = &parts.headers;
     if headers.len() > 100
         || headers
@@ -230,6 +275,7 @@ pub(crate) fn parse(parts: &Parts, config: &Config, now: SystemTime) -> Result<P
         None if !headers.contains_key("authorization") => {
             ApiVersion::parse(config.api_version.as_str())?
         }
+        None if inherited.is_some() => ApiVersion::parse(inherited.unwrap_or_default())?,
         None => return Err(Error::InvalidVersion),
     };
     if requested_version != config.api_version
@@ -306,7 +352,17 @@ impl Operation {
             | Self::PutBlockFromUrl(..)
             | Self::PutBlockList(..)
             | Self::CopyBlob(..) => CREATE_BLOB,
-            Self::GetBlockList(..) | Self::ReadBlob(..) | Self::BlobMetadata(..) => READ_BLOB,
+            Self::GetBlockList(..)
+            | Self::BlocksSelected(..)
+            | Self::ReadBlob(..)
+            | Self::ReadSelected(..)
+            | Self::BlobMetadata(..) => READ_BLOB,
+            Self::SnapshotBlob(..) => CREATE_BLOB,
+            Self::UndeleteBlob(..) => WRITE_BLOB,
+            Self::SetBlobTags(..) | Self::GetBlobTags(..) => BLOB_TAGS,
+            Self::FindBlobs(_, None, ..) => FIND_BLOBS_ACCOUNT,
+            Self::FindBlobs(_, Some(_), ..) => FIND_BLOBS_CONTAINER,
+            Self::SubmitBatch(..) => ANY_SAS,
             Self::SetBlobProperties(..)
             | Self::SetBlobMetadata(..)
             | Self::SetBlobTier(..)
@@ -370,7 +426,27 @@ impl Request<'_> {
                 self.check(&["restype", "comp"], &[], false)?;
                 Operation::AccountInfo
             }
+            (&Method::GET, None, Some("blobs")) => {
+                self.check(&["comp", "where", "marker", "maxresults"], &[], false)?;
+                Operation::FindBlobs(account, None, self.filter()?, self.listing()?)
+            }
+            (&Method::POST, None, Some("batch")) => {
+                self.check(&["comp"], &[], false)?;
+                Operation::SubmitBatch(None, self.batch()?)
+            }
             _ => return Err(Error::Unsupported),
+        })
+    }
+
+    fn filter(&self) -> Result<TagFilter> {
+        TagFilter::parse(self.param("where").ok_or(Error::InvalidQuery)?, true)
+    }
+
+    fn batch(&self) -> Result<BatchRequest> {
+        let content_type = header(self.headers, "content-type")?.ok_or(Error::MissingHeader)?;
+        Ok(BatchRequest {
+            boundary: blob_batch::boundary(content_type)?,
+            upload: upload_options(self.headers, MAX_BATCH_BYTES)?,
         })
     }
 
@@ -473,6 +549,22 @@ impl Request<'_> {
                     lease()?,
                 )
             }
+            (Some("container"), Some("blobs")) if *self.method == Method::GET => {
+                self.check(
+                    &["restype", "comp", "where", "marker", "maxresults"],
+                    &[],
+                    false,
+                )?;
+                // The container is the scope, so `@container` is not a valid term here.
+                let filter =
+                    TagFilter::parse(self.param("where").ok_or(Error::InvalidQuery)?, false)?;
+                let account = key.account.clone();
+                Operation::FindBlobs(account, Some(key), filter, self.listing()?)
+            }
+            (Some("container"), Some("batch")) if *self.method == Method::POST => {
+                self.check(&["restype", "comp"], &[], false)?;
+                Operation::SubmitBatch(Some(key), self.batch()?)
+            }
             (Some("account"), Some("properties")) if reading => {
                 self.check(&["restype", "comp"], &[], false)?;
                 Operation::AccountInfo
@@ -496,6 +588,7 @@ impl Request<'_> {
         if let Some(operation) = self.page_operation(&key)? {
             return Ok(Operation::Page(operation));
         }
+        let selector = blob_snapshot::selector(self.query)?;
         Ok(match (self.method, comp) {
             (&Method::PUT, None) if self.headers.contains_key("x-ms-copy-source") => {
                 if header(self.headers, "x-ms-blob-type")?.is_some() {
@@ -507,6 +600,7 @@ impl Request<'_> {
                                 "x-ms-copy-source-blob-properties",
                                 "x-ms-access-tier",
                             ],
+                            TAGS,
                             SOURCE,
                             CONDITIONS,
                             LEASE,
@@ -532,6 +626,7 @@ impl Request<'_> {
                                 "x-ms-access-tier",
                                 "x-ms-rehydrate-priority",
                             ],
+                            TAGS,
                             SOURCE,
                             CONDITIONS,
                             LEASE,
@@ -594,6 +689,7 @@ impl Request<'_> {
                         LEASE,
                         BLOB_PROPERTIES,
                         CHECKSUMS,
+                        TAGS,
                         &["x-ms-access-tier"],
                     ],
                     true,
@@ -605,14 +701,21 @@ impl Request<'_> {
                 )
             }
             (&Method::GET, Some("blocklist")) => {
-                self.check(&["comp", "blocklisttype"], &[CONDITIONS, LEASE], false)?;
+                self.check(
+                    &["comp", "blocklisttype", "snapshot", "versionid"],
+                    &[CONDITIONS, LEASE],
+                    false,
+                )?;
                 let list = match self.param("blocklisttype") {
                     None | Some("committed") => BlockListKind::Committed,
                     Some("uncommitted") => BlockListKind::Uncommitted,
                     Some("all") => BlockListKind::All,
                     _ => return Err(Error::InvalidQuery),
                 };
-                Operation::GetBlockList(key, list, guard()?)
+                match selector {
+                    Some(selector) => Operation::BlocksSelected(key, selector, list, guard()?),
+                    None => Operation::GetBlockList(key, list, guard()?),
+                }
             }
             (&Method::PUT, None) => {
                 self.check(
@@ -623,6 +726,7 @@ impl Request<'_> {
                         BLOB_PROPERTIES,
                         PLAIN_PROPERTIES,
                         CHECKSUMS,
+                        TAGS,
                         &["x-ms-blob-type", "x-ms-access-tier"],
                     ],
                     true,
@@ -646,33 +750,47 @@ impl Request<'_> {
                 } else {
                     &[]
                 };
-                let params: &[&str] = if comp.is_some() { &["comp"] } else { &[] };
+                let params: &[&str] = if comp.is_some() {
+                    &["comp", "snapshot", "versionid"]
+                } else {
+                    &["snapshot", "versionid"]
+                };
                 self.check(params, &[CONDITIONS, LEASE, ranged], false)?;
                 if comp.is_some() {
-                    return Ok(Operation::BlobMetadata(key, guard()?));
+                    let read = BlobRead {
+                        guard: guard()?,
+                        range: None,
+                        with_body: false,
+                        range_checksum: None,
+                    };
+                    return Ok(match selector {
+                        Some(selector) => Operation::ReadSelected(key, selector, read, true),
+                        None => Operation::BlobMetadata(key, read.guard),
+                    });
                 }
                 let range = header(self.headers, "x-ms-range")?
                     .or(header(self.headers, "range")?)
                     .map(ByteRange::parse)
                     .transpose()?;
-                Operation::ReadBlob(
-                    key,
-                    BlobRead {
-                        guard: guard()?,
-                        range,
-                        with_body,
-                        range_checksum: range_checksum(self.headers)?,
-                    },
-                )
+                let read = BlobRead {
+                    guard: guard()?,
+                    range,
+                    with_body,
+                    range_checksum: range_checksum(self.headers)?,
+                };
+                match selector {
+                    Some(selector) => Operation::ReadSelected(key, selector, read, false),
+                    None => Operation::ReadBlob(key, read),
+                }
             }
             (&Method::DELETE, None) => {
-                self.check(&[], &[CONDITIONS, LEASE, &["x-ms-delete-snapshots"]], false)?;
-                match header(self.headers, "x-ms-delete-snapshots")? {
-                    None | Some("include") => (),
-                    Some("only") => return Err(Error::Unsupported),
-                    Some(_) => return Err(Error::InvalidHeader),
-                }
-                Operation::DeleteBlob(key, guard()?)
+                self.check(
+                    &["snapshot", "versionid"],
+                    &[CONDITIONS, LEASE, &["x-ms-delete-snapshots"]],
+                    false,
+                )?;
+                let removal = blob_snapshot::removal(self.headers, self.query)?;
+                Operation::DeleteBlob(key, guard()?, removal)
             }
             (&Method::PUT, Some("properties")) => {
                 self.check(
@@ -698,6 +816,32 @@ impl Request<'_> {
             (&Method::PUT, Some("metadata")) => {
                 self.check(&["comp"], &[CONDITIONS, LEASE], true)?;
                 Operation::SetBlobMetadata(key, metadata(self.headers)?, guard()?)
+            }
+            (&Method::PUT, Some("snapshot")) => {
+                self.check(&["comp"], &[CONDITIONS, LEASE], true)?;
+                let metadata = metadata(self.headers)?;
+                Operation::SnapshotBlob(key, (!metadata.is_empty()).then_some(metadata), guard()?)
+            }
+            (&Method::PUT, Some("undelete")) => {
+                self.check(&["comp"], &[], false)?;
+                Operation::UndeleteBlob(key)
+            }
+            (&Method::PUT, Some("tags")) => {
+                self.check(
+                    &["comp", "versionid"],
+                    &[LEASE, TAG_CONDITION, CHECKSUMS],
+                    false,
+                )?;
+                Operation::SetBlobTags(
+                    key,
+                    version_only(selector)?,
+                    upload_options(self.headers, MAX_XML_BODY_BYTES)?,
+                    guard()?,
+                )
+            }
+            (&Method::GET, Some("tags")) => {
+                self.check(&["comp", "versionid"], &[LEASE, TAG_CONDITION], false)?;
+                Operation::GetBlobTags(key, version_only(selector)?, guard()?)
             }
             (&Method::PUT, Some("tier")) => {
                 self.check(
@@ -743,6 +887,15 @@ impl Request<'_> {
     }
 }
 
+/// Tag operations address the current blob or a version, never a snapshot.
+fn version_only(selector: Option<Selector>) -> Result<Option<Ticks>> {
+    match selector {
+        None => Ok(None),
+        Some(Selector::Version(version)) => Ok(Some(version)),
+        Some(Selector::Snapshot(_)) => Err(Error::Unsupported),
+    }
+}
+
 fn require_block_blob(headers: &HeaderMap) -> Result<()> {
     match header(headers, "x-ms-blob-type")? {
         Some("BlockBlob") => Ok(()),
@@ -767,6 +920,10 @@ fn includes(value: Option<&str>) -> Result<Vec<Include>> {
             "metadata" => Ok(Include::Metadata),
             "copy" => Ok(Include::Copy),
             "uncommittedblobs" => Ok(Include::Uncommitted),
+            "snapshots" => Ok(Include::Snapshots),
+            "versions" => Ok(Include::Versions),
+            "deleted" => Ok(Include::Deleted),
+            "tags" => Ok(Include::Tags),
             _ => Err(Error::Unsupported),
         })
         .collect()
@@ -933,6 +1090,10 @@ fn blob_write(headers: &HeaderMap, plain: bool) -> Result<BlobWrite> {
             .transpose()?,
         copy: None,
         md5: decode_hash(header(headers, "x-ms-blob-content-md5")?)?,
+        tags: header(headers, "x-ms-tags")?
+            .map(crate::blob_tags::from_header)
+            .transpose()?
+            .unwrap_or_default(),
     })
 }
 
@@ -1022,6 +1183,14 @@ pub(crate) fn check(
                     | "x-ms-return-client-request-id"
             )
             || metadata && key.starts_with("x-ms-meta-")
+            || key == "x-ms-if-tags"
+                && allowed_headers
+                    .iter()
+                    .any(|list| list.contains(&"if-match"))
+            || key == "x-ms-source-if-tags"
+                && allowed_headers
+                    .iter()
+                    .any(|list| list.contains(&"x-ms-source-if-match"))
         {
             continue;
         }
@@ -1281,7 +1450,16 @@ mod tests {
                 .len(),
             3
         );
-        assert_eq!(includes(Some("snapshots")).err(), Some(Error::Unsupported));
+        assert_eq!(
+            includes(Some("snapshots,versions,deleted,tags"))
+                .unwrap()
+                .len(),
+            4
+        );
+        assert_eq!(
+            includes(Some("immutabilitypolicy")).err(),
+            Some(Error::Unsupported)
+        );
         assert!(includes(None).unwrap().is_empty());
     }
 }
