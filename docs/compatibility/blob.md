@@ -1,6 +1,6 @@
 # Blob wire compatibility
 
-Use the [quick start](../../README.md#run-locally) with the Blob API version `2023-11-03`. [The manifest](../../specs/conformance/blob.json) is the operation inventory: each operation is `implemented`, `known-difference`, or `unsupported`, with its authorization modes and notes. No operation has been rated `exact`, and none has been differentially verified against Azure Storage yet.
+Use the [quick start](../../README.md#run-locally) with the Blob API version `2023-11-03`. [The manifest](../../specs/conformance/blob.json) lists supported operations, authorization modes, and known differences. No operation is rated `exact`. The [Azure cassette suite](azure-contracts.md) records the specific behavior checked against live Azure.
 
 This slice covers block, page, and append blobs, with snapshots, versions, soft delete, blob index tags, and Submit Batch. DFS is separate work.
 

@@ -1,4 +1,5 @@
 mod cassette;
+mod delegation;
 mod live;
 
 use super::{ACCOUNT, Server, VERSION, basic_token, client, iso, sas_query};
@@ -118,6 +119,25 @@ fn read_bounded(reader: impl Read) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn get_delegation_key(
+    client: &Client,
+    endpoint: &Url,
+    bearer: &str,
+    start: &str,
+    expiry: &str,
+) -> Result<Response> {
+    let url = endpoint.join("?restype=service&comp=userdelegationkey")?;
+    send(
+        request(client, Method::POST, url)
+            .bearer_auth(bearer)
+            .header("content-type", "application/xml")
+            .body(format!(
+                "<KeyInfo><Start>{start}</Start><Expiry>{expiry}</Expiry></KeyInfo>"
+            )),
+        "get user delegation key",
+    )
+}
+
 fn observe_blob(
     client: &Client,
     account: &str,
@@ -153,20 +173,7 @@ fn observe_blob(
             .context("seed test blob: missing or malformed ETag")?;
 
         let expiry = iso(900);
-        let key = send(
-            request(
-                client,
-                Method::POST,
-                endpoint.join("?restype=service&comp=userdelegationkey")?,
-            )
-            .bearer_auth(bearer)
-            .header("content-type", "application/xml")
-            .body(format!(
-                "<KeyInfo><Start>{}</Start><Expiry>{expiry}</Expiry></KeyInfo>",
-                iso(-120)
-            )),
-            "get user delegation key",
-        )?;
+        let key = get_delegation_key(client, endpoint, bearer, &iso(-120), &expiry)?;
         require_status(&key, 200, "get user delegation key")?;
         let key = read_bounded(key)?;
         let key = std::str::from_utf8(&key)
@@ -217,6 +224,12 @@ fn observe_blob(
 }
 
 fn observe_local() -> Result<Cassette> {
+    with_local(|client, endpoint, bearer| {
+        observe_blob(client, ACCOUNT, endpoint, bearer, Source::Synthetic)
+    })
+}
+
+fn with_local<T>(observe: impl FnOnce(&Client, &Url, &str) -> Result<T>) -> Result<T> {
     let server = Server::start(
         &[
             "--in-memory",
@@ -230,13 +243,7 @@ fn observe_local() -> Result<Cassette> {
     );
     let trusting = client(Some(&server.generated_certificate()));
     let endpoint = Url::parse(&format!("{}/{ACCOUNT}/", server.url("blob")))?;
-    observe_blob(
-        &trusting,
-        ACCOUNT,
-        &endpoint,
-        &basic_token(),
-        Source::Synthetic,
-    )
+    observe(&trusting, &endpoint, &basic_token())
 }
 
 #[test]

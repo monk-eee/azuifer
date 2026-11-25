@@ -18,13 +18,15 @@ pub(super) enum Source {
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
-enum Scenario {
+pub(super) enum Scenario {
     #[serde(rename = "blob-user-delegation-sas-read-only")]
     BlobSasReadOnly,
+    #[serde(rename = "blob-get-user-delegation-key")]
+    BlobGetUserDelegationKey,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
-enum ApiVersion {
+pub(super) enum ApiVersion {
     #[serde(rename = "2023-11-03")]
     Baseline,
 }
@@ -42,7 +44,7 @@ pub(super) const STEPS: [Step; 4] = [Step::Head, Step::Range, Step::DeniedDelete
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum Header {
+pub(super) enum Header {
     Missing,
     Matches,
     Different,
@@ -50,7 +52,7 @@ enum Header {
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum Media {
+pub(super) enum Media {
     Missing,
     TextPlain,
     Xml,
@@ -150,6 +152,10 @@ impl Cassette {
             "unsupported cassette schema version"
         );
         ensure!(
+            value.scenario == Scenario::BlobSasReadOnly,
+            "unexpected cassette scenario"
+        );
+        ensure!(
             value.exchanges.each_ref().map(|exchange| exchange.step) == STEPS,
             "unexpected cassette step order"
         );
@@ -189,11 +195,24 @@ pub(super) fn header_text<'a>(headers: &'a HeaderMap, name: &'static str) -> Opt
     value.to_str().ok()
 }
 
-fn header(headers: &HeaderMap, name: &'static str, verify: impl FnOnce(&str) -> bool) -> Header {
+pub(super) fn header(
+    headers: &HeaderMap,
+    name: &'static str,
+    verify: impl FnOnce(&str) -> bool,
+) -> Header {
     match header_text(headers, name) {
         Some(value) if verify(value) => Header::Matches,
         _ if headers.contains_key(name) => Header::Different,
         _ => Header::Missing,
+    }
+}
+
+pub(super) fn media(headers: &HeaderMap) -> Media {
+    match header_text(headers, "content-type") {
+        Some("text/plain") => Media::TextPlain,
+        Some("application/xml" | "application/xml; charset=utf-8") => Media::Xml,
+        None if !headers.contains_key("content-type") => Media::Missing,
+        _ => Media::Other,
     }
 }
 
@@ -253,12 +272,6 @@ impl Exchange {
         let get = |name| header_text(headers, name);
         let is = |name, expected: &str| header(headers, name, |value| value == expected);
         let content_range = format!("bytes {RANGE_START}-{RANGE_END}/{}", BLOB_BYTES.len());
-        let media = match get("content-type") {
-            Some("text/plain") => Media::TextPlain,
-            Some("application/xml" | "application/xml; charset=utf-8") => Media::Xml,
-            None if !headers.contains_key("content-type") => Media::Missing,
-            _ => Media::Other,
-        };
         let body = if bytes.is_empty() {
             Body::Empty {}
         } else if step == Step::Range && bytes == &BLOB_BYTES[RANGE_START..=RANGE_END] {
@@ -271,7 +284,7 @@ impl Exchange {
         Self {
             step,
             status,
-            media,
+            media: media(headers),
             // Dynamic error messages change the XML byte count; the XML shape is recorded below.
             content_length: (status < 400)
                 .then(|| get("content-length").and_then(|value| value.parse().ok()))
@@ -389,7 +402,7 @@ fn serialization_never_contains_headers_credentials_or_arbitrary_bodies() {
     });
     let cassette = Cassette::new(Source::Azure, exchanges);
     let directory = tempfile::tempdir().unwrap();
-    let path = super::live::save(&cassette, directory.path()).unwrap();
+    let path = super::live::save(super::live::Record::Sas(&cassette), directory.path()).unwrap();
     let json = std::fs::read_to_string(path).unwrap();
     assert!(!json.contains(secret));
     assert_eq!(Cassette::load(json.as_bytes()).unwrap(), cassette);

@@ -1,7 +1,7 @@
-use super::{Cassette, Source, observe_blob, observe_local};
+use super::{Cassette, Source, delegation, observe_blob, observe_local, with_local};
 use anyhow::{Context as _, Result, anyhow, ensure};
 use reqwest::{Url, blocking::Client, redirect::Policy};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{ErrorKind, Write as _},
@@ -145,16 +145,24 @@ fn az(arguments: &[&str], phase: &'static str) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-pub(super) fn save(cassette: &Cassette, directory: &Path) -> Result<PathBuf> {
+#[derive(Serialize)]
+#[serde(untagged)]
+pub(super) enum Record<'a> {
+    Sas(&'a Cassette),
+    Delegation(&'a delegation::KeyCassette),
+}
+
+pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
     fs::create_dir_all(directory)
         .context("could not create the ignored cassette output directory")?;
-    let name = format!(
-        "blob-user-delegation-sas-read-only-{}.json",
-        Uuid::new_v4().simple()
-    );
+    let scenario = match cassette {
+        Record::Sas(_) => "blob-user-delegation-sas-read-only",
+        Record::Delegation(_) => "blob-get-user-delegation-key",
+    };
+    let name = format!("{scenario}-{}.json", Uuid::new_v4().simple());
     let target = directory.join(name);
     let mut file = tempfile::NamedTempFile::new_in(directory)?;
-    serde_json::to_writer_pretty(file.as_file_mut(), cassette)?;
+    serde_json::to_writer_pretty(file.as_file_mut(), &cassette)?;
     writeln!(file)?;
     file.as_file().sync_all()?;
     file.persist_noclobber(&target)
@@ -162,16 +170,9 @@ pub(super) fn save(cassette: &Cassette, directory: &Path) -> Result<PathBuf> {
     Ok(target)
 }
 
-#[test]
-#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
-fn record_live_blob_sas_contract() -> Result<()> {
+fn with_azure<T>(observe: impl FnOnce(&Client, &str, &Url, &str) -> Result<T>) -> Result<T> {
     let target = LiveTarget::configured()?;
     let endpoint = target.verified_endpoint()?;
-    let local = observe_local()?;
-    ensure!(
-        local.seeded_blob_was_read(),
-        "Azuifer did not serve the synthetic setup blob"
-    );
     let client = Client::builder()
         .https_only(true)
         .no_proxy()
@@ -180,21 +181,54 @@ fn record_live_blob_sas_contract() -> Result<()> {
         .build()
         .map_err(|_| anyhow!("could not initialize the Azure HTTPS client"))?;
     let bearer = target.bearer()?;
-    let azure = observe_blob(&client, &target.account, &endpoint, &bearer, Source::Azure)?;
-    ensure!(
-        azure.seeded_blob_was_read(),
-        "Azure did not return the seeded blob via the read-only SAS; no cassette written"
-    );
+    observe(&client, &target.account, &endpoint, &bearer)
+}
+
+fn save_azure(cassette: Record<'_>) -> Result<()> {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("dist")
         .join("azure-contracts");
-    let path = save(&azure, &directory)?;
+    let path = save(cassette, &directory)?;
     println!(
         "Saved normalized Azure response cassette to {}",
         path.display()
     );
+    Ok(())
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn record_live_blob_sas_contract() -> Result<()> {
+    let local = observe_local()?;
+    ensure!(
+        local.seeded_blob_was_read(),
+        "Azuifer did not serve the synthetic setup blob"
+    );
+    let azure = with_azure(|client, account, endpoint, bearer| {
+        observe_blob(client, account, endpoint, bearer, Source::Azure)
+    })?;
+    ensure!(
+        azure.seeded_blob_was_read(),
+        "Azure did not return the seeded blob via the read-only SAS; no cassette written"
+    );
+    save_azure(Record::Sas(&azure))?;
     azure.compare(&local)?;
     println!("Live Azure and Azuifer matched on all selected fields");
+    Ok(())
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn record_live_delegation_key_contract() -> Result<()> {
+    let local = with_local(|client, endpoint, bearer| {
+        delegation::observe(client, endpoint, bearer, Source::Synthetic)
+    })?;
+    let azure = with_azure(|client, _, endpoint, bearer| {
+        delegation::observe(client, endpoint, bearer, Source::Azure)
+    })?;
+    save_azure(Record::Delegation(&azure))?;
+    azure.compare(&local)?;
+    println!("Live Azure and Azuifer matched on the selected delegation key fields");
     Ok(())
 }
 
