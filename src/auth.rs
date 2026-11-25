@@ -115,7 +115,22 @@ fn canonical(
         }
     }
     text.push('\n');
+    text.push_str(&canonical_headers(headers)?);
+    text.push('/');
+    text.push_str(account.as_str());
+    text.push_str(raw_path);
+    for (name, value) in query {
+        text.push('\n');
+        text.push_str(name);
+        text.push(':');
+        text.push_str(value);
+    }
+    Ok(text)
+}
 
+/// The canonicalized `x-ms-*` header block shared by Shared Key and Shared Key
+/// Lite: lowercase names in order, folded values, one line each.
+pub(crate) fn canonical_headers(headers: &HeaderMap) -> Result<String> {
     let mut extension_headers = BTreeMap::new();
     for (name, value) in headers {
         let name = name.as_str();
@@ -126,20 +141,12 @@ fn canonical(
             }
         }
     }
+    let mut text = String::new();
     for (name, value) in extension_headers {
         text.push_str(name);
         text.push(':');
         text.push_str(&fold_whitespace(value));
         text.push('\n');
-    }
-    text.push('/');
-    text.push_str(account.as_str());
-    text.push_str(raw_path);
-    for (name, value) in query {
-        text.push('\n');
-        text.push_str(name);
-        text.push(':');
-        text.push_str(value);
     }
     Ok(text)
 }

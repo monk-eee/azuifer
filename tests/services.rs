@@ -84,7 +84,16 @@ fn every_enabled_service_listens_on_its_own_port() {
     assert_eq!(ports.len(), 6, "each listener has its own address");
 
     let client = client();
-    for name in ["queue", "table", "file"] {
+    let queue = client
+        .get(format!(
+            "{}/devstoreaccount1?comp=list",
+            server.urls["queue"]
+        ))
+        .send()
+        .unwrap();
+    assert_eq!(queue.status(), 403, "Queue rejects anonymous requests");
+    assert_eq!(queue.headers()["x-ms-error-code"], "AuthenticationFailed");
+    for name in ["table", "file"] {
         let response = client
             .get(format!("{}/devstoreaccount1", server.urls[name]))
             .send()
