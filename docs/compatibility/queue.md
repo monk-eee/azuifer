@@ -44,7 +44,7 @@ Every response carries `x-ms-request-id`, `x-ms-version` and `date`; `x-ms-clien
 | Service SAS | Resource `/queue/{account}/{queue}` with the field set of the signed version (legacy through `2023-11-03`); permissions `r a u p` only; `si` resolves a stored access policy for missing `sp`/`st`/`se`. |
 | Anonymous | Rejected with 403 `AuthenticationFailed`. |
 
-Wrong service, resource type, permission or protocol return `AuthorizationServiceMismatch`, `AuthorizationResourceTypeMismatch`, `AuthorizationPermissionMismatch` and `AuthorizationProtocolMismatch`. Operations a service SAS cannot grant (create, delete, list, clear, set metadata or ACL, service operations) are rejected. Bearer tokens and user delegation SAS are not supported.
+Wrong service, resource type, permission or protocol return `AuthorizationServiceMismatch`, `AuthorizationResourceTypeMismatch`, `AuthorizationPermissionMismatch` and `AuthorizationProtocolMismatch`. Operations a service SAS cannot grant (create, delete, list, clear, set metadata or ACL, service operations) are rejected. Bearer tokens follow the [bearer-token modes](blob.md#bearer-tokens-oauth): rejected with 401 `InvalidAuthenticationInfo` by default, validated with `--oauth basic` or `--oauth jwks`. User delegation SAS is not supported.
 
 ## Limits and behavior
 
@@ -56,11 +56,11 @@ Wrong service, resource type, permission or protocol return `AuthorizationServic
 
 ## Known differences
 
-- `sip` is signed but not enforced (the router sees no peer address); `spr=https` is always rejected because the listener is plain HTTP.
+- `sip` is signed but not enforced (the router sees no peer address); `spr=https` is rejected while the listener is plain HTTP and accepted once [TLS](blob.md#tls) is enabled.
 - Logging and metrics settings are stored and returned but no analytics data is produced. Get Queue Service Stats is served on the primary endpoint with a constant `live` status.
 - Deleted queues can be recreated immediately (`QueueBeingDeleted` is not modeled). An Update Message visibility time is not capped at the expiry time.
 - `AuthenticationErrorDetail` is omitted so no signing material is echoed. Pop receipts are opaque Base64 values, not Azure's format, and list markers are local tokens.
-- `x-ms-version` reports the baseline; older versions are rejected and newer ones need `--skip-api-version-check`.
+- `x-ms-version` reports the baseline; older versions are served with baseline behavior and newer ones need `--skip-api-version-check`.
 - With `--test-clock`, the admin listener serves `GET /_azuifer/clock` and `POST /_azuifer/clock/advance?seconds=N` (or `ms=N`) for the one clock every service shares ([ADR-0012](../adr.d/0012-inject-time-through-one-clock.md)), so visibility timeouts and TTLs expire without sleeping. Signed dates still need to follow the server clock, or stay inside the 15 minute skew window.
 
 ## Tests

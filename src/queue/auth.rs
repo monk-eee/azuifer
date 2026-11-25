@@ -7,7 +7,9 @@ use super::{
 };
 use crate::{
     auth::{self, Query, header},
+    config::Service,
     domain::AccountName,
+    oauth,
     sas::Sas,
 };
 use axum::http::{HeaderMap, Method, request::Parts};
@@ -45,9 +47,40 @@ pub(super) async fn authorize(app: &App, parts: &Parts, request: &Request) -> Re
                 &parts.headers,
                 now,
             ),
+            scheme if scheme.eq_ignore_ascii_case("bearer") => {
+                authorize_bearer(app, parts, request, value, now)
+            }
             _ => Err(QueueError::InvalidAuthenticationInfo),
         },
         (None, true) => authorize_sas(app, keys, request, now).await,
+    }
+}
+
+/// Validates an OAuth bearer token; Reader roles may only read.
+fn authorize_bearer(
+    app: &App,
+    parts: &Parts,
+    request: &Request,
+    authorization: &str,
+    now: SystemTime,
+) -> Result<()> {
+    let token = oauth::bearer(authorization).ok_or(QueueError::InvalidBearer)?;
+    let principal = app
+        .config
+        .oauth
+        .authenticate(
+            token,
+            &oauth::Request {
+                account: request.account.as_str(),
+                host: header(&parts.headers, "host")?,
+                now,
+            },
+        )
+        .map_err(|_| QueueError::InvalidBearer)?;
+    if principal.permits(Service::Queue, oauth::is_write(&parts.method)) {
+        Ok(())
+    } else {
+        Err(QueueError::PermissionMismatch)
     }
 }
 
@@ -127,7 +160,7 @@ async fn authorize_sas(
         let sas = Sas::from_query(query)?.ok_or(QueueError::AuthenticationFailed)?;
         sas.verify(keys, &account_string(&request.account, &sas))?;
         sas.check_window(now)?;
-        check_protocol(&sas)?;
+        check_protocol(&sas, app.config.tls.is_some())?;
         if !sas.field("ss").contains('q') {
             return Err(QueueError::ServiceMismatch);
         }
@@ -179,17 +212,18 @@ async fn authorize_sas(
     let sas = Sas::from_query(&effective)?.ok_or(QueueError::AuthenticationFailed)?;
     sas.verify(keys, &signed)?;
     sas.check_window(now)?;
-    check_protocol(&sas)?;
+    check_protocol(&sas, app.config.tls.is_some())?;
     match grant.service {
         Some(letter) if sas.allows(&letter.to_string()) => Ok(()),
         _ => Err(QueueError::PermissionMismatch),
     }
 }
 
-/// The emulator listens on plain HTTP, so a SAS limited to HTTPS can never match.
-fn check_protocol(sas: &Sas) -> Result<()> {
+/// Without TLS the emulator listens on plain HTTP, so a SAS limited to HTTPS can never match.
+fn check_protocol(sas: &Sas, https: bool) -> Result<()> {
     let protocol = sas.field("spr");
-    if !protocol.is_empty()
+    if !https
+        && !protocol.is_empty()
         && protocol
             .split(',')
             .all(|item| item.trim().eq_ignore_ascii_case("https"))
@@ -373,10 +407,15 @@ mod tests {
     fn https_only_sas_is_rejected_on_the_plain_http_listener() {
         let check = |spr: &str| {
             let q = query(&[("se", "2030-01-01"), ("spr", spr), ("sig", "x")]);
-            check_protocol(&Sas::from_query(&q).unwrap().unwrap())
+            check_protocol(&Sas::from_query(&q).unwrap().unwrap(), false)
         };
         assert_eq!(check("https"), Err(QueueError::ProtocolMismatch));
         assert_eq!(check("https,http"), Ok(()));
         assert_eq!(check(""), Ok(()));
+        let q = query(&[("se", "2030-01-01"), ("spr", "https"), ("sig", "x")]);
+        assert_eq!(
+            check_protocol(&Sas::from_query(&q).unwrap().unwrap(), true),
+            Ok(())
+        );
     }
 }

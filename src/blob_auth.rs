@@ -9,7 +9,10 @@
 use crate::{
     auth::{self, Query, header},
     blob_sas::{Connection, Need, Overrides, Public, Resource, Token},
+    config::Service,
+    delegation::Keys,
     domain::{AccountName, BlobKey, ContainerKey, Error, PublicAccess, Result},
+    oauth::{self, OAuth, Principal},
     store::Store,
 };
 use axum::http::{HeaderMap, Method};
@@ -56,6 +59,8 @@ pub(crate) enum Credentials {
     /// A verified Shared Key or Shared Key Lite signature.
     Key,
     Sas(Box<Token>),
+    /// A validated OAuth bearer token.
+    Bearer(Principal),
     Anonymous,
 }
 
@@ -70,6 +75,8 @@ impl Credentials {
 
 pub(crate) struct Presented<'a> {
     pub(crate) keys: &'a [Vec<u8>],
+    pub(crate) oauth: &'a OAuth,
+    pub(crate) delegation: &'a Keys,
     pub(crate) method: &'a Method,
     /// The path as the client sent it, which Shared Key signs.
     pub(crate) signing_path: &'a str,
@@ -103,16 +110,47 @@ pub(crate) fn credentials(request: &Presented<'_>) -> Result<Credentials> {
                 verify_lite(request, value)?;
                 Ok(Credentials::Key)
             }
+            Some(scheme) if scheme.eq_ignore_ascii_case("bearer") => verify_bearer(request, value),
             Some(_) => Err(Error::Unsupported),
             None => Err(Error::AuthenticationFailed),
         },
         (None, true) => {
-            let token = Token::verify(request.query, &request.target.resource(), request.keys)?
-                .ok_or(Error::AuthenticationFailed)?;
+            let token = Token::verify(
+                request.query,
+                &request.target.resource(),
+                request.keys,
+                request.delegation,
+            )?
+            .ok_or(Error::AuthenticationFailed)?;
             Ok(Credentials::Sas(Box::new(token)))
         }
         (None, false) => Ok(Credentials::Anonymous),
     }
+}
+
+/// Validates an OAuth bearer token. Reader roles may not change data; Get User
+/// Delegation Key is a read-class operation for them, as it is in Azure.
+fn verify_bearer(request: &Presented<'_>, authorization: &str) -> Result<Credentials> {
+    let token = oauth::bearer(authorization).ok_or(Error::InvalidAuthenticationInfo)?;
+    let principal = request
+        .oauth
+        .authenticate(
+            token,
+            &oauth::Request {
+                account: request.target.account().as_str(),
+                host: header(request.headers, "host")?,
+                now: request.now,
+            },
+        )
+        .map_err(|_| Error::InvalidAuthenticationInfo)?;
+    let delegation_key = request.query.get("comp").map(String::as_str) == Some("userdelegationkey");
+    if !principal.permits(
+        Service::Blob,
+        oauth::is_write(request.method) && !delegation_key,
+    ) {
+        return Err(Error::PermissionMismatch);
+    }
+    Ok(Credentials::Bearer(principal))
 }
 
 /// Shared Key Lite signs the verb, `Content-MD5`, `Content-Type`, the date, the
@@ -163,7 +201,7 @@ pub(crate) struct Authorization<'a> {
 /// Decides whether the verified credentials may perform the operation.
 pub(crate) async fn authorize(store: &Store, request: Authorization<'_>) -> Result<()> {
     match request.credentials {
-        Credentials::Key => Ok(()),
+        Credentials::Key | Credentials::Bearer(_) => Ok(()),
         Credentials::Sas(token) => {
             let policy = match (token.identifier(), request.target.container()) {
                 (Some(id), Some(container)) => {
@@ -241,6 +279,8 @@ mod tests {
         ]);
         credentials(&Presented {
             keys: &[KEY.to_vec()],
+            oauth: &OAuth::default(),
+            delegation: &Keys::default(),
             method: &Method::GET,
             signing_path: path,
             query: &query,

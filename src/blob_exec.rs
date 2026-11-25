@@ -8,6 +8,7 @@ use crate::{
     blob_sas::Connection,
     blob_snapshot,
     checksum::{Checksums, Hasher},
+    delegation,
     domain::{AccountName, BlobInfo, BlobWrite, BlockList, CopyRecord, Error, Result},
     lease::LeaseAction,
     protocol::{self, ContainerView, Operation, SourceRequest, UploadOptions},
@@ -61,6 +62,20 @@ pub(crate) async fn execute(
             let update = ServiceProperties::parse(&bytes)?;
             store.set_service_properties(account, update).await?;
             Ok(empty(StatusCode::ACCEPTED))
+        }
+        Operation::UserDelegationKey(account, options) => {
+            let Credentials::Bearer(principal) = ctx.credentials else {
+                return Err(Error::AuthenticationFailed);
+            };
+            let (bytes, _) = read_bounded(app, body, &options).await?;
+            delegation::respond(
+                &app.config.delegation,
+                &account,
+                principal,
+                &bytes,
+                app.clock.now(),
+                app.config.api_version.as_str(),
+            )
         }
         Operation::ServiceStats => {
             let mut xml = Xml::root("StorageServiceStats", &[]);
@@ -275,7 +290,7 @@ pub(crate) async fn execute(
 }
 
 pub(crate) fn storage_endpoint(app: &App, account: &str) -> String {
-    format!("http://{}/{account}/", app.address)
+    format!("{}://{}/{account}/", app.config.scheme(), app.address)
 }
 
 /// Authorizes and reads a same-instance copy source.

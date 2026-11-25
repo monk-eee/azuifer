@@ -64,6 +64,10 @@ pub(crate) struct Options {
     file_port: Option<u16>,
     #[command(flatten)]
     telemetry: telemetry::TelemetryOptions,
+    #[command(flatten)]
+    tls: crate::tls::TlsOptions,
+    #[command(flatten)]
+    oauth: crate::oauth::OAuthOptions,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -138,6 +142,8 @@ struct FileConfig {
     prometheus: Option<bool>,
     log_format: Option<telemetry::LogFormat>,
     log_file: Option<PathBuf>,
+    tls: crate::tls::FileSettings,
+    oauth: crate::oauth::FileSettings,
     accounts: Vec<AccountConfig>,
 }
 
@@ -172,6 +178,9 @@ pub(crate) struct Config {
     pub(crate) accounts: HashMap<AccountName, Vec<Vec<u8>>>,
     pub(crate) hns_accounts: HashSet<AccountName>,
     pub(crate) versioning_accounts: HashSet<AccountName>,
+    pub(crate) tls: Option<crate::tls::Settings>,
+    pub(crate) oauth: crate::oauth::OAuth,
+    pub(crate) delegation: crate::delegation::Keys,
     pub(crate) api_version: ApiVersion,
     pub(crate) telemetry: telemetry::Settings,
 }
@@ -350,6 +359,9 @@ impl Config {
             accounts,
             hns_accounts,
             versioning_accounts,
+            tls: crate::tls::Settings::resolve(options.tls, file.tls)?,
+            oauth: crate::oauth::OAuth::resolve(options.oauth, file.oauth, binding.is_loopback())?,
+            delegation: crate::delegation::Keys::default(),
             api_version,
             telemetry: telemetry::Settings::resolve(
                 options.telemetry,

@@ -24,14 +24,20 @@ md-5 = "0.10"
 opentelemetry = { version = "0.33", default-features = false, features = ["metrics", "trace"] }
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["grpc-tonic", "http-proto", "metrics", "reqwest-blocking-client", "trace"] }
 opentelemetry_sdk = { version = "0.33", default-features = false, features = ["metrics", "trace"] }
+p12-keystore = "0.4.1"
 percent-encoding = "2"
 quick-xml = "0.42"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+ring = "0.17"
 rusqlite = { version = "0.43", features = ["bundled", "uuid"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-util = { version = "0.7", features = ["io"] }
 toml = "0.9"
 tracing = "0.1"

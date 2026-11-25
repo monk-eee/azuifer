@@ -8,6 +8,8 @@ pub(super) type Result<T> = std::result::Result<T, TableError>;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Kind {
     AuthenticationFailed,
+    /// A bearer token that is disabled, malformed, expired, or otherwise not accepted.
+    InvalidBearer,
     AuthorizationFailure,
     InvalidHeaderValue,
     InvalidQueryParameterValue,
@@ -43,6 +45,7 @@ impl Kind {
         use StatusCode as S;
         match self {
             Self::AuthenticationFailed | Self::AuthorizationFailure => S::FORBIDDEN,
+            Self::InvalidBearer => S::UNAUTHORIZED,
             Self::TableNotFound | Self::ResourceNotFound => S::NOT_FOUND,
             Self::TableAlreadyExists | Self::EntityAlreadyExists => S::CONFLICT,
             Self::UpdateConditionNotSatisfied => S::PRECONDITION_FAILED,
@@ -60,6 +63,7 @@ impl Kind {
     fn code(self) -> &'static str {
         match self {
             Self::AuthenticationFailed => "AuthenticationFailed",
+            Self::InvalidBearer => "InvalidAuthenticationInfo",
             Self::AuthorizationFailure => "AuthorizationFailure",
             Self::InvalidHeaderValue => "InvalidHeaderValue",
             Self::InvalidQueryParameterValue => "InvalidQueryParameterValue",
@@ -97,6 +101,9 @@ impl Kind {
         match self {
             Self::AuthenticationFailed => {
                 "Server failed to authenticate the request. Make sure the value of Authorization header is formed correctly including the signature."
+            }
+            Self::InvalidBearer => {
+                "Server failed to authenticate the request. Please refer to the information in the www-authenticate header."
             }
             Self::AuthorizationFailure => {
                 "This request is not authorized to perform this operation."

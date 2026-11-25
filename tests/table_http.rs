@@ -1429,7 +1429,8 @@ fn authentication_modes_and_failures() {
             .auth(Auth::None)
             .header("authorization", "Bearer token"),
     );
-    assert_eq!(bearer.status, 501);
+    assert_eq!(bearer.status, 401);
+    assert_eq!(bearer.error_code(), "InvalidAuthenticationInfo");
 
     // Versions: older and equal are echoed; unknown newer ones are rejected by default.
     let older = server.send(Call::new("GET", "/Tables").header("x-ms-version", "2019-02-02"));

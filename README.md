@@ -54,6 +54,16 @@ cmp "$scratch/hello.txt" "$scratch/downloaded.txt" && printf 'Download matches t
 
 This run keeps data in memory. To use a persistent Docker volume, add `--mount type=volume,source=azuifer-data,target=/data` before the image name and replace `--in-memory` with `--location /data`. Keep the same key and volume when recreating the container.
 
+### 3. Optional: HTTPS and bearer tokens
+
+Azure SDKs send bearer tokens only over HTTPS. Start Azuifer with a generated development certificate and reduced-validation bearer tokens, then trust the `tls_cert=` file it prints:
+
+```sh
+azuifer serve --in-memory --tls-generate --oauth basic --skip-api-version-check
+```
+
+PEM and PFX certificates, validated tokens (`--oauth jwks`), and user-delegation SAS are described in the [Blob guide](docs/compatibility/blob.md#authentication).
+
 ## Connect an SDK
 
 Leave the container running and reuse `AZURE_STORAGE_CONNECTION_STRING` from the quickstart. The endpoint includes the account name, and the Blob API baseline is `2023-11-03`. The quickstart enables version fallback for newer Azure CLI clients; omit `--skip-api-version-check` when testing a client pinned to the baseline.

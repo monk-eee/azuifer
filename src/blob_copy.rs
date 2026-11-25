@@ -134,12 +134,16 @@ pub(crate) async fn authorize_source(
                 container: Some(source.key.container.name.as_str()),
                 blob: Some(source.key.path.as_str()),
             };
-            let token = Token::verify(query, &resource, keys)
+            let token = Token::verify(query, &resource, keys, &config.delegation)
                 .map_err(denied)?
                 .ok_or(Error::CopySourceDenied)?;
             Credentials::Sas(Box::new(token))
         }
-        None if matches!(caller, Credentials::Key) && account == destination => Credentials::Key,
+        None if matches!(caller, Credentials::Key | Credentials::Bearer(_))
+            && account == destination =>
+        {
+            Credentials::Key
+        }
         None => Credentials::Anonymous,
     };
     blob_auth::authorize(

@@ -1,9 +1,10 @@
 //! Blob SAS strings-to-sign and token interpretation for signed versions
-//! 2015-04-05 through 2023-11-03 (ADR-0011). Account and service tokens are
-//! recognised here; user-delegation tokens are reported as unsupported.
+//! 2015-04-05 through 2023-11-03 (ADR-0011). Account, service, and user-delegation
+//! tokens are recognised here; user-delegation signing keys live in [`crate::delegation`].
 
 use crate::{
     auth::Query,
+    delegation::{self, Keys},
     domain::{AccountName, Error, Result, SignedIdentifier},
     sas::{self, Sas},
 };
@@ -74,6 +75,8 @@ pub(crate) struct Token {
     pub(crate) kind: Kind,
     sas: Sas,
     pub(crate) overrides: Overrides,
+    /// The lifetime of the user delegation key that signed the token, if any.
+    key_window: Option<(SystemTime, SystemTime)>,
 }
 
 /// What an operation asks of a SAS or of anonymous access.
@@ -111,18 +114,17 @@ pub(crate) struct Connection {
 impl Token {
     /// Parses and signature-checks a SAS. The time window, permissions, source
     /// address, and protocol are checked later by [`Token::authorize`], once
-    /// any stored access policy has been loaded.
+    /// any stored access policy has been loaded. A user-delegation SAS (`skoid`)
+    /// is signed with a key issued by Get User Delegation Key rather than an account key.
     pub(crate) fn verify(
         query: &Query,
         resource: &Resource<'_>,
         keys: &[Vec<u8>],
+        delegation: &Keys,
     ) -> Result<Option<Self>> {
         let Some(sas) = Sas::from_query(query)? else {
             return Ok(None);
         };
-        if sas.has("skoid") || sas.has("sktid") {
-            return Err(Error::Unsupported);
-        }
         if !sas.has("sv") {
             return Err(Error::AuthenticationFailed);
         }
@@ -130,13 +132,17 @@ impl Token {
         if version < "2015-04-05" {
             return Err(Error::AuthenticationFailed);
         }
+        let delegated = sas.has("skoid") || sas.has("sktid");
         let (kind, string_to_sign) = if sas.has("ss") && sas.has("srt") {
+            if delegated {
+                return Err(Error::AuthenticationFailed);
+            }
             (Kind::Account, account_string(&sas, resource.account))
         } else {
             let scope = match sas.field("sr") {
                 "b" => Scope::Blob,
                 "c" => Scope::Container,
-                "bs" | "bv" => return Err(Error::Unsupported),
+                "bs" | "bv" if version >= "2018-11-09" => Scope::Blob,
                 _ if version < "2018-11-09" => {
                     if resource.blob.is_some() {
                         Scope::Blob
@@ -150,19 +156,51 @@ impl Token {
             if scope == Scope::Blob && resource.blob.is_none() {
                 return Err(Error::ResourceTypeMismatch);
             }
+            // A snapshot or version SAS is signed over the timestamp it names.
+            let snapshot = match sas.field("sr") {
+                "bs" => Some("snapshot"),
+                "bv" => Some("versionid"),
+                _ => None,
+            }
+            .map(|name| query.get(name).ok_or(Error::AuthenticationFailed))
+            .transpose()?
+            .map_or("", String::as_str);
             let canonical = match (scope, resource.blob) {
                 (Scope::Blob, Some(blob)) => {
                     format!("/blob/{}/{container}/{blob}", resource.account.as_str())
                 }
                 _ => format!("/blob/{}/{container}", resource.account.as_str()),
             };
-            let identifier = sas.has("si").then(|| sas.field("si").to_owned());
-            (
-                Kind::Service { identifier },
-                service_string(&sas, &canonical),
-            )
+            if delegated {
+                if sas.has("si") || sas.field("sks") != "b" || sas.field("skv") < "2018-11-09" {
+                    return Err(Error::AuthenticationFailed);
+                }
+                if ["sduoid", "skdutid", "srh", "srq"]
+                    .iter()
+                    .any(|name| sas.has(name))
+                {
+                    return Err(Error::Unsupported);
+                }
+                (
+                    Kind::Service { identifier: None },
+                    delegation::string_to_sign(&sas, &canonical, snapshot),
+                )
+            } else {
+                let identifier = sas.has("si").then(|| sas.field("si").to_owned());
+                (
+                    Kind::Service { identifier },
+                    service_string(&sas, &canonical, snapshot),
+                )
+            }
         };
-        sas.verify(keys, &string_to_sign)?;
+        let key_window = if delegated {
+            let (key, window) = delegation.find(resource.account, &sas)?;
+            sas.verify(&[key], &string_to_sign)?;
+            Some(window)
+        } else {
+            sas.verify(keys, &string_to_sign)?;
+            None
+        };
         let overrides = if matches!(kind, Kind::Service { .. }) {
             let field = |name| sas.has(name).then(|| sas.field(name).to_owned());
             Overrides {
@@ -179,6 +217,7 @@ impl Token {
             kind,
             sas,
             overrides,
+            key_window,
         }))
     }
 
@@ -217,6 +256,9 @@ impl Token {
             (None, _) => (self.sas.start(), self.sas.expiry(), self.sas.field("sp")),
         };
         sas::check_window(start, expiry, connection.now)?;
+        if let Some((key_start, key_expiry)) = self.key_window {
+            sas::check_window(Some(key_start), Some(key_expiry), connection.now)?;
+        }
         let grants =
             |any: &str| any == "*" || any.chars().any(|letter| permissions.contains(letter));
         match &self.kind {
@@ -301,7 +343,7 @@ fn account_string(sas: &Sas, account: &AccountName) -> String {
 
 /// Service SAS string-to-sign. Version 2018-11-09 added the resource and
 /// snapshot time; 2020-12-06 added the encryption scope.
-fn service_string(sas: &Sas, canonical: &str) -> String {
+fn service_string(sas: &Sas, canonical: &str, snapshot: &str) -> String {
     let version = sas.field("sv");
     let mut fields = vec![
         sas.field("sp"),
@@ -315,7 +357,7 @@ fn service_string(sas: &Sas, canonical: &str) -> String {
     ];
     if version >= "2018-11-09" {
         fields.push(sas.field("sr"));
-        fields.push(sas.field("sst"));
+        fields.push(snapshot);
     }
     if version >= "2020-12-06" {
         fields.push(sas.field("ses"));
@@ -327,16 +369,21 @@ fn service_string(sas: &Sas, canonical: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oauth::Principal;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use hmac::{Hmac, Mac as _};
     use sha2::Sha256;
 
     const KEY: [u8; 32] = [7; 32];
 
-    fn sign(text: &str) -> String {
-        let mut mac = Hmac::<Sha256>::new_from_slice(&KEY).unwrap();
+    fn hmac(key: &[u8], text: &str) -> String {
+        let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
         mac.update(text.as_bytes());
         STANDARD.encode(mac.finalize().into_bytes())
+    }
+
+    fn sign(text: &str) -> String {
+        hmac(&KEY, text)
     }
 
     fn query(pairs: &[(&str, &str)], signed: &str) -> Query {
@@ -368,7 +415,7 @@ mod tests {
             container: Some("box"),
             blob: Some("dir/a.txt"),
         };
-        let token = Token::verify(&query, &resource, &[KEY.to_vec()])
+        let token = Token::verify(&query, &resource, &[KEY.to_vec()], &Keys::default())
             .unwrap()
             .unwrap();
         assert_eq!(token.overrides.content_type.as_deref(), Some("text/plain"));
@@ -376,7 +423,7 @@ mod tests {
             blob: Some("dir/other.txt"),
             ..resource
         };
-        assert!(Token::verify(&query, &tampered, &[KEY.to_vec()]).is_err());
+        assert!(Token::verify(&query, &tampered, &[KEY.to_vec()], &Keys::default()).is_err());
     }
 
     #[test]
@@ -392,7 +439,7 @@ mod tests {
             .unwrap()
         };
         let lines = |version| {
-            service_string(&sas(version), "/blob/a/c")
+            service_string(&sas(version), "/blob/a/c", "")
                 .split('\n')
                 .count()
         };
@@ -424,7 +471,7 @@ mod tests {
             container: None,
             blob: None,
         };
-        let token = Token::verify(&query, &resource, &[KEY.to_vec()])
+        let token = Token::verify(&query, &resource, &[KEY.to_vec()], &Keys::default())
             .unwrap()
             .unwrap();
         let now = sas::parse_time("2029-01-01").unwrap();
@@ -468,20 +515,143 @@ mod tests {
     }
 
     #[test]
-    fn user_delegation_tokens_are_unsupported() {
-        let query = Query::from([
-            ("sv".into(), "2023-11-03".into()),
-            ("skoid".into(), "oid".into()),
-            ("sig".into(), "x".into()),
-        ]);
+    fn user_delegation_sas_needs_an_issued_key_inside_its_lifetime() {
+        let keys = Keys::default();
+        let (start, expiry) = (
+            sas::parse_time("2029-01-01T00:00:00Z").unwrap(),
+            sas::parse_time("2029-01-02T00:00:00Z").unwrap(),
+        );
+        let issued = keys
+            .issue(&account(), &Principal::default(), (start, expiry), start)
+            .unwrap();
+        let (oid, tid) = (issued.oid.as_str(), issued.tid.as_str());
+        let signed = format!(
+            "r\n\n2029-01-01T12:00:00Z\n/blob/testaccount/box/a.txt\n{oid}\n{tid}\n2029-01-01T00:00:00Z\n2029-01-02T00:00:00Z\nb\n2023-11-03\n\n\n\n\n\n2023-11-03\nb\n\n\n\n\n\n\n"
+        );
+        let mut query: Query = [
+            ("sv", "2023-11-03"),
+            ("sr", "b"),
+            ("sp", "r"),
+            ("se", "2029-01-01T12:00:00Z"),
+            ("skoid", oid),
+            ("sktid", tid),
+            ("skt", "2029-01-01T00:00:00Z"),
+            ("ske", "2029-01-02T00:00:00Z"),
+            ("sks", "b"),
+            ("skv", "2023-11-03"),
+        ]
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+        .collect();
+        query.insert("sig".into(), hmac(&issued.value, &signed));
         let resource = Resource {
             account: &account(),
             container: Some("box"),
-            blob: None,
+            blob: Some("a.txt"),
+        };
+        let token = Token::verify(&query, &resource, &[KEY.to_vec()], &keys)
+            .unwrap()
+            .unwrap();
+        let need = Need {
+            service: Some("r"),
+            account: None,
+            public: Public::Never,
+        };
+        let connection = |now| Connection {
+            now: sas::parse_time(now).unwrap(),
+            client_ip: None,
+            https: true,
         };
         assert_eq!(
-            Token::verify(&query, &resource, &[]).err(),
-            Some(Error::Unsupported)
+            token.authorize(&need, None, &connection("2029-01-01T06:00:00Z")),
+            Ok(())
         );
+        // The SAS window ends at 12:00 even though the key lives on.
+        assert!(
+            token
+                .authorize(&need, None, &connection("2029-01-01T13:00:00Z"))
+                .is_err()
+        );
+        let write = Need {
+            service: Some("w"),
+            ..need
+        };
+        assert_eq!(
+            token.authorize(&write, None, &connection("2029-01-01T06:00:00Z")),
+            Err(Error::PermissionMismatch)
+        );
+
+        let verify = |query: &Query, keys: &Keys| {
+            Token::verify(query, &resource, &[KEY.to_vec()], keys).err()
+        };
+        assert_eq!(
+            verify(&query, &Keys::default()),
+            Some(Error::AuthenticationFailed)
+        );
+        let mut other_oid = query.clone();
+        other_oid.insert("skoid".into(), "someone-else".into());
+        assert_eq!(verify(&other_oid, &keys), Some(Error::AuthenticationFailed));
+        let mut forged = query.clone();
+        forged.insert("sp".into(), "rw".into());
+        assert_eq!(verify(&forged, &keys), Some(Error::AuthenticationFailed));
+        let mut policy = query.clone();
+        policy.insert("si".into(), "policy".into());
+        assert_eq!(verify(&policy, &keys), Some(Error::AuthenticationFailed));
+        let mut not_blob_service = query.clone();
+        not_blob_service.insert("sks".into(), "q".into());
+        assert_eq!(
+            verify(&not_blob_service, &keys),
+            Some(Error::AuthenticationFailed)
+        );
+        let mut account_key_signature = query.clone();
+        account_key_signature.insert("sig".into(), hmac(&KEY, &signed));
+        assert_eq!(
+            verify(&account_key_signature, &keys),
+            Some(Error::AuthenticationFailed)
+        );
+
+        // After the key's own expiry the SAS fails even though its window has not ended.
+        let late = Token::verify(&query, &resource, &[], &keys)
+            .unwrap()
+            .unwrap();
+        assert!(
+            late.authorize(&need, None, &connection("2029-01-02T00:00:00Z"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn snapshot_and_version_sas_are_signed_over_the_named_timestamp() {
+        let snapshot = "2029-01-01T00:00:00.0000000Z";
+        let resource = Resource {
+            account: &account(),
+            container: Some("box"),
+            blob: Some("a.txt"),
+        };
+        let signed = format!(
+            "r\n\n2030-01-01T00:00:00Z\n/blob/testaccount/box/a.txt\n\n\n\n2023-11-03\nbs\n{snapshot}\n\n\n\n\n\n"
+        );
+        let mut pairs = vec![
+            ("sv", "2023-11-03"),
+            ("sr", "bs"),
+            ("sp", "r"),
+            ("se", "2030-01-01T00:00:00Z"),
+            ("snapshot", snapshot),
+        ];
+        let query = query(&pairs, &signed);
+        assert!(
+            Token::verify(&query, &resource, &[KEY.to_vec()], &Keys::default())
+                .unwrap()
+                .is_some()
+        );
+        pairs.pop();
+        let missing = self::query(&pairs, &signed);
+        assert_eq!(
+            Token::verify(&missing, &resource, &[KEY.to_vec()], &Keys::default()).err(),
+            Some(Error::AuthenticationFailed)
+        );
+        let mut other = query.clone();
+        other.insert("snapshot".into(), "2029-01-02T00:00:00.0000000Z".into());
+        assert!(Token::verify(&other, &resource, &[KEY.to_vec()], &Keys::default()).is_err());
     }
 }

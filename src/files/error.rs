@@ -22,6 +22,7 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 errors! {
     AuthenticationFailed(StatusCode::FORBIDDEN, "AuthenticationFailed", "Server failed to authenticate the request. Make sure the value of the Authorization header is formed correctly including the signature."),
+    InvalidAuthenticationInfo(StatusCode::UNAUTHORIZED, "InvalidAuthenticationInfo", "Server failed to authenticate the request. Please refer to the information in the www-authenticate header."),
     NoAuthenticationInformation(StatusCode::FORBIDDEN, "NoAuthenticationInformation", "Server failed to authenticate the request. The request carries no authentication information."),
     AuthorizationPermissionMismatch(StatusCode::FORBIDDEN, "AuthorizationPermissionMismatch", "This request is not authorized to perform this operation using this permission."),
     MissingRequiredHeader(StatusCode::BAD_REQUEST, "MissingRequiredHeader", "An HTTP header that's mandatory for this request is not specified."),

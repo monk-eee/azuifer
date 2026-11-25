@@ -138,6 +138,38 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
+/// Formats a time as `YYYY-MM-DDThh:mm:ssZ`, dropping fractions of a second.
+pub(crate) fn format_time(time: SystemTime) -> String {
+    let seconds = time
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let (days, rest) = (
+        i64::try_from(seconds / 86_400).unwrap_or(0),
+        seconds % 86_400,
+    );
+    // Howard Hinnant's civil-from-days algorithm.
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +191,20 @@ mod tests {
         assert!(parse_time("2023-11-03T12:30:15").is_err());
         assert!(parse_time("2023-13-01").is_err());
         assert!(parse_time("garbage").is_err());
+    }
+
+    #[test]
+    fn formats_whole_seconds_and_round_trips() {
+        let time = |seconds| UNIX_EPOCH + Duration::from_secs(seconds);
+        assert_eq!(format_time(time(0)), "1970-01-01T00:00:00Z");
+        assert_eq!(format_time(time(1_699_014_615)), "2023-11-03T12:30:15Z");
+        assert_eq!(format_time(time(1_709_164_800)), "2024-02-29T00:00:00Z");
+        for seconds in [0, 86_399, 1_699_014_615, 4_102_444_800] {
+            assert_eq!(
+                parse_time(&format_time(time(seconds))).unwrap(),
+                time(seconds)
+            );
+        }
     }
 
     #[test]

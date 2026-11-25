@@ -1627,8 +1627,8 @@ fn authentication_accepts_valid_credentials_and_rejects_the_rest() {
             &target,
             &[("authorization", "Bearer abc"), ("x-ms-version", VERSION)],
         ),
-        403,
-        "AuthenticationFailed",
+        401,
+        "InvalidAuthenticationInfo",
     );
     expect_error(
         emulator.send_raw(

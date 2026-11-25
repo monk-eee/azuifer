@@ -8,12 +8,13 @@ use crate::{
     config::{Config, Service},
     dfs,
     domain::{AccountName, Error, Result},
-    files,
+    files, oauth,
     protocol::{self, Operation},
     queue,
     respond::{self, error_response, set},
     store::Store,
     table,
+    tls::{self, TlsListener},
 };
 use crate::{
     admin::{self, Admin, ServiceStatus},
@@ -46,6 +47,20 @@ pub(crate) struct App {
 pub(crate) async fn serve(config: Config, shutdown_on_stdin_eof: bool) -> anyhow::Result<()> {
     let config = Arc::new(config);
     let telemetry = Telemetry::start(&config)?;
+    config
+        .oauth
+        .load_keys()
+        .await
+        .context("could not load the JWKS for --oauth jwks")?;
+    // Held until shutdown: an in-memory run keeps its generated certificate in a temporary directory.
+    let tls = match &config.tls {
+        Some(settings) => Some(tls::prepare(settings, config.location.as_deref()).await?),
+        None => None,
+    };
+    if let Some(certificate) = tls.as_ref().and_then(|tls| tls.generated.as_ref()) {
+        tracing::info!(certificate = %certificate.display(), "using the generated development certificate");
+        println!("tls_cert={}", certificate.display());
+    }
     let admin = TcpListener::bind(config.admin)
         .await
         .context("could not bind the admin listener")?;
@@ -116,12 +131,14 @@ pub(crate) async fn serve(config: Config, shutdown_on_stdin_eof: bool) -> anyhow
         };
         let router = telemetry::instrument(router, &telemetry, service);
         tracing::info!(service = service.name(), %address, "listening");
-        println!("{}_url=http://{address}", service.name());
+        println!("{}_url={}://{address}", service.name(), config.scheme());
         bound.push(ServiceStatus {
             name: service.name().to_owned(),
-            url: format!("http://{address}"),
+            url: format!("{}://{address}", config.scheme()),
         });
-        services.push((listener, router));
+        let acceptor = tls.as_ref().map(|tls| tls.acceptor.clone());
+        let router = router.layer(axum::middleware::map_response(oauth::add_challenge));
+        services.push((listener, router, acceptor));
     }
     let mut admin_router = admin::router(Admin::new(
         &config,
@@ -135,16 +152,28 @@ pub(crate) async fn serve(config: Config, shutdown_on_stdin_eof: bool) -> anyhow
     let stop = CancellationToken::new();
     tracing::info!(admin = %admin_address, "listening");
     println!("admin_url=http://{admin_address}");
-    services.push((admin, admin_router));
-    let tasks =
-        futures_util::future::try_join_all(services.into_iter().map(|(listener, router)| {
+    services.push((admin, admin_router, None));
+    tokio::spawn(oauth::refresh_keys(config.clone(), stop.clone()));
+    let tasks = futures_util::future::try_join_all(services.into_iter().map(
+        |(listener, router, acceptor)| {
             let stop = stop.clone();
             async move {
-                axum::serve(listener, router)
-                    .with_graceful_shutdown(stop.cancelled_owned())
-                    .await
+                let shutdown = stop.cancelled_owned();
+                match acceptor {
+                    Some(acceptor) => {
+                        axum::serve(TlsListener::new(listener, acceptor)?, router)
+                            .with_graceful_shutdown(shutdown)
+                            .await
+                    }
+                    None => {
+                        axum::serve(listener, router)
+                            .with_graceful_shutdown(shutdown)
+                            .await
+                    }
+                }
             }
-        }));
+        },
+    ));
     let signal = async {
         wait_for_shutdown(shutdown_on_stdin_eof).await?;
         stop.cancel();
@@ -283,7 +312,7 @@ async fn handle(app: &App, parts: &Parts, body: Body, request_id: &str) -> Resul
             .extensions
             .get::<ConnectInfo<SocketAddr>>()
             .map(|info| info.0.ip()),
-        https: false,
+        https: app.config.tls.is_some(),
     };
     blob_auth::authorize(
         &app.store,

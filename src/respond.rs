@@ -511,6 +511,11 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
             "AuthenticationFailed",
             "Server failed to authenticate the request. Make sure the value of the Authorization header is formed correctly including the signature.",
         ),
+        Error::InvalidAuthenticationInfo => (
+            S::UNAUTHORIZED,
+            "InvalidAuthenticationInfo",
+            "Server failed to authenticate the request. Please refer to the information in the www-authenticate header.",
+        ),
         Error::InvalidName => (
             S::BAD_REQUEST,
             "InvalidResourceName",

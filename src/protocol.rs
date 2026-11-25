@@ -89,6 +89,8 @@ const ANY_SAS: Need = need(Some("*"), Some(('*', "*")), Public::Never);
 const LIST_CONTAINERS: Need = need(None, Some(('s', "l")), Public::Never);
 const SERVICE_READ: Need = need(None, Some(('s', "r")), Public::Never);
 const SERVICE_WRITE: Need = need(None, Some(('s', "w")), Public::Never);
+/// Only a bearer token may ask for a user delegation key; the operation names no SAS permission.
+const USER_DELEGATION_KEY: Need = need(None, None, Public::Never);
 const CREATE_CONTAINER: Need = need(None, Some(('c', "wc")), Public::Never);
 const DELETE_CONTAINER: Need = need(Some("d"), Some(('c', "d")), Public::Never);
 const READ_CONTAINER: Need = need(Some("r"), Some(('c', "r")), Public::Container);
@@ -128,6 +130,7 @@ pub(crate) enum Operation {
     ListContainers(AccountName, PageRequest, bool),
     GetServiceProperties(AccountName),
     SetServiceProperties(AccountName, UploadOptions),
+    UserDelegationKey(AccountName, UploadOptions),
     ServiceStats,
     AccountInfo,
     CreateContainer(ContainerKey, ContainerCreate),
@@ -282,6 +285,8 @@ fn parse_with(
         .ok_or(Error::AuthenticationFailed)?;
     let credentials = blob_auth::credentials(&Presented {
         keys,
+        oauth: &config.oauth,
+        delegation: &config.delegation,
         method: &parts.method,
         signing_path: parts.uri.path(),
         query: &query,
@@ -326,6 +331,7 @@ impl Operation {
             Self::ListContainers(..) => LIST_CONTAINERS,
             Self::GetServiceProperties(_) | Self::ServiceStats => SERVICE_READ,
             Self::SetServiceProperties(..) => SERVICE_WRITE,
+            Self::UserDelegationKey(..) => USER_DELEGATION_KEY,
             Self::AccountInfo => ANY_SAS,
             Self::CreateContainer(..) => CREATE_CONTAINER,
             Self::ContainerProperties(..) => READ_CONTAINER,
@@ -403,6 +409,13 @@ impl Request<'_> {
             (&Method::PUT, Some("service"), Some("properties")) => {
                 self.check(&["restype", "comp"], &[CHECKSUMS], false)?;
                 Operation::SetServiceProperties(
+                    account,
+                    upload_options(self.headers, MAX_XML_BODY_BYTES)?,
+                )
+            }
+            (&Method::POST, Some("service"), Some("userdelegationkey")) => {
+                self.check(&["restype", "comp"], &[CHECKSUMS], false)?;
+                Operation::UserDelegationKey(
                     account,
                     upload_options(self.headers, MAX_XML_BODY_BYTES)?,
                 )
@@ -1239,21 +1252,53 @@ pub(crate) fn authenticate(parts: &Parts, config: &Config) -> Result<Authenticat
         .accounts
         .get(account)
         .ok_or(Error::AuthenticationFailed)?;
-    crate::auth::verify(
-        account,
-        keys,
-        &parts.method,
-        parts.uri.path(),
-        &query,
-        headers,
-        SystemTime::now(),
-    )?;
+    if let Some(token) = header(headers, "authorization")?.and_then(crate::oauth::bearer) {
+        authenticate_bearer(parts, config, account, token)?;
+    } else {
+        crate::auth::verify(
+            account,
+            keys,
+            &parts.method,
+            parts.uri.path(),
+            &query,
+            headers,
+            SystemTime::now(),
+        )?;
+    }
     check_hns_path(&resource, config)?;
     Ok(AuthenticatedRequest {
         requested_version,
         resource,
         query,
     })
+}
+
+/// DFS reports every bearer failure as AuthorizationFailure.
+fn authenticate_bearer(
+    parts: &Parts,
+    config: &Config,
+    account: &AccountName,
+    token: &str,
+) -> Result<()> {
+    let principal = config
+        .oauth
+        .authenticate(
+            token,
+            &crate::oauth::Request {
+                account: account.as_str(),
+                host: host(parts),
+                now: SystemTime::now(),
+            },
+        )
+        .map_err(|_| Error::AuthenticationFailed)?;
+    if principal.permits(
+        crate::config::Service::Dfs,
+        crate::oauth::is_write(&parts.method),
+    ) {
+        Ok(())
+    } else {
+        Err(Error::AuthenticationFailed)
+    }
 }
 
 fn check_hns_path(target: &Target, config: &Config) -> Result<()> {

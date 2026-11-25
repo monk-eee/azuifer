@@ -25,9 +25,9 @@ Any `{account}.table.{domain}` host names the account, so `http://{account}.tabl
 
 ## Authentication
 
-Shared Key and Shared Key Lite use the Table canonicalization: `VERB, Content-MD5, Content-Type, Date`, then `/account` plus the encoded path, and only `?comp=` from the query (`x-ms-date` takes the `Date` position). Account SAS (`ss` must include `t`; `srt` `s`, `c` or `o` by operation; permissions `r w d l a c u`) and service SAS (`tn`, permissions `r a u d`, `spk`/`srk`/`epk`/`erk` ranges, `si` stored policies, string-to-sign by signed version) are verified. Either of two configured account keys validates. Unknown, expired, not-yet-valid, wrong-table, wrong-permission, out-of-range and tampered tokens are refused with 403. Bearer tokens return 501.
+Shared Key and Shared Key Lite use the Table canonicalization: `VERB, Content-MD5, Content-Type, Date`, then `/account` plus the encoded path, and only `?comp=` from the query (`x-ms-date` takes the `Date` position). Account SAS (`ss` must include `t`; `srt` `s`, `c` or `o` by operation; permissions `r w d l a c u`) and service SAS (`tn`, permissions `r a u d`, `spk`/`srk`/`epk`/`erk` ranges, `si` stored policies, string-to-sign by signed version) are verified. Either of two configured account keys validates. Unknown, expired, not-yet-valid, wrong-table, wrong-permission, out-of-range and tampered tokens are refused with 403. Bearer tokens follow the [bearer-token modes](blob.md#bearer-tokens-oauth): 401 `InvalidAuthenticationInfo` by default, validated with `--oauth basic` or `--oauth jwks`.
 
-Known differences: the SAS signed IP range (`sip`) is not enforced because the listener does not expose peer addresses to the router; `spr=https` is refused because there is no TLS listener; Get and Set Table ACL require Shared Key.
+Known differences: the SAS signed IP range (`sip`) is not enforced because the listener does not expose peer addresses to the router; `spr=https` is refused unless [TLS](blob.md#tls) is enabled; Get and Set Table ACL require Shared Key.
 
 ## Limits
 

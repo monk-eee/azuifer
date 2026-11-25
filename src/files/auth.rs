@@ -11,7 +11,9 @@ use super::{
 };
 use crate::{
     auth::{self, canonical, fold_whitespace},
+    config::Service,
     domain::AccountName,
+    oauth::{self, OAuth},
     sas::Sas,
 };
 use axum::http::{HeaderMap, Method};
@@ -19,9 +21,17 @@ use std::{collections::BTreeMap, time::SystemTime};
 
 /// How a request is credentialed, before any signature is checked.
 pub(super) enum Credentials {
-    SharedKey { account: String, signature: String },
-    SharedKeyLite { account: String, signature: String },
+    SharedKey {
+        account: String,
+        signature: String,
+    },
+    SharedKeyLite {
+        account: String,
+        signature: String,
+    },
     Sas,
+    /// An OAuth bearer token, validated by [`verify_bearer`].
+    Bearer(String),
 }
 
 /// Where in the namespace an operation acts, for SAS scope checks.
@@ -58,6 +68,11 @@ pub(super) fn credentials(headers: &HeaderMap, query: &Query) -> Result<Credenti
     let (scheme, rest) = authorization
         .split_once(' ')
         .ok_or(Error::AuthenticationFailed)?;
+    if scheme.eq_ignore_ascii_case("bearer") {
+        return oauth::bearer(authorization)
+            .map(|token| Credentials::Bearer(token.to_owned()))
+            .ok_or(Error::InvalidAuthenticationInfo);
+    }
     let (account, signature) = rest.split_once(':').ok_or(Error::AuthenticationFailed)?;
     let (account, signature) = (account.to_owned(), signature.to_owned());
     match scheme {
@@ -86,7 +101,7 @@ pub(super) fn verify_header(credentials: &Credentials, request: &Signed<'_>) -> 
     let (name, signature, lite) = match credentials {
         Credentials::SharedKey { account, signature } => (account, signature, false),
         Credentials::SharedKeyLite { account, signature } => (account, signature, true),
-        Credentials::Sas => return Err(Error::AuthenticationFailed),
+        Credentials::Sas | Credentials::Bearer(_) => return Err(Error::AuthenticationFailed),
     };
     if name != request.account.as_str() {
         return Err(Error::AuthenticationFailed);
@@ -113,6 +128,26 @@ pub(super) fn verify_header(credentials: &Credentials, request: &Signed<'_>) -> 
     };
     auth::verify_signature(request.keys, &message, signature)
         .map_err(|_| Error::AuthenticationFailed)
+}
+
+/// Validates an OAuth bearer token; Reader roles may only read.
+pub(super) fn verify_bearer(oauth: &OAuth, token: &str, request: &Signed<'_>) -> Result<()> {
+    let host = auth::header(request.headers, "host").map_err(|_| Error::InvalidHeaderValue)?;
+    let principal = oauth
+        .authenticate(
+            token,
+            &oauth::Request {
+                account: request.account.as_str(),
+                host,
+                now: request.now,
+            },
+        )
+        .map_err(|_| Error::InvalidAuthenticationInfo)?;
+    if principal.permits(Service::File, oauth::is_write(request.method)) {
+        Ok(())
+    } else {
+        Err(Error::AuthorizationPermissionMismatch)
+    }
 }
 
 /// Shared Key Lite: verb, MD5, type, date, `x-ms-` headers, and the path plus `comp` only.
@@ -483,8 +518,18 @@ mod tests {
             Some(Error::NoAuthenticationInformation)
         );
         let bearer = headers(&[("authorization", "Bearer token")]);
+        assert!(matches!(
+            credentials(&bearer, &query),
+            Ok(Credentials::Bearer(token)) if token == "token"
+        ));
+        let empty = headers(&[("authorization", "Bearer ")]);
         assert_eq!(
-            credentials(&bearer, &query).err(),
+            credentials(&empty, &query).err(),
+            Some(Error::InvalidAuthenticationInfo)
+        );
+        let unknown = headers(&[("authorization", "Digest x")]);
+        assert_eq!(
+            credentials(&unknown, &query).err(),
             Some(Error::AuthenticationFailed)
         );
     }

@@ -12,6 +12,7 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Error {
     AuthenticationFailed,
+    InvalidAuthenticationInfo,
     InvalidName,
     InvalidHeader,
     InvalidVersion,

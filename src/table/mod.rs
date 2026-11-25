@@ -135,20 +135,21 @@ async fn handle(
         .accounts
         .get(&account)
         .ok_or_else(|| TableError::new(Kind::AuthenticationFailed))?;
-    let credential = auth::authenticate(
-        &app.store,
-        &auth::Presented {
-            account: &account,
-            keys,
-            method: &parts.method,
-            raw_path: parts.uri.path(),
-            query: &query,
-            headers,
-            table: target.table(),
-            now,
-        },
-    )
-    .await?;
+    let presented = auth::Presented {
+        account: &account,
+        keys,
+        method: &parts.method,
+        raw_path: parts.uri.path(),
+        query: &query,
+        headers,
+        table: target.table(),
+        now,
+        https: app.config.tls.is_some(),
+    };
+    let credential = match auth::bearer(&app.config.oauth, &presented)? {
+        Some(credential) => credential,
+        None => auth::authenticate(&app.store, &presented).await?,
+    };
     let bytes = read_body(app, parts, body).await?;
     let method = protocol::effective_method(&parts.method, headers)?;
     if secondary && method != axum::http::Method::GET {
@@ -179,9 +180,9 @@ async fn handle(
         urls: edm::Urls {
             account: account.as_str().to_owned(),
             base: if host_style {
-                format!("http://{host}")
+                format!("{}://{host}", app.config.scheme())
             } else {
-                format!("http://{host}/{}", account.as_str())
+                format!("{}://{host}/{}", app.config.scheme(), account.as_str())
             },
         },
         credential: &credential,

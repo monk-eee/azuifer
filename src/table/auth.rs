@@ -7,7 +7,9 @@ use super::{
 };
 use crate::{
     auth::{Query, check_skew, header, verify_signature},
+    config::Service,
     domain::AccountName,
+    oauth::{self, OAuth, Principal},
     sas::Sas,
 };
 use axum::http::{HeaderMap, Method};
@@ -17,6 +19,8 @@ use std::time::SystemTime;
 #[derive(Debug)]
 pub(super) enum Credential {
     SharedKey,
+    /// A validated OAuth bearer token.
+    Bearer(Principal),
     AccountSas {
         services: String,
         resource_types: String,
@@ -46,6 +50,13 @@ pub(super) enum Access {
 }
 
 impl Access {
+    fn reads(self) -> bool {
+        matches!(
+            self,
+            Self::ServiceRead | Self::ListTables | Self::EntityRead
+        )
+    }
+
     /// The account SAS resource type letters (any one) and permission letters (all of
     /// one alternative) that grant this access.
     fn account_sas(self) -> Option<(&'static str, &'static [&'static str])> {
@@ -94,6 +105,10 @@ impl Credential {
     ) -> Result<()> {
         match self {
             Self::SharedKey => Ok(()),
+            Self::Bearer(principal) => principal
+                .permits(Service::Table, !access.reads())
+                .then_some(())
+                .ok_or_else(denied),
             Self::AccountSas {
                 services,
                 resource_types,
@@ -141,6 +156,30 @@ pub(super) struct Presented<'a> {
     pub(super) headers: &'a HeaderMap,
     pub(super) table: Option<&'a TableName>,
     pub(super) now: SystemTime,
+    /// Whether the listener terminates TLS, so an HTTPS-only SAS can match.
+    pub(super) https: bool,
+}
+
+/// Validates an Authorization: Bearer header, or returns None when the request
+/// carries no bearer token for uthenticate to handle.
+pub(super) fn bearer(oauth: &OAuth, request: &Presented<'_>) -> Result<Option<Credential>> {
+    let Some(token) = header(request.headers, "authorization")?.and_then(oauth::bearer) else {
+        return Ok(None);
+    };
+    if request.query.contains_key("sig") {
+        return Ok(None);
+    }
+    let principal = oauth
+        .authenticate(
+            token,
+            &oauth::Request {
+                account: request.account.as_str(),
+                host: header(request.headers, "host")?,
+                now: request.now,
+            },
+        )
+        .map_err(|_| TableError::new(Kind::InvalidBearer))?;
+    Ok(Some(Credential::Bearer(principal)))
 }
 
 pub(super) async fn authenticate(store: &Store, request: &Presented<'_>) -> Result<Credential> {
@@ -159,7 +198,7 @@ pub(super) async fn authenticate(store: &Store, request: &Presented<'_>) -> Resu
         "SharedKey" | "SharedKeyLite" => {
             shared_key(request, scheme == "SharedKeyLite", credentials)
         }
-        "Bearer" => Err(TableError::new(Kind::NotImplemented)),
+        "Bearer" => Err(TableError::new(Kind::InvalidBearer)),
         _ => Err(TableError::new(Kind::AuthenticationFailed)),
     }
 }
@@ -298,7 +337,7 @@ pub(super) fn service_sas_string_to_sign(account: &str, table_key: &str, query: 
 async fn sas(store: &Store, request: &Presented<'_>) -> Result<Credential> {
     let failed = || TableError::new(Kind::AuthenticationFailed);
     let query = request.query;
-    if field(query, "sv").is_empty() || field(query, "spr") == "https" {
+    if field(query, "sv").is_empty() || (field(query, "spr") == "https" && !request.https) {
         return Err(failed());
     }
     if query.contains_key("ss") {
@@ -479,6 +518,7 @@ mod tests {
             headers,
             table,
             now: crate::sas::parse_time("2025-06-01").unwrap(),
+            https: false,
         }
     }
 

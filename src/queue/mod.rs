@@ -215,9 +215,10 @@ async fn execute(app: &App, request: protocol::Request, body: Body) -> Result<Re
         Operation::GetServiceStats => xml::stats(app.clock.now_millis()),
         Operation::ListQueues(options) => {
             let limit = options.page.limit;
+            let scheme = app.config.scheme();
             let endpoint = match host {
-                Some(host) => format!("http://{host}/"),
-                None => format!("http://{}/{}/", app.address, account.as_str()),
+                Some(host) => format!("{scheme}://{host}/"),
+                None => format!("{scheme}://{}/{}/", app.address, account.as_str()),
             };
             let rows = store
                 .list_queues(

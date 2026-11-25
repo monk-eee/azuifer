@@ -10,6 +10,8 @@ pub(super) type Result<T> = std::result::Result<T, QueueError>;
 pub(super) enum QueueError {
     AuthenticationFailed,
     InvalidAuthenticationInfo,
+    /// A bearer token that is disabled, malformed, expired, or otherwise not accepted.
+    InvalidBearer,
     PermissionMismatch,
     ServiceMismatch,
     ResourceTypeMismatch,
@@ -50,6 +52,11 @@ impl QueueError {
                 S::BAD_REQUEST,
                 "InvalidAuthenticationInfo",
                 "Authentication information is not given in the correct format. Check the value of Authorization header.",
+            ),
+            Self::InvalidBearer => (
+                S::UNAUTHORIZED,
+                "InvalidAuthenticationInfo",
+                "Server failed to authenticate the request. Please refer to the information in the www-authenticate header.",
             ),
             Self::PermissionMismatch => (
                 S::FORBIDDEN,

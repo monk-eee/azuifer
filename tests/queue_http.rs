@@ -956,7 +956,7 @@ fn shared_key_lite_and_credential_failures() {
         .header("authorization", "Bearer abc")
         .send()
         .unwrap();
-    error(bearer, 400, "InvalidAuthenticationInfo");
+    error(bearer, 401, "InvalidAuthenticationInfo");
     let both = server
         .client
         .get(server.url("/secured?comp=metadata&sig=abc&se=2100-01-01"))

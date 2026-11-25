@@ -69,10 +69,11 @@ impl Context<'_> {
     }
 
     fn endpoint(&self) -> String {
+        let scheme = self.app.config.scheme();
         match &self.host {
-            Some(host) => format!("http://{host}/"),
+            Some(host) => format!("{scheme}://{host}/"),
             None => format!(
-                "http://{}/{}/",
+                "{scheme}://{}/{}/",
                 self.app.address,
                 self.target.account.as_str()
             ),

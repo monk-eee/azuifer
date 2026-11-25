@@ -3554,8 +3554,8 @@ fn service_sas_tokens_authorize_by_resource_permission_and_time() {
             "sv=2023-11-03&sr=b&sp=r&se=2099-01-01T00%3A00%3A00Z&skoid=oid&sktid=tid&sig=x",
             b"",
         ),
-        501,
-        "NotImplemented",
+        403,
+        "AuthenticationFailed",
     );
     denied(
         sas_request(

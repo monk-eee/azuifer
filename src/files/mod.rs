@@ -144,6 +144,10 @@ async fn handle(app: &Arc<App>, parts: &Parts, body: Body) -> Result<Response> {
             grant.authorize(&operation.needs())?;
             grant.overrides
         }
+        Credentials::Bearer(token) => {
+            auth::verify_bearer(&app.config.oauth, token, &signed)?;
+            auth::Overrides::default()
+        }
         header => {
             auth::verify_header(header, &signed)?;
             auth::Overrides::default()
