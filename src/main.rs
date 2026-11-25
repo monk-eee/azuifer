@@ -17,6 +17,9 @@ mod files;
 mod lease;
 mod protocol;
 mod queue;
+// The range map awaits its Blob and DFS consumers (ADR-0015); drop this allow when used.
+#[allow(dead_code)]
+mod ranges;
 mod respond;
 mod sas;
 mod server;

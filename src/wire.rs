@@ -181,23 +181,6 @@ impl Xml {
     }
 }
 
-/// Router for a service that is enabled but not built yet; every request gets a
-/// stable Azure-shaped `NotImplemented` error.
-pub(crate) fn unimplemented_router(json: bool) -> axum::Router {
-    axum::Router::new().fallback(move || async move {
-        let (status, code, message) = (
-            StatusCode::NOT_IMPLEMENTED,
-            "NotImplemented",
-            "This service is not implemented in this build.",
-        );
-        if json {
-            json_error(status, code, message)
-        } else {
-            xml_error(status, code, message)
-        }
-    })
-}
-
 /// Azure-shaped XML error with the `x-ms-error-code` header.
 pub(crate) fn xml_error(status: StatusCode, code: &'static str, message: &str) -> Response {
     let mut xml = Xml::root("Error", &[]);
@@ -219,20 +202,6 @@ fn json_error_value(code: &str, message: &str) -> serde_json::Value {
 /// The JSON error document shared by top-level and batch-part Table errors.
 pub(crate) fn json_error_body(code: &str, message: &str) -> String {
     json_error_value(code, message).to_string()
-}
-
-/// Azure-shaped JSON error used by the Table service.
-pub(crate) fn json_error(status: StatusCode, code: &'static str, message: &str) -> Response {
-    let body = json_error_value(code, message);
-    let mut response = json_response(
-        status,
-        body,
-        "application/json;odata=minimalmetadata;charset=utf-8",
-    );
-    response
-        .headers_mut()
-        .insert("x-ms-error-code", HeaderValue::from_static(code));
-    response
 }
 
 pub(crate) fn json_response(

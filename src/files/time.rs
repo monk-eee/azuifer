@@ -1,0 +1,79 @@
+//! Wire forms of the timestamps FileREST exchanges. Stored times are Unix milliseconds.
+
+use crate::{clock, sas};
+use std::time::{Duration, UNIX_EPOCH};
+
+/// `2023-11-03T12:30:15.1230000Z`: the seven-digit ISO 8601 form used by file
+/// timestamps and share snapshot identifiers.
+pub(crate) fn iso(millis: i64) -> String {
+    let millis = millis.max(0);
+    let (days, rest) = (millis / 86_400_000, millis % 86_400_000);
+    let (year, month, day) = civil_from_days(days);
+    let seconds = rest / 1000;
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}0000Z",
+        seconds / 3600,
+        seconds % 3600 / 60,
+        seconds % 60,
+        rest % 1000
+    )
+}
+
+/// Parses the ISO forms [`iso`] and SDKs produce, to Unix milliseconds.
+pub(crate) fn parse_iso(value: &str) -> Option<i64> {
+    sas::parse_time(value).ok().map(clock::to_millis)
+}
+
+/// RFC 1123 date for `Last-Modified` and `Date` headers.
+pub(crate) fn http_date(millis: i64) -> String {
+    let millis = u64::try_from(millis).unwrap_or(0);
+    httpdate::fmt_http_date(UNIX_EPOCH + Duration::from_millis(millis))
+}
+
+// Howard Hinnant's civil-from-days algorithm.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    (year, month, day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_seven_fraction_digits() {
+        assert_eq!(iso(0), "1970-01-01T00:00:00.0000000Z");
+        assert_eq!(iso(1_699_014_615_123), "2023-11-03T12:30:15.1230000Z");
+        assert_eq!(iso(1_709_164_800_000), "2024-02-29T00:00:00.0000000Z");
+    }
+
+    #[test]
+    fn iso_round_trips_through_the_parser() {
+        for millis in [0, 999, 1_699_014_615_123, 4_102_444_800_001] {
+            assert_eq!(parse_iso(&iso(millis)), Some(millis));
+        }
+        assert_eq!(parse_iso("not a time"), None);
+        assert_eq!(parse_iso("2023-11-03T12:30:15"), None);
+    }
+
+    #[test]
+    fn http_dates_use_rfc_1123() {
+        assert_eq!(
+            http_date(1_699_014_615_123),
+            "Fri, 03 Nov 2023 12:30:15 GMT"
+        );
+    }
+}

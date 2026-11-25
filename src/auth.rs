@@ -97,7 +97,7 @@ pub(crate) fn verify_signature(keys: &[Vec<u8>], message: &str, signature: &str)
     Ok(())
 }
 
-fn canonical(
+pub(crate) fn canonical(
     account: &AccountName,
     method: &Method,
     raw_path: &str,
@@ -151,7 +151,7 @@ pub(crate) fn canonical_headers(headers: &HeaderMap) -> Result<String> {
     Ok(text)
 }
 
-fn fold_whitespace(value: &str) -> String {
+pub(crate) fn fold_whitespace(value: &str) -> String {
     let mut out = String::new();
     let mut quoted = false;
     let mut escaped = false;

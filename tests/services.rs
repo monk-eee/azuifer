@@ -109,8 +109,12 @@ fn every_enabled_service_listens_on_its_own_port() {
         .get(format!("{}/devstoreaccount1", server.urls["file"]))
         .send()
         .unwrap();
-    assert_eq!(file.status(), 501, "file");
-    assert_eq!(file.headers()["x-ms-error-code"], "NotImplemented");
+    assert!(
+        file.status().is_client_error(),
+        "File rejects anonymous requests, got {}",
+        file.status()
+    );
+    assert_ne!(file.headers()["x-ms-error-code"], "NotImplemented");
     let dfs = client
         .get(format!(
             "{}/devstoreaccount1?resource=account",
