@@ -162,7 +162,17 @@ impl Emulator {
         if length.is_some() {
             request = request.body(body.to_vec());
         }
-        request.send().expect("HTTP request completed")
+        // A server that rejects an oversize body before reading it can reset the
+        // connection while the client is still writing; the rejection is the answer
+        // under test, so retry until the response is read.
+        let mut failure = None;
+        for _ in 0..5 {
+            match request.try_clone().expect("buffered body").send() {
+                Ok(response) => return response,
+                Err(error) => failure = Some(error),
+            }
+        }
+        panic!("HTTP request completed: {failure:?}");
     }
 
     /// A request authenticated only by what the path carries (a SAS).
