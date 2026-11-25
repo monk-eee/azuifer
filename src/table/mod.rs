@@ -37,14 +37,18 @@ struct App {
     address: SocketAddr,
 }
 
-pub(crate) async fn router(config: Arc<Config>, address: SocketAddr) -> anyhow::Result<Router> {
+pub(crate) async fn router(
+    config: Arc<Config>,
+    address: SocketAddr,
+    clock: Clock,
+) -> anyhow::Result<Router> {
     let location = config.location.clone();
     let store = tokio::task::spawn_blocking(move || Store::open(location.as_deref()))
         .await
         .context("Table storage initialization did not complete")??;
     let app = Arc::new(App {
         config,
-        clock: Clock::new(),
+        clock,
         store,
         address,
     });
@@ -124,7 +128,8 @@ async fn handle(
 ) -> Result<Response> {
     let headers = &parts.headers;
     let query = protocol::parse_query(parts.uri.query())?;
-    let (account, secondary, target) = protocol::parse_path(parts.uri.path())?;
+    let (path, host_style) = protocol::logical_path(parts);
+    let (account, secondary, target) = protocol::parse_path(&path)?;
     let keys = app
         .config
         .accounts
@@ -173,7 +178,11 @@ async fn handle(
         account: &account,
         urls: edm::Urls {
             account: account.as_str().to_owned(),
-            base: format!("http://{host}/{}", account.as_str()),
+            base: if host_style {
+                format!("http://{host}")
+            } else {
+                format!("http://{host}/{}", account.as_str())
+            },
         },
         credential: &credential,
         request_id,

@@ -35,6 +35,8 @@ pub(super) struct Context<'a> {
     pub(super) app: &'a Arc<App>,
     pub(super) operation: Operation,
     pub(super) target: Target,
+    /// The `Host` the client addressed, when it used host-style addressing.
+    pub(super) host: Option<String>,
     pub(super) query: Query,
     pub(super) headers: Headers<'a>,
     pub(super) overrides: Overrides,
@@ -67,11 +69,14 @@ impl Context<'_> {
     }
 
     fn endpoint(&self) -> String {
-        format!(
-            "http://{}/{}/",
-            self.app.address,
-            self.target.account.as_str()
-        )
+        match &self.host {
+            Some(host) => format!("http://{host}/"),
+            None => format!(
+                "http://{}/{}/",
+                self.app.address,
+                self.target.account.as_str()
+            ),
+        }
     }
 }
 

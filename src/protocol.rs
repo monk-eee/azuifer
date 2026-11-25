@@ -187,16 +187,7 @@ pub(crate) struct ParsedRequest {
 
 /// The authority a client addressed, from `Host` or an HTTP/2 `:authority`.
 pub(crate) fn host(parts: &Parts) -> Option<&str> {
-    parts
-        .uri
-        .authority()
-        .map(|authority| authority.as_str())
-        .or_else(|| {
-            parts
-                .headers
-                .get("host")
-                .and_then(|value| value.to_str().ok())
-        })
+    address::request_host(parts)
 }
 
 fn parse_target(path: &str) -> Result<Target> {
@@ -282,7 +273,7 @@ fn parse_with(
         return Err(Error::InvalidVersion);
     }
     let mut query = parse_query(parts.uri.query())?;
-    let host_account = address::host_account(host(parts));
+    let host_account = address::host_account("blob", host(parts));
     let logical = address::logical_path(host_account.as_ref(), parts.uri.path());
     let target = parse_target(&logical)?;
     let keys = config
@@ -1240,7 +1231,9 @@ pub(crate) fn authenticate(parts: &Parts, config: &Config) -> Result<Authenticat
     if query.contains_key("sig") {
         return Err(Error::Unsupported);
     }
-    let resource = parse_target(parts.uri.path())?;
+    // DFS accepts `{account}.dfs.{domain}`; the signature covers the path as sent.
+    let (logical, _) = address::resolve("dfs", parts);
+    let resource = parse_target(&logical)?;
     let account = resource.account();
     let keys = config
         .accounts

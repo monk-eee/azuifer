@@ -1,6 +1,6 @@
 # Table wire compatibility
 
-The Table service runs on its own listener (`--table-port`, default 10002; ephemeral when `--port 0`) with API baseline `2023-11-03`, path-style endpoints (`http://127.0.0.1:10002/{account}/...`), and JSON payloads only. [The manifest](../../specs/conformance/table.json) is the operation inventory; every state is `implemented`, `known-difference`, or `unsupported`, and nothing has been differentially verified against Azure.
+The Table service runs on its own listener (`--table-port`, default 10002; ephemeral when `--port 0`) with API baseline `2023-11-03`, path-style (`http://127.0.0.1:10002/{account}/...`) and host-style (`http://{account}.table.localhost:10002/...`) endpoints, and JSON payloads only. [The manifest](../../specs/conformance/table.json) is the operation inventory; every state is `implemented`, `known-difference`, or `unsupported`, and nothing has been differentially verified against Azure.
 
 The behavior follows [ADR-0014](../adr.d/0014-evaluate-table-queries-in-rust-over-typed-entities.md): entities are typed values in SQLite, `$filter` is parsed to an AST and evaluated in Rust, and batches commit in one transaction.
 
@@ -17,7 +17,11 @@ The behavior follows [ADR-0014](../adr.d/0014-evaluate-table-queries-in-rust-ove
 | `PUT`, `MERGE`, `PATCH`, `DELETE /{table}(PartitionKey='p',RowKey='r')` | Update, Merge, Delete; without `If-Match`, Insert Or Replace and Insert Or Merge |
 | `POST /$batch` | Entity Group Transactions (one change set, or one query) |
 
-`POST` with `X-HTTP-Method: MERGE | PATCH | PUT | DELETE` is accepted as an override. The `-secondary` account suffix (`/{account}-secondary/...`) answers `GET` only.
+`POST` with `X-HTTP-Method: MERGE | PATCH | PUT | DELETE` is accepted as an override. The `-secondary` account suffix (`/{account}-secondary/...` or the host `{account}-secondary.table.{domain}`) answers `GET` only.
+
+## Addressing
+
+Any `{account}.table.{domain}` host names the account, so `http://{account}.table.localhost:10002/Tables` equals `http://127.0.0.1:10002/{account}/Tables`. Shared Key signs the path exactly as sent and the string-to-sign always holds `/{account}` once before it (`/{account}/Tables` host-style, `/{account}/{account}/Tables` path-style). Account and service SAS strings do not depend on the style. The `odata.metadata`, `odata.id` and `Location` URLs use the host the client addressed. `azure-data-tables` takes the account from `AzureNamedKeyCredential`, so it works with a host-style endpoint without further configuration ([`tests/addressing_sdk.py`](../../tests/addressing_sdk.py)); the client machine must resolve `*.localhost` to loopback.
 
 ## Authentication
 
@@ -48,7 +52,7 @@ All Edm types round-trip: `String`, `Boolean`, `Int32`, `Int64` (JSON string), `
 - No 5 second query timeout, no short pages at partition boundaries, and no `$orderby`, `$skip`, `$expand`, `$count` or filter functions (these return 501 or 400).
 - Service properties, metrics, logging and CORS are stored and returned but never applied or enforced; service stats are always `live`.
 - Batches parse and validate every operation before executing, so error index precedence can differ from Azure when several operations are invalid.
-- Atom payloads are rejected with 415 `AtomFormatNotSupported`. Host-style (`{account}.table.localhost`) addressing is not routed.
+- Atom payloads are rejected with 415 `AtomFormatNotSupported`.
 - `x-ms-version` values at or below the baseline are accepted and echoed; newer values are accepted (and the baseline reported) only with `--skip-api-version-check`.
 
 ## Storage
@@ -58,7 +62,7 @@ All Edm types round-trip: `String`, `Boolean`, `Int32`, `Int64` (JSON string), `
 ## Tests
 
 - Unit tests live beside the code in `src/table/` (filter parser and evaluator, Edm serialization, string-to-sign and SAS, batch parsing, ETags).
-- [HTTP suite](../../tests/table_http.rs) runs the real binary: table lifecycle, every entity operation, ETag concurrency, batches, paging, limits, authentication, ACLs, and restart persistence.
+- [HTTP suite](../../tests/table_http.rs) runs the real binary: table lifecycle, every entity operation, ETag concurrency, batches, paging, limits, authentication, ACLs, and restart persistence. The [addressing suite](../../tests/addressing_http.rs) covers host-style Shared Key, SAS and the secondary host.
 - [SDK and CLI script](../../tests/table_sdk.py) drives the `azure-data-tables` Python SDK and the Azure CLI (`az storage table`, `az storage entity`) against the built binary. It is a manual run, not part of `cargo test`:
 
 ```sh

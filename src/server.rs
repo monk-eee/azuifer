@@ -4,7 +4,7 @@ use crate::{
     blob_cors,
     blob_exec::{self, Context},
     blob_sas::Connection,
-    clock::Clock,
+    clock::{self, Clock},
     config::{Config, Service},
     dfs,
     domain::{AccountName, Error, Result},
@@ -104,17 +104,20 @@ pub(crate) async fn serve(config: Config, shutdown_on_stdin_eof: bool) -> anyhow
                     dfs::router(config.clone(), store.clone(), permits.clone())?
                 }
             }
-            Service::Queue => queue::router(config.clone(), address).await?,
-            Service::Table => table::router(config.clone(), address).await?,
-            Service::File => files::router(config.clone(), address).await?,
+            Service::Queue => queue::router(config.clone(), address, clock.clone()).await?,
+            Service::Table => table::router(config.clone(), address, clock.clone()).await?,
+            Service::File => files::router(config.clone(), address, clock.clone()).await?,
         };
         tracing::info!(service = service.name(), %address, "listening");
         println!("{}_url=http://{address}", service.name());
         services.push((listener, router));
     }
-    let admin_router = Router::new()
+    let mut admin_router = Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
         .route("/readyz", get(|| async { "ready\n" }));
+    if config.test_clock {
+        admin_router = admin_router.merge(clock::router(clock.clone()));
+    }
     let stop = CancellationToken::new();
     tracing::info!(admin = %admin_address, "listening");
     println!("admin_url=http://{admin_address}");
@@ -195,7 +198,7 @@ async fn dispatch(State(app): State<Arc<App>>, request: Request) -> Response {
     let head = parts.method == Method::HEAD;
     let client_request_id = parts.headers.get("x-ms-client-request-id").cloned();
     let mut response = if app.config.test_clock && parts.uri.path().starts_with("/_azuifer/") {
-        clock_endpoint(&app, &parts)
+        clock::endpoint(&app.clock, &parts)
     } else if parts.method == Method::OPTIONS {
         preflight(&app, &parts).await
     } else {
@@ -288,7 +291,7 @@ async fn handle(app: &App, parts: &Parts, body: Body, request_id: &str) -> Resul
 
 /// The account a request addresses, for CORS lookups made before parsing succeeds.
 fn account_of(parts: &Parts) -> Option<AccountName> {
-    address::host_account(protocol::host(parts)).or_else(|| {
+    address::host_account("blob", protocol::host(parts)).or_else(|| {
         let segment = parts.uri.path().strip_prefix('/')?.split('/').next()?;
         AccountName::parse(segment).ok()
     })
@@ -338,41 +341,4 @@ async fn add_cors(app: &App, parts: &Parts, response: &mut Response) {
     if let Some(rule) = blob_cors::find(&rules, origin, parts.method.as_str(), None) {
         blob_cors::apply(rule, origin, response.headers_mut());
     }
-}
-
-/// `--test-clock`: read the clock with `GET /_azuifer/clock` and move it with
-/// `POST /_azuifer/clock/advance?seconds=N` (or `ms=N`), so lease and SAS
-/// expiry can be tested without sleeping (ADR-0012).
-fn clock_endpoint(app: &App, parts: &Parts) -> Response {
-    let path = parts.uri.path();
-    if parts.method == Method::POST && path == "/_azuifer/clock/advance" {
-        let amount = parts
-            .uri
-            .query()
-            .unwrap_or_default()
-            .split('&')
-            .find_map(|pair| {
-                let (name, value) = pair.split_once('=')?;
-                let value: u64 = value.parse().ok()?;
-                match name {
-                    "ms" => Some(std::time::Duration::from_millis(value)),
-                    "seconds" => Some(std::time::Duration::from_secs(value)),
-                    _ => None,
-                }
-            });
-        match amount {
-            Some(amount) => app.clock.advance(amount),
-            None => return error_response(Error::InvalidQuery),
-        }
-    } else if !(parts.method == Method::GET && path == "/_azuifer/clock") {
-        return error_response(Error::Unsupported);
-    }
-    let mut response = Response::new(Body::from(format!(
-        "{{\"unix_ms\":{}}}",
-        app.clock.now_millis()
-    )));
-    response
-        .headers_mut()
-        .insert("content-type", HeaderValue::from_static("application/json"));
-    response
 }

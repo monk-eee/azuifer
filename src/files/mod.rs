@@ -12,7 +12,7 @@ mod store;
 mod time;
 mod xml;
 
-use crate::{clock::Clock, config::Config, domain::ApiVersion};
+use crate::{address, clock::Clock, config::Config, domain::ApiVersion};
 use anyhow::Context as _;
 use auth::{Credentials, Signed};
 use axum::{
@@ -46,11 +46,14 @@ pub(super) struct App {
     permits: Arc<Semaphore>,
 }
 
-pub(crate) async fn router(config: Arc<Config>, address: SocketAddr) -> anyhow::Result<Router> {
+pub(crate) async fn router(
+    config: Arc<Config>,
+    address: SocketAddr,
+    clock: Clock,
+) -> anyhow::Result<Router> {
     let version = HeaderValue::from_static(API_VERSION);
     let baseline = ApiVersion::parse(API_VERSION)
         .map_err(|_| anyhow::anyhow!("invalid Files API version constant"))?;
-    let clock = Clock::new();
     let (location, limit, store_clock) =
         (config.location.clone(), config.memory_limit, clock.clone());
     let store =
@@ -112,7 +115,8 @@ async fn handle(app: &Arc<App>, parts: &Parts, body: Body) -> Result<Response> {
     }
     let query = Query::parse(parts.uri.query())?;
     let headers = Headers(&parts.headers);
-    let target = Target::parse(parts.uri.path(), headers.flag("x-ms-allow-trailing-dot")?)?;
+    let (path, host) = address::resolve("file", parts);
+    let target = Target::parse(&path, headers.flag("x-ms-allow-trailing-dot")?)?;
     let keys = app
         .config
         .accounts
@@ -152,6 +156,7 @@ async fn handle(app: &Arc<App>, parts: &Parts, body: Body) -> Result<Response> {
         app,
         operation,
         target,
+        host: host.map(str::to_owned),
         query,
         headers,
         overrides,

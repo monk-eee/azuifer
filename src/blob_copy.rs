@@ -68,7 +68,7 @@ impl CopySource {
         if !(same_host || local_name && self.port == Some(own_port)) {
             return Err(Error::Unsupported);
         }
-        let account = address::host_account(Some(&authority));
+        let account = address::host_account("blob", Some(&authority));
         let path = address::logical_path(account.as_ref(), &self.path);
         let decoded = percent_decode_str(&path)
             .decode_utf8()

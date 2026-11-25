@@ -5,6 +5,7 @@ use super::{
     },
 };
 use crate::{
+    address,
     auth::{Query, header},
     domain::{AccountName, PageRequest, xml_safe},
 };
@@ -13,6 +14,8 @@ use percent_encoding::percent_decode_str;
 
 pub(super) struct Request {
     pub(super) account: AccountName,
+    /// The `Host` the client addressed, when it used host-style addressing.
+    pub(super) host: Option<String>,
     pub(super) query: Query,
     pub(super) operation: Operation,
 }
@@ -148,18 +151,22 @@ pub(super) fn parse(parts: &Parts) -> Result<Request> {
         return Err(QueueError::MalformedHeaders);
     }
     let query = parse_query(parts.uri.query())?;
-    let (account, target) = parse_path(parts.uri.path())?;
+    let (path, host) = address::resolve("queue", parts);
+    let (account, target) = parse_path(&path)?;
     let operation = route(&parts.method, target, &query, headers)?;
     Ok(Request {
         account,
+        host: host.map(str::to_owned),
         query,
         operation,
     })
 }
 
 /// The account a request addresses, used to evaluate CORS when routing failed.
-pub(super) fn account_of(path: &str) -> Option<AccountName> {
-    parse_path(path).ok().map(|(account, _)| account)
+pub(super) fn account_of(parts: &Parts) -> Option<AccountName> {
+    parse_path(&address::resolve("queue", parts).0)
+        .ok()
+        .map(|(account, _)| account)
 }
 
 fn decode(value: &str, plus_is_space: bool) -> Result<String> {

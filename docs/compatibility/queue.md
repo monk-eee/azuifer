@@ -10,6 +10,10 @@ DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=<key>;Queu
 
 `devstoreaccount1` and its public key are the default account; `AZUIFER_ACCOUNT_NAME`/`AZUIFER_ACCOUNT_KEY` or a TOML `[[accounts]]` entry replace them.
 
+## Addressing
+
+Both styles work: `http://127.0.0.1:10001/{account}/{queue}/messages` and `http://{account}.queue.localhost:10001/{queue}/messages` (any `{account}.queue.{domain}` host). In the host-style form the path does not repeat the account, and Shared Key and Shared Key Lite sign the path exactly as sent, so the canonical resource is `/{account}/{queue}/messages` host-style and `/{account}/{account}/{queue}/messages` path-style. Service SAS strings use `/queue/{account}/{queue}` either way. List Queues reports `ServiceEndpoint` as the host the client used. `azure-storage-queue` cannot infer the account from a `.queue.localhost` host and raises `Unable to determine account name`, so pass `credential={"account_name": ..., "account_key": ...}`; the client then works against `http://{account}.queue.localhost:PORT` ([`tests/addressing_sdk.py`](../../tests/addressing_sdk.py)). The client machine must resolve `*.localhost` to loopback.
+
 ## Operations
 
 | Operation | Request | Success |
@@ -52,15 +56,14 @@ Wrong service, resource type, permission or protocol return `AuthorizationServic
 
 ## Known differences
 
-- Path-style URLs only; `{account}.queue.localhost` host-style addressing is not served.
 - `sip` is signed but not enforced (the router sees no peer address); `spr=https` is always rejected because the listener is plain HTTP.
 - Logging and metrics settings are stored and returned but no analytics data is produced. Get Queue Service Stats is served on the primary endpoint with a constant `live` status.
 - Deleted queues can be recreated immediately (`QueueBeingDeleted` is not modeled). An Update Message visibility time is not capped at the expiry time.
 - `AuthenticationErrorDetail` is omitted so no signing material is echoed. Pop receipts are opaque Base64 values, not Azure's format, and list markers are local tokens.
 - `x-ms-version` reports the baseline; older versions are rejected and newer ones need `--skip-api-version-check`.
-- The `--test-clock` administration endpoints are not implemented; tests inject a `Clock` or use short real timeouts.
+- With `--test-clock`, the admin listener serves `GET /_azuifer/clock` and `POST /_azuifer/clock/advance?seconds=N` (or `ms=N`) for the one clock every service shares ([ADR-0012](../adr.d/0012-inject-time-through-one-clock.md)), so visibility timeouts and TTLs expire without sleeping. Signed dates still need to follow the server clock, or stay inside the 15 minute skew window.
 
 ## Tests
 
-- `cargo test` runs the unit tests (XML, string-to-sign, store with an advanced `Clock`, routing, CORS) and the [HTTP suite](../../tests/queue_http.rs), which starts the real binary and covers lifecycle, visibility, pop receipts, TTL, restart and crash persistence, all authentication modes and failures, ACLs, CORS and version policy.
+- `cargo test` runs the unit tests (XML, string-to-sign, store with an advanced `Clock`, routing, CORS) and the [HTTP suite](../../tests/queue_http.rs), which starts the real binary and covers lifecycle, visibility, pop receipts, TTL, restart and crash persistence, all authentication modes and failures, ACLs, CORS and version policy. The [addressing suite](../../tests/addressing_http.rs) covers host-style Shared Key and SAS, and the [shared clock suite](../../tests/shared_clock_http.rs) advances the admin `--test-clock` and observes visibility and TTL expiry over HTTP.
 - [`tests/queue_sdk.py`](../../tests/queue_sdk.py) drives `azure-storage-queue` and [`tests/queue_azure_cli.py`](../../tests/queue_azure_cli.py) drives `az storage queue` and `az storage message`. They are run manually (`pip install azure-storage-queue`) against a server started as above and are not part of `cargo test`.

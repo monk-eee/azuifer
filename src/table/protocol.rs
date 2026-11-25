@@ -11,10 +11,11 @@ use super::{
     store::{WriteKind, WriteOp},
 };
 use crate::{
+    address,
     auth::{Query, header},
     domain::AccountName,
 };
-use axum::http::{HeaderMap, Method};
+use axum::http::{HeaderMap, Method, request::Parts};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use percent_encoding::percent_decode_str;
 use std::collections::BTreeMap;
@@ -162,6 +163,18 @@ pub(super) fn parse_query(query: Option<&str>) -> Result<Query> {
         }
     }
     Ok(result)
+}
+
+/// The request path in path-style form, and whether the request used host-style
+/// addressing. `{account}[-secondary].table.{domain}` supplies the account segment.
+pub(super) fn logical_path(parts: &Parts) -> (String, bool) {
+    let label = address::host_label("table", address::request_host(parts)).filter(|label| {
+        AccountName::parse(label.strip_suffix("-secondary").unwrap_or(label)).is_ok()
+    });
+    match label {
+        Some(label) => (format!("/{label}{}", parts.uri.path()), true),
+        None => (parts.uri.path().to_owned(), false),
+    }
 }
 
 /// Splits a `/account/...` path into the account and the addressed resource. A

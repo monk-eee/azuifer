@@ -1,4 +1,15 @@
-use crate::domain::{Error, Result};
+use crate::{
+    domain::{Error, Result},
+    respond::error_response,
+};
+use axum::{
+    Router,
+    body::Body,
+    extract::{Request, State},
+    http::{HeaderValue, Method, request::Parts},
+    response::Response,
+    routing::any,
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Time source for TTLs, visibility, leases, and SAS validity (ADR-0012).
@@ -33,6 +44,54 @@ impl Clock {
         self.0
             .fetch_add(millis, std::sync::atomic::Ordering::Relaxed);
     }
+}
+
+/// `--test-clock`: read the clock with `GET /_azuifer/clock` and move it with
+/// `POST /_azuifer/clock/advance?seconds=N` (or `ms=N`), so leases, visibility,
+/// TTLs, and SAS expiry can be tested without sleeping (ADR-0012).
+pub(crate) fn endpoint(clock: &Clock, parts: &Parts) -> Response {
+    let path = parts.uri.path();
+    if parts.method == Method::POST && path == "/_azuifer/clock/advance" {
+        let amount = parts
+            .uri
+            .query()
+            .unwrap_or_default()
+            .split('&')
+            .find_map(|pair| {
+                let (name, value) = pair.split_once('=')?;
+                let value: u64 = value.parse().ok()?;
+                match name {
+                    "ms" => Some(Duration::from_millis(value)),
+                    "seconds" => Some(Duration::from_secs(value)),
+                    _ => None,
+                }
+            });
+        match amount {
+            Some(amount) => clock.advance(amount),
+            None => return error_response(Error::InvalidQuery),
+        }
+    } else if !(parts.method == Method::GET && path == "/_azuifer/clock") {
+        return error_response(Error::Unsupported);
+    }
+    let mut response = Response::new(Body::from(format!(
+        "{{\"unix_ms\":{}}}",
+        clock.now_millis()
+    )));
+    response
+        .headers_mut()
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    response
+}
+
+/// The test-clock endpoints for the admin listener.
+pub(crate) fn router(clock: Clock) -> Router {
+    async fn handle(State(clock): State<Clock>, request: Request) -> Response {
+        endpoint(&clock, &request.into_parts().0)
+    }
+    Router::new()
+        .route("/_azuifer/clock", any(handle))
+        .route("/_azuifer/clock/advance", any(handle))
+        .with_state(clock)
 }
 
 pub(crate) fn to_millis(time: SystemTime) -> i64 {

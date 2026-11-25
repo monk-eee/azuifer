@@ -55,8 +55,11 @@ struct App {
     address: SocketAddr,
 }
 
-pub(crate) async fn router(config: Arc<Config>, address: SocketAddr) -> anyhow::Result<Router> {
-    let clock = Clock::new();
+pub(crate) async fn router(
+    config: Arc<Config>,
+    address: SocketAddr,
+    clock: Clock,
+) -> anyhow::Result<Router> {
     let location = config.location.clone();
     let store_clock = clock.clone();
     let store = tokio::task::spawn_blocking(move || Store::open(location.as_deref(), store_clock))
@@ -100,7 +103,7 @@ async fn dispatch(State(app): State<Arc<App>>, request: HttpRequest) -> Response
     };
     if parts.method != Method::OPTIONS
         && parts.headers.contains_key("origin")
-        && let Some(account) = protocol::account_of(parts.uri.path())
+        && let Some(account) = protocol::account_of(&parts)
         && let Ok(properties) = app.store.service_properties(account).await
     {
         cors::decorate(
@@ -196,6 +199,7 @@ fn set(response: &mut Response, name: &str, value: &str) -> Result<()> {
 
 async fn execute(app: &App, request: protocol::Request, body: Body) -> Result<Response> {
     let account = request.account;
+    let host = request.host;
     let store = &app.store;
     match request.operation {
         Operation::GetServiceProperties => {
@@ -211,7 +215,10 @@ async fn execute(app: &App, request: protocol::Request, body: Body) -> Result<Re
         Operation::GetServiceStats => xml::stats(app.clock.now_millis()),
         Operation::ListQueues(options) => {
             let limit = options.page.limit;
-            let endpoint = format!("http://{}/{}/", app.address, account.as_str());
+            let endpoint = match host {
+                Some(host) => format!("http://{host}/"),
+                None => format!("http://{}/{}/", app.address, account.as_str()),
+            };
             let rows = store
                 .list_queues(
                     account,

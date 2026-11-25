@@ -1,6 +1,6 @@
 # Azure Files (FileREST) wire compatibility
 
-Azuifer serves the Azure Files data plane on its own listener (default port `10004`, `--file-port`, or an ephemeral port when `--port 0`). It targets API version `2023-11-03` with path-style endpoints, and has its own namespace, store, leases, and handles ([ADR-0016](../adr.d/0016-give-filerest-its-own-namespace.md)). [The manifest](../../specs/conformance/files.json) is the operation inventory; no operation has been rated against Azure yet (`azure_differential_verified` is `false`), so every state is `implemented`, `known-difference` or `unsupported`, never `exact`.
+Azuifer serves the Azure Files data plane on its own listener (default port `10004`, `--file-port`, or an ephemeral port when `--port 0`). It targets API version `2023-11-03` with path-style (`http://127.0.0.1:10004/{account}/...`) and host-style (`http://{account}.file.localhost:10004/...`) endpoints, and has its own namespace, store, leases, and handles ([ADR-0016](../adr.d/0016-give-filerest-its-own-namespace.md)). [The manifest](../../specs/conformance/files.json) is the operation inventory; no operation has been rated against Azure yet (`azure_differential_verified` is `false`), so every state is `implemented`, `known-difference` or `unsupported`, never `exact`.
 
 ```sh
 azuifer serve --services file --in-memory
@@ -39,7 +39,11 @@ Share, directory and file URIs are `/{account}/{share}/{path}`. Resources are se
 
 ## Leases
 
-Share leases implement the full table: durations of 15 to 60 seconds or infinite, `Available`, `Leased`, `Expired`, `Breaking` and `Broken`, with break periods up to 60 seconds. File leases are infinite and have `Available`, `Leased` and `Broken`; `renew` is rejected and `break` is immediate. State is computed from the stored lease and the clock on each access ([ADR-0017](../adr.d/0017-model-leases-as-a-clocked-state-machine.md)), so leases survive restart and need no timer. The outcome tables in the lease documents list 409 for a wrong lease ID on an ordinary operation, while the error list assigns 412 to `LeaseIdMismatchWithFileOperation` and `LeaseIdMismatchWithFileShareOperation`; Azuifer follows the error list. Lease operations themselves return 409 codes.
+Share leases implement the full table: durations of 15 to 60 seconds or infinite, `Available`, `Leased`, `Expired`, `Breaking` and `Broken`, with break periods up to 60 seconds. File leases are infinite and have `Available`, `Leased` and `Broken`; `renew` is rejected and `break` is immediate. State is computed from the stored lease and the clock on each access ([ADR-0017](../adr.d/0017-model-leases-as-a-clocked-state-machine.md)), so leases survive restart and need no timer. With `--test-clock`, `POST /_azuifer/clock/advance?seconds=N` on the admin listener moves the clock all services share, which expires a 15 to 60 second share lease without sleeping. The outcome tables in the lease documents list 409 for a wrong lease ID on an ordinary operation, while the error list assigns 412 to `LeaseIdMismatchWithFileOperation` and `LeaseIdMismatchWithFileShareOperation`; Azuifer follows the error list. Lease operations themselves return 409 codes.
+
+## Addressing
+
+Any `{account}.file.{domain}` host names the account, so `http://{account}.file.localhost:10004/{share}/{path}` equals `http://127.0.0.1:10004/{account}/{share}/{path}`. Shared Key and Shared Key Lite sign the path exactly as sent, after `/{account}` (so `/{account}/{share}/{path}` host-style and `/{account}/{account}/{share}/{path}` path-style); SAS strings (`/file/{account}/{share}/...`) do not depend on the style. List Shares and List Directories and Files report `ServiceEndpoint` as the host the client used. `azure-storage-file-share` cannot infer the account from a `.file.localhost` host and raises `Unable to determine account name`, so pass `credential={"account_name": ..., "account_key": ...}`; the client then works against the host-style URL ([`tests/addressing_sdk.py`](../../tests/addressing_sdk.py)). The client machine must resolve `*.localhost` to loopback.
 
 ## Known differences
 
@@ -47,10 +51,10 @@ Share leases implement the full table: durations of 15 to 60 seconds or infinite
 - Copy File is synchronous and limited to a source on this instance and account (a share snapshot is allowed). `{account}.file.*` host names of a configured account are treated as local because Azure CLI builds source URLs that way. Abort Copy always returns `NoPendingCopyOperation`.
 - Set File Properties replaces the HTTP properties as a set only when one of them is sent, so a pure resize keeps the content type.
 - Standard conditional headers are evaluated on reads even though Azure does not document them for Files. Permissions are stored SDDL strings and are never evaluated; there is no SMB or NFS.
-- Soft delete, provisioned IOPS and bandwidth, the 200-snapshot limit, access-tier transition rules and host-style addressing are not modeled.
+- Soft delete, provisioned IOPS and bandwidth, the 200-snapshot limit and access-tier transition rules are not modeled.
 - Unsupported operations and options return a stable `501 NotImplemented` Azure-shaped error.
 
 ## Verification
 
-- `cargo test` runs unit tests for the range map, lease state machine, names, XML bodies, authentication string-to-sign layouts and the store, and the [HTTP suite](../../tests/files_http.rs), which starts the real binary and covers share, directory and file lifecycles, ranges and checksums, snapshots and diffs, rename, copy, leases, permissions, SAS and Shared Key authentication, restart persistence, abrupt termination with a partial upload, the memory limit, and the manifest.
+- `cargo test` runs unit tests for the range map, lease state machine, names, XML bodies, authentication string-to-sign layouts and the store, and the [HTTP suite](../../tests/files_http.rs), which starts the real binary and covers share, directory and file lifecycles, ranges and checksums, snapshots and diffs, rename, copy, leases, permissions, SAS and Shared Key authentication, restart persistence, abrupt termination with a partial upload, the memory limit, and the manifest. The [addressing suite](../../tests/addressing_http.rs) covers host-style Shared Key and SAS, and the [shared clock suite](../../tests/shared_clock_http.rs) expires a share lease on the admin `--test-clock`.
 - [`tests/files_sdk.py`](../../tests/files_sdk.py) drives the built binary with `azure-storage-file-share` and `az storage share|directory|file`. It is run manually: `pip install azure-storage-file-share`, then `python tests/files_sdk.py --binary target/debug/azuifer`.
