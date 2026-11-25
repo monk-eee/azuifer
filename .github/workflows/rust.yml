@@ -1,0 +1,74 @@
+name: Rust
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Rust checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: rustup show
+      - run: cargo fetch --locked
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+      - if: runner.os == 'Linux'
+        run: python3 -m unittest discover -s packaging
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: rustup component add llvm-tools-preview
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c
+        with:
+          tool: cargo-llvm-cov@0.8.7
+      - run: cargo llvm-cov --workspace --all-features --locked --lcov --output-path coverage.lcov
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: rust-coverage
+          path: coverage.lcov
+          if-no-files-found: error
+  container:
+    name: Azure Linux and Azure CLI compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: docker build --tag azuifer:ci .
+      - name: Run real Azure CLI storage workflows against the container
+        shell: bash
+        run: |
+          set -euo pipefail
+          export AZUIFER_ACCOUNT_KEY="$(openssl rand -base64 32)"
+          id=$(docker run --detach --rm --network none --read-only \
+            --tmpfs /data:rw,mode=0770,uid=65532,gid=65532 \
+            --env AZUIFER_ACCOUNT_KEY \
+            azuifer:ci serve --location /data --skip-api-version-check)
+          trap 'docker stop --time 5 "$id" >/dev/null' EXIT
+          test "$(docker inspect --format '{{.Config.User}}' "$id")" = '65532:65532'
+          docker run --rm --network "container:$id" --env AZUIFER_ACCOUNT_KEY \
+            --mount "type=bind,source=$PWD/tests/azure_cli.py,target=/tmp/azure_cli.py,readonly" \
+            --entrypoint python3 \
+            mcr.microsoft.com/azure-cli:2.93.0@sha256:cf40cc2f8895161698cfb16aec989c60250e66c105b57752b30a20d87d515963 \
+            /tmp/azure_cli.py
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda
+        with:
+          arguments: --all-features --locked
+          command: check

@@ -1,0 +1,8 @@
+/target/
+/data/
+/dist/
+/release-bin/
+/coverage.lcov
+__pycache__/
+/.env
+/azuifer.local.toml

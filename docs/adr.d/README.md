@@ -11,6 +11,7 @@ The [product specification](../specs/azuifer.md) describes the target. An ADR re
 | [ADR-0005: Publish operation-level conformance](0005-publish-operation-level-conformance.md) | Proposed |
 | [ADR-0006: Keep the emulator local by default](0006-default-to-local-only.md) | Proposed |
 | [ADR-0007: Make OpenTelemetry export opt-in](0007-opt-in-opentelemetry.md) | Proposed |
+| [ADR-0008: Package native and Azure Linux releases](0008-package-native-and-azure-linux-releases.md) | Proposed |
 
 Search the index before drafting a record. If a change needs a new decision, use the [template](template.md), pick the next four-digit number, and add the proposed record to the index. Keep separate decisions in separate records.
 

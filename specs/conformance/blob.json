@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "service": "blob",
+  "api_version": "2023-11-03",
+  "authorization": "SharedKey",
+  "azure_differential_verified": false,
+  "implemented_locally": [
+    "List Containers",
+    "Create Container",
+    "Get Container Properties",
+    "Delete Container",
+    "List Blobs (flat)",
+    "Put Blob (BlockBlob)",
+    "Get Blob",
+    "Get Blob Properties",
+    "Delete Blob"
+  ],
+  "unsupported_by_default": true,
+  "other_services": {
+    "dfs": "unsupported",
+    "file": "unsupported",
+    "queue": "unsupported",
+    "table": "unsupported"
+  }
+}

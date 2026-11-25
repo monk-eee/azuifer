@@ -5,7 +5,7 @@
 1. Read the [project overview](README.md) to understand the project's scope and current status.
 2. Read the [specification](docs/specs/azuifer.md), starting with the compatibility contract, functional scope, and delivery roadmap.
 3. Use the [ADR index](docs/adr.d/README.md) to find the rationale and verification criteria for the part you want to change. The initial ADRs are proposals, not evidence that the design has been implemented.
-4. Read the [contribution guide](CONTRIBUTING.md) before opening an issue or pull request. The [agent instructions](AGENTS.md) record the constraints to keep in view when working with automated contributors.
+4. Read the [contribution guide](CONTRIBUTING.md) before opening an issue or pull request. The [Rust engineering rules](AGENTS.md) apply to both people and agents and define the tests and merge checks.
 
 ## The mental model
 
@@ -17,10 +17,10 @@ Azure Files serves a separate share namespace. Queue and Table have their own do
 
 ## First contribution
 
-The checkout is documentation-only. You need Git and a Markdown editor to review it; there is no Cargo workspace, server, or CI test suite to run yet.
+Follow the [quick start](README.md#run-locally), then run the [merge checks](AGENTS.md#ci-and-completion). The initial workspace has one executable. [Protocol parsing](src/protocol.rs) hands typed operations to the [server](src/server.rs); [storage](src/store.rs) applies domain conditions and commits metadata and content without depending on HTTP types.
 
 - If you're new to the project, review one proposed ADR. Check that its scope is bounded, its trade-off is clear, and its verification criteria could actually fail if the invariant is broken.
-- If you want to begin implementation, start with the foundation milestone. Review the [Rust baseline proposal](docs/adr.d/0002-build-an-independent-rust-binary.md) before introducing the reproducible Cargo toolchain, workspace, and native checks. Keep the workflow usable on macOS, Linux, and Windows.
+- If you want to extend implementation, start from the [currently implemented Blob slice](docs/compatibility/blob.md). Review the [Rust baseline proposal](docs/adr.d/0002-build-an-independent-rust-binary.md) before splitting modules into crates. Keep the workflow usable on macOS, Linux, and Windows.
 - For a protocol contribution, identify the service, operation, API version, and authentication mode. Describe the request, response, and follow-up state a test should observe. The [conformance decision](docs/adr.d/0005-publish-operation-level-conformance.md) explains how that evidence becomes a support claim.
 
 Local development and ordinary contributions must not need a cloud account or private package feed. Live differential tests are a separate, credential-gated activity; public examples and fixtures use synthetic data.

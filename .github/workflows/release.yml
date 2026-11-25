@@ -1,0 +1,209 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version=$(python3 packaging/release.py version --tag "$GITHUB_REF_NAME")
+          else
+            version=$(python3 packaging/release.py version)
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: metadata
+    uses: ./.github/workflows/rust.yml
+
+  archives:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE_BINARY: ${{ endsWith(matrix.target, '-linux-musl') && 'release-bin/azuifer' || format('target/{0}/release/azuifer{1}', matrix.target, endsWith(matrix.target, '-windows-msvc') && '.exe' || '') }}
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+      - if: runner.os == 'Linux'
+        run: docker build --platform ${{ startsWith(matrix.target, 'aarch64') && 'linux/arm64' || 'linux/amd64' }} --target linux-binary --output type=local,dest=release-bin .
+      - if: runner.os != 'Linux'
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo test --locked --workspace --all-features --target ${{ matrix.target }}
+          cargo build --locked --release --target ${{ matrix.target }}
+      - name: Smoke-test the Linux executable across distributions
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          for distro in \
+            debian:12-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e \
+            ubuntu:22.04@sha256:b000e69a50ff940390233025e7a337fb8469b509e2334fa4d018ac30f3e18cdb \
+            alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf \
+            registry.access.redhat.com/ubi9/ubi-micro:latest@sha256:dbd325b96bcd432dd42816d31412bdf1dc0fb973b79ed310344bc23c76c068db; do
+            docker run --rm --network none \
+              --mount "type=bind,source=$PWD/$RELEASE_BINARY,target=/azuifer,readonly" \
+              --entrypoint /azuifer "$distro" --version
+          done
+      - name: Check the executable and package it with its license texts
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: python packaging/release.py archive --target "${{ env.RELEASE_TARGET }}" --binary "${{ env.RELEASE_BINARY }}" --output dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: native-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  bundle:
+    needs: [metadata, archives]
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - run: mkdir dist
+      - name: Generate the Cargo workspace SBOM
+        uses: anchore/sbom-action@dfcb83b97731532d72be422cbc51ee64adb6fd56
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/azuifer-${{ env.RELEASE_VERSION }}-cargo.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: native-*
+          path: dist
+          merge-multiple: true
+      - run: python3 packaging/release.py checksums --directory dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: ${{ github.event_name == 'workflow_dispatch' && 'release-preview' || 'release-bundle' }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: [metadata, bundle]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: release-bundle
+          path: dist
+      - working-directory: dist
+        run: sha256sum --check SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        with:
+          subject-path: dist/*
+      - name: Publish the tagged GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          flags=()
+          if [[ "$RELEASE_VERSION" == 0.* || "$RELEASE_VERSION" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
+            --title "Azuifer $RELEASE_VERSION" "${flags[@]}" dist/*
+
+  docker-hub:
+    name: Publish the Azure Linux image to Docker Hub
+    needs: [metadata, publish]
+    if: github.event_name == 'push' && vars.DOCKERHUB_IMAGE != ''
+    runs-on: ubuntu-24.04
+    environment: dockerhub
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
+      RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Validate the Docker Hub destination
+        shell: bash
+        run: |
+          if [[ ! "$DOCKERHUB_IMAGE" =~ ^[a-z0-9][a-z0-9_-]*/[a-z0-9][a-z0-9._-]*$ ]]; then
+            echo 'DOCKERHUB_IMAGE must be a Docker Hub namespace/repository without a tag.' >&2
+            exit 1
+          fi
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - id: image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: docker.io/${{ env.DOCKERHUB_IMAGE }}:${{ env.RELEASE_VERSION }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.RELEASE_VERSION }}
+          sbom: true
+          provenance: mode=max
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        with:
+          subject-name: docker.io/${{ env.DOCKERHUB_IMAGE }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false

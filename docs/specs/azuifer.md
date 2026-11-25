@@ -1,6 +1,6 @@
 # Azuifer product and technical specification
 
-**Status:** Proposed baseline. All service support, command behavior, layouts, and release criteria below describe targets, not a shipping implementation. See the [ADR index](../adr.d/README.md) for the design rationale and verification criteria.
+**Status:** Proposed baseline. Service support, command behavior, layouts, and release criteria below describe targets. The [local Blob guide](../compatibility/blob.md) lists what the current build implements; consult the [ADR index](../adr.d/README.md) for the design rationale and verification criteria.
 
 ## 1. Product definition
 
@@ -91,7 +91,9 @@ Azure SDKs / CLI / AzCopy / REST clients
          SQLite WAL + content store
 ```
 
-Use Rust from the network boundary to persistence. Separate HTTP parsing and protocol serialization, authentication, service semantics, and storage. Generated protocol models are allowed; keep service behavior handwritten and testable. Use async network and content I/O, stream bodies, and keep service modules behind the transaction interface. Keep backend seams internal; prioritize one reliable local persistent implementation over a broad plugin framework.
+Use Rust from the network boundary to persistence. Separate HTTP parsing and protocol serialization, authentication, service semantics, and storage. Parse and validate wire input once, pass typed operations to the domain, and map typed outcomes and structured errors back to the Azure wire contract. Generated protocol models are allowed; keep service behavior handwritten and testable. Use async network and content I/O, stream bodies, and keep service modules behind the transaction interface. Keep backend seams internal; prioritize one reliable local persistent implementation over a broad plugin framework.
+
+Services depend on the shared core, protocol, auth, and storage foundations, not on other service implementations. Share primitives when their semantics agree; keep protocol differences separate. See the [Rust boundary ADR](../adr.d/0002-build-an-independent-rust-binary.md) and [engineering rules](../../AGENTS.md).
 
 ## 7. Persistence model
 
@@ -166,7 +168,7 @@ Run all selected surfaces in one process. The image must run as non-root, expose
 
 Use Rust unit tests, serialization and authentication vectors, persistence and crash recovery, cross-service tests, SDK/CLI/AzCopy integration, differential tests, property and state-machine tests, fuzzing, upgrade/migration checks, and container smoke tests.
 
-Differential tests run the same scenario against Azuifer and an isolated Azure Storage test account. Compare statuses, headers, error codes, body shapes, state transitions, follow-up reads, listings, and concurrency. Normalize dynamic timestamps and request IDs only where the protocol permits a difference. Run live tests on protected scheduled infrastructure with explicit credentials; publish only sanitized fixtures, never credentials or customer data.
+Every compatibility claim needs differential evidence for the stated operation, API version, authentication mode, and feature. Run the same scenario against Azuifer and an isolated Azure Storage test account. Compare statuses, headers, error codes, body shapes, state transitions, follow-up reads, listings, and concurrency. Normalize dynamic timestamps and request IDs only where the protocol permits a difference. Run live tests on protected infrastructure with explicit credentials; publish only sanitized fixtures, never credentials or customer data.
 
 Minimum cross-service and persistence cases:
 
@@ -188,7 +190,7 @@ The following is a target, not a list of existing paths. Introduce pieces as the
 
 | Area | Proposed contents |
 | --- | --- |
-| `Cargo.toml`, `crates/` | Workspace with CLI, server, HTTP, protocol, auth, core, metadata, content, Blob, DFS, Files, Queue, Table, telemetry, and test kit crates (`azuifer-*`) |
+| `Cargo.toml`, `crates/` | Candidate crates: `azuifer-server`, `azuifer-protocol`, `azuifer-auth`, `azuifer-core`, `azuifer-storage` (metadata and content modules), `azuifer-blob`, `azuifer-dfs`, `azuifer-files`, `azuifer-queue`, `azuifer-table`, `azuifer-telemetry`, `azuifer-cli`, and `azuifer-testkit`. Split only when there is a concrete boundary. |
 | `specs/` | Versioned API manifests and conformance inputs |
 | `tests/`, `fuzz/` | SDK, CLI, differential, crash, compatibility, and fuzz suites |
 | `docs/` | Specifications, architecture, compatibility, and [decision records](../adr.d/README.md) |
@@ -205,7 +207,7 @@ Keep the roadmap, issues, material design proposals, ADRs, and conformance data 
 
 | Milestone | Target |
 | --- | --- |
-| 0. Foundation | Cargo workspace and CI, HTTP and config, account routing, SQLite WAL, content staging, Shared Key/SAS foundations, Azure-shaped errors, OpenTelemetry, Azure Linux image, and conformance schema |
+| 0. Foundation | Cargo workspace and [CI merge checks](../../AGENTS.md#ci-and-completion), HTTP and config, account routing, SQLite WAL, content staging, Shared Key/SAS foundations, Azure-shaped errors, OpenTelemetry, Azure Linux image, and conformance schema |
 | 1. Blob slice | Containers, block blobs, listings, metadata, conditions, streaming, leases, SDK and CLI validation, and restart tests |
 | 2. HNS and DFS | Canonical namespace, HNS accounts, files and directories, append/flush, atomic rename, POSIX and recursive ACLs, and Blob/DFS invariant tests |
 | 3. FileREST | Shares, directories, file ranges, permissions, handles, snapshots, copy, SAS, and SDK/CLI validation |

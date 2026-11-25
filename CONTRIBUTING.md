@@ -10,6 +10,10 @@ Start with the [onboarding guide](ONBOARDING.md) and [product and technical spec
 
 ## Validation
 
-Today, check that Markdown links resolve, ADRs are indexed, and public docs contain no credentials or private references. There is no runnable Cargo target or CI gate yet.
+Run the [merge checks](AGENTS.md#ci-and-completion) and applicable build checks on the pinned toolchain. Follow the [testing rules](AGENTS.md#tests): write the regression before fixing a bug and cover the observable contract, not implementation calls. The [Blob HTTP tests](tests/blob_http.rs) start the built executable on ephemeral loopback ports and require no Azure credentials. For a persistence change, include restart or crash-recovery tests where applicable.
 
-When implementation lands, run the workspace's format, lint, test, and build checks on the pinned toolchain. Test changed behavior at the boundary it affects: wire status, headers, errors, and follow-up reads for a REST change; restart or crash recovery for a persistence change. Update the conformance manifest alongside changes to supported behavior. Keep examples and fixtures synthetic, and do not put live test credentials or recordings into a pull request.
+The [Azure CLI workflow](tests/azure_cli.py) runs the actual `az storage` commands against the Azure Linux image on every [CI run](.github/workflows/rust.yml), including the gate reused before releases. Keep it testing real data and error outcomes, not `--help` or mocked command output. Use `cargo llvm-cov --workspace --all-features --locked` with `cargo-llvm-cov` and the Rust LLVM tools component to inspect line and region coverage. Normal test subprocesses close stdin and exit cleanly so the report includes the server; the crash test still kills it on purpose.
+
+Update the conformance manifest alongside changes to supported behavior. Link the differential evidence for any new or changed compatibility claim. Keep examples and fixtures synthetic, and do not put live test credentials or recordings into a pull request.
+
+For docs-only changes, check that links resolve, ADRs are indexed, and public docs contain no credentials or private references.
