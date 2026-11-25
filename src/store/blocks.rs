@@ -1,7 +1,8 @@
 use super::{
     Content, ContentSource, Mode, Store, Uploaded, UploadedData, blob, blob_params,
-    blobs::guard_write, check_memory_quota, container, db_error, internal, io_error, open_extent,
-    read_memory_slice, reclaim, remove_staged, row_uint, save_blob, sqlite_int, staging_file,
+    blobs::guard_write, check_memory_quota, container, db_error, internal, io_error, namespace,
+    open_extent, read_memory_slice, reclaim, remove_staged, row_uint, save_blob, sqlite_int,
+    staging_file,
 };
 use crate::{
     conditions::Guard,
@@ -36,9 +37,13 @@ impl Store {
         upload: Uploaded,
         lease: Option<LeaseId>,
     ) -> Result<()> {
+        let hierarchical = self.hierarchical(&key.container);
         self.run(move |db, mode, now| {
             let tx = db.transaction().map_err(db_error)?;
             container(&tx, &key.container)?;
+            if hierarchical {
+                namespace::validate_staged_path(&tx, &key)?;
+            }
             match blob(&tx, &key, now)? {
                 Some(row) => row
                     .lease
@@ -86,9 +91,13 @@ impl Store {
         blocks: Vec<BlockSelection>,
         limit: u64,
     ) -> Result<Entity> {
+        let hierarchical = self.hierarchical(&key.container);
         self.run(move |db, mode, now| {
             let tx = db.transaction().map_err(db_error)?;
             container(&tx, &key.container)?;
+            if hierarchical {
+                namespace::prepare_file(&tx, &key, now)?;
+            }
             let old = blob(&tx, &key, now)?;
             guard_write(&options.guard, old.as_ref(), true, now)?;
             let staged: HashMap<_, _> = staged(&tx, &key)?.into_iter().collect();
@@ -172,8 +181,12 @@ impl Store {
         kind: BlockListKind,
         guard: Guard,
     ) -> Result<BlockList> {
+        let hierarchical = self.hierarchical(&key.container);
         self.run(move |db, _, now| {
             container(db, &key.container)?;
+            if hierarchical {
+                namespace::validate_staged_path(db, &key)?;
+            }
             let row = blob(db, &key, now)?;
             let uncommitted = if kind == BlockListKind::Committed {
                 None

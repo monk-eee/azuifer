@@ -64,6 +64,14 @@ pub(crate) fn entity_response(status: StatusCode, entity: Entity) -> Result<Resp
     Ok(response)
 }
 
+pub(crate) fn directory_response(status: StatusCode, entity: Entity) -> Result<Response> {
+    let mut response = entity_response(status, entity)?;
+    let headers = response.headers_mut();
+    headers.insert("x-ms-resource-type", HeaderValue::from_static("directory"));
+    headers.insert("content-length", HeaderValue::from_static("0"));
+    Ok(response)
+}
+
 pub(crate) fn download_response(download: Download) -> Result<(Response, Metadata)> {
     let Download {
         info,

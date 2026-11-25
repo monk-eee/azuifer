@@ -80,7 +80,7 @@ Stop the container with `docker stop azuifer-quickstart` when you're done.
 | Blob containers | Create, list, read properties, and delete |
 | Block blobs | Upload, read, list, delete, stage blocks, and get or commit block lists |
 | Reads and writes | Byte ranges, ETag conditions, upload checksums, and metadata on writes |
-| Data Lake (DFS) | Create, list, inspect, and delete filesystems; read Blob-written files and their properties on HNS-enabled accounts |
+| Data Lake (DFS) | Manage filesystems, create and list directories, read Blob-written files, and delete files or empty directories on HNS-enabled accounts |
 | Storage | In-memory or SQLite metadata with persistent payloads |
 
 Use the [Blob guide](docs/compatibility/blob.md) and [Data Lake guide](docs/compatibility/dfs.md) for supported operations, flags, and limits. Blob and DFS see the same data and ETags on hierarchical namespace (HNS) accounts. The [product specification](docs/specs/azuifer.md) tracks the full set of operations.

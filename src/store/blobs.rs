@@ -1,7 +1,8 @@
 use super::{
-    BlobRow, Content, ContentSource, Download, Mode, Payload, Store, Uploaded, blob, blob_params,
-    check_memory_quota, container, db_error, internal, io_error, new_entity, open_extent,
-    read_memory_slice, reclaim, remove_staged, require_blob, save_blob, sqlite_int, write_lease,
+    BlobRow, Content, ContentSource, Download, Mode, PathRead, Payload, Store, Uploaded, blob,
+    blob_params, check_memory_quota, container, db_error, internal, io_error, namespace,
+    new_entity, open_extent, read_memory_slice, reclaim, remove_staged, require_blob, save_blob,
+    sqlite_int, write_lease,
 };
 use crate::{
     checksum::Hasher,
@@ -80,9 +81,13 @@ impl Store {
         options: BlobWrite,
         upload: Uploaded,
     ) -> Result<Entity> {
+        let hierarchical = self.hierarchical(&key.container);
         self.run(move |db, mode, now| {
             let tx = db.transaction().map_err(db_error)?;
             container(&tx, &key.container)?;
+            if hierarchical {
+                namespace::prepare_file(&tx, &key, now)?;
+            }
             let old = blob(&tx, &key, now)?;
             guard_write(&options.guard, old.as_ref(), true, now)?;
             let discard = remove_staged(&tx, &key)?;
@@ -110,8 +115,21 @@ impl Store {
         .await
     }
 
-    pub(crate) async fn read_blob(&self, key: BlobKey, options: BlobRead) -> Result<Download> {
+    pub(crate) async fn read_path(&self, key: BlobKey, options: BlobRead) -> Result<PathRead> {
+        let hierarchical = self.hierarchical(&key.container);
         self.run(move |db, mode, now| {
+            if hierarchical
+                && let Some(entity) = namespace::directory(db, &key.container, key.path.as_str())?
+            {
+                if options.guard.lease.is_some() {
+                    return Err(Error::LeaseNotPresentBlob);
+                }
+                options.guard.conditions.check(Some(entity), true)?;
+                if options.range.is_some() {
+                    return Err(Error::InvalidRange(0));
+                }
+                return Ok(PathRead::Directory(entity));
+            }
             let row = require_blob(db, &key, now)?;
             row.lease.check(
                 options.guard.lease,
@@ -171,26 +189,38 @@ impl Store {
                 });
                 payload = Some(Payload::Memory(bytes));
             }
-            Ok(Download {
+            Ok(PathRead::File(Box::new(Download {
                 info,
                 range,
                 payload,
                 range_checksum,
-            })
+            })))
         })
         .await
     }
 
-    pub(crate) async fn delete_blob(&self, key: BlobKey, guard: Guard) -> Result<()> {
+    pub(crate) async fn delete_path(&self, key: BlobKey, guard: Guard) -> Result<()> {
+        let hierarchical = self.hierarchical(&key.container);
         self.run(move |db, mode, now| {
             let tx = db.transaction().map_err(db_error)?;
-            let old = require_blob(&tx, &key, now)?;
-            guard_write(&guard, Some(&old), false, now)?;
-            let discard = remove_staged(&tx, &key)?;
-            tx.execute("DELETE FROM blobs WHERE id=?1", [old.info.entity.id])
-                .map_err(db_error)?;
+            let discard = if hierarchical
+                && let Some(entity) = namespace::directory(&tx, &key.container, key.path.as_str())?
+            {
+                if guard.lease.is_some() {
+                    return Err(Error::LeaseNotPresentBlob);
+                }
+                guard.conditions.check(Some(entity), false)?;
+                namespace::remove_empty_directory(&tx, &key)?
+            } else {
+                let old = require_blob(&tx, &key, now)?;
+                guard_write(&guard, Some(&old), false, now)?;
+                let mut discard = remove_staged(&tx, &key)?;
+                tx.execute("DELETE FROM blobs WHERE id=?1", [old.info.entity.id])
+                    .map_err(db_error)?;
+                discard.push(old.info.entity.id);
+                discard
+            };
             tx.commit().map_err(db_error)?;
-            reclaim(mode, old.info.entity.id);
             for id in discard {
                 reclaim(mode, id);
             }

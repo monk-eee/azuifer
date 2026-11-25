@@ -7,18 +7,18 @@
     {"name": "Get File System Properties", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Returns the shared ETag, Last-Modified, and HNS flag. No filesystem metadata or encryption properties."},
     {"name": "Set File System Properties", "state": "unsupported", "authorization": []},
     {"name": "Delete File System", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Deletes the shared container immediately. No retention, recreation delay, or conditional delete."},
-    {"name": "List Paths", "state": "unsupported", "authorization": []},
-    {"name": "Create Path", "state": "unsupported", "authorization": []},
+    {"name": "List Paths", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Lists files and directories recursively or one level at a time, optionally scoped to a directory. Uses local continuation tokens and binary name order; no beginFrom or ownership fields."},
+    {"name": "Create Path", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Creates directories with implicit parent directories and ETag conditions. File creation, rename, and ACL options are not implemented here."},
     {"name": "Rename Path", "state": "unsupported", "authorization": []},
     {"name": "Append Data", "state": "unsupported", "authorization": []},
     {"name": "Flush Data", "state": "unsupported", "authorization": []},
-    {"name": "Read File", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Reads the same committed Blob bytes, with ETag conditions and single byte ranges. No range checksums, leases, or date conditions."},
-    {"name": "Get Path Properties", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Returns file content properties, ETag, and user metadata. Directory, owner, ACL, and lease properties are unavailable."},
+    {"name": "Read File", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Reads the same committed Blob bytes, with ETag conditions, existing Blob lease checks, and single byte ranges. No range checksums or date conditions."},
+    {"name": "Get Path Properties", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Returns the resource type and ETag for files and directories, plus file content properties and metadata. Owner, ACL, and lease properties are unavailable."},
     {"name": "Set Path Properties", "state": "unsupported", "authorization": []},
     {"name": "Get Access Control", "state": "unsupported", "authorization": []},
     {"name": "Set Access Control", "state": "unsupported", "authorization": []},
     {"name": "Set Access Control Recursive", "state": "unsupported", "authorization": []},
     {"name": "Lease Path", "state": "unsupported", "authorization": []},
-    {"name": "Delete Path", "state": "unsupported", "authorization": []}
+    {"name": "Delete Path", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Deletes files and empty directories with ETag conditions and enforces existing Blob file leases. Recursive and paginated delete are unavailable."}
   ]
 }

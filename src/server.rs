@@ -51,8 +51,9 @@ pub(crate) async fn serve(config: Config, shutdown_on_stdin_eof: bool) -> anyhow
             let location = config.location.clone();
             let memory_limit = config.memory_limit;
             let store_clock = clock.clone();
+            let hns_accounts = config.hns_accounts.clone();
             let store = tokio::task::spawn_blocking(move || {
-                Store::open(location.as_deref(), memory_limit, store_clock)
+                Store::open(location.as_deref(), memory_limit, store_clock, hns_accounts)
             })
             .await
             .context("storage initialization did not complete")??;

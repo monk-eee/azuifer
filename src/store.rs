@@ -3,6 +3,7 @@ mod blocks;
 mod containers;
 mod copy;
 mod listing;
+mod namespace;
 mod schema;
 mod service;
 
@@ -16,6 +17,7 @@ use anyhow::Context as _;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::{Connection, OptionalExtension as _, Row, params};
 use std::{
+    collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{Seek as _, SeekFrom, Write},
     ops::Range,
@@ -36,6 +38,7 @@ struct Inner {
     db: Mutex<Connection>,
     mode: Mode,
     clock: Clock,
+    hns_accounts: HashSet<crate::domain::AccountName>,
 }
 
 enum Mode {
@@ -85,11 +88,17 @@ pub(crate) struct Download {
     pub(crate) range_checksum: Option<(&'static str, String)>,
 }
 
+pub(crate) enum PathRead {
+    File(Box<Download>),
+    Directory(Entity),
+}
+
 impl Store {
     pub(crate) fn open(
         location: Option<&Path>,
         memory_limit: u64,
         clock: Clock,
+        hns_accounts: HashSet<crate::domain::AccountName>,
     ) -> anyhow::Result<Self> {
         let (mut db, mode) = if let Some(root) = location {
             fs::create_dir_all(root).context("could not create the storage directory")?;
@@ -141,6 +150,7 @@ impl Store {
         };
         db.pragma_update(None, "foreign_keys", true)?;
         schema::migrate(&mut db).context("could not migrate metadata")?;
+        namespace::restore_parents(&mut db, &hns_accounts, clock.now_millis())?;
         if let Mode::Disk { extents, .. } = &mode {
             recover(&db, extents).context("could not recover unreferenced content")?;
         }
@@ -148,7 +158,12 @@ impl Store {
             db: Mutex::new(db),
             mode,
             clock,
+            hns_accounts,
         })))
+    }
+
+    fn hierarchical(&self, key: &ContainerKey) -> bool {
+        self.0.hns_accounts.contains(&key.account)
     }
 
     /// Runs a metadata action on the blocking pool. The action receives the time

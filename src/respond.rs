@@ -334,6 +334,7 @@ pub(crate) fn list_blobs(
     (prefix, delimiter, limit): (&str, Option<&str>, u32),
     listing: BlobListing,
     include: &[Include],
+    hierarchical: bool,
 ) -> Result<Response> {
     let mut xml = Xml::root(
         "EnumerationResults",
@@ -357,10 +358,25 @@ pub(crate) fn list_blobs(
             ListEntry::Blob(name, info) => {
                 xml.open("Blob");
                 xml.element("Name", &name);
-                blob_properties(&mut xml, &info, include.contains(&Include::Copy))?;
+                blob_properties(
+                    &mut xml,
+                    &info,
+                    include.contains(&Include::Copy),
+                    hierarchical,
+                )?;
                 if include.contains(&Include::Metadata) && !info.uncommitted {
                     xml.metadata(info.metadata);
                 }
+                xml.close("Blob");
+            }
+            ListEntry::Directory(name, entity) => {
+                xml.open("Blob");
+                xml.element("Name", &name);
+                xml.open("Properties");
+                xml.entity(entity)?;
+                xml.element("Content-Length", "0");
+                xml.element("ResourceType", "directory");
+                xml.close("Properties");
                 xml.close("Blob");
             }
         }
@@ -370,11 +386,14 @@ pub(crate) fn list_blobs(
     Ok(xml.finish("EnumerationResults", StatusCode::OK))
 }
 
-fn blob_properties(xml: &mut Xml, info: &BlobInfo, copy: bool) -> Result<()> {
+fn blob_properties(xml: &mut Xml, info: &BlobInfo, copy: bool, hierarchical: bool) -> Result<()> {
     xml.open("Properties");
     if info.uncommitted {
         xml.element("Content-Length", "0");
         xml.element("BlobType", "BlockBlob");
+        if hierarchical {
+            xml.element("ResourceType", "file");
+        }
         lease_elements(xml, info.lease);
         xml.close("Properties");
         return Ok(());
@@ -526,6 +545,16 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
             S::NOT_FOUND,
             "BlobNotFound",
             "The specified blob does not exist.",
+        ),
+        Error::PathConflict => (
+            S::CONFLICT,
+            "BlobOperationNotSupported",
+            "The path conflicts with a file or directory.",
+        ),
+        Error::DirectoryNotEmpty => (
+            S::CONFLICT,
+            "DirectoryNotEmpty",
+            "The directory is not empty.",
         ),
         Error::ResourceNotFound => (
             S::NOT_FOUND,

@@ -30,6 +30,8 @@ pub(crate) enum Error {
     ContainerExists,
     ContainerMissing,
     BlobMissing,
+    PathConflict,
+    DirectoryNotEmpty,
     ConditionNotMet,
     NotModified,
     InvalidRange(u64),
@@ -125,6 +127,14 @@ impl BlobPath {
 
     pub(crate) fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub(crate) fn check_hns(&self) -> Result<()> {
+        let mut parts = self.0.split('/');
+        if parts.clone().count() > 61 || parts.any(|part| matches!(part, "" | "." | "..")) {
+            return Err(Error::InvalidName);
+        }
+        Ok(())
     }
 }
 
@@ -517,6 +527,12 @@ pub(crate) struct ListRequest {
 pub(crate) enum ListEntry {
     Blob(String, Box<BlobInfo>),
     Prefix(String),
+    Directory(String, Entity),
+}
+
+pub(crate) enum PathEntry {
+    File(Entity, ContentLength),
+    Directory(Entity),
 }
 
 pub(crate) struct BlobListing {

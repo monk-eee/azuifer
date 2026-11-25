@@ -1641,6 +1641,315 @@ fn dfs_error(response: Response, status: u16, code: &str) {
 }
 
 #[test]
+fn dfs_directory_lifecycle_shares_identity_and_pages_the_tree() {
+    const ROOT: &str = "/testaccount/container?recursive=false&resource=filesystem";
+    const EMPTY: &str = "/testaccount/container/empty/sub";
+    const DOCS: &str = "/testaccount/container/docs";
+    let location = tempfile::tempdir().unwrap();
+    let start = || {
+        Emulator::start_services(
+            Some(location.path()),
+            "blob,dfs",
+            &["--hns-accounts", ACCOUNT],
+        )
+    };
+    let emulator = start();
+    emulator.create_container();
+    let account = emulator.request(
+        Method::HEAD,
+        "/testaccount?comp=properties&restype=account",
+        &[],
+        b"",
+    );
+    assert_eq!(account.status(), 200);
+    assert_eq!(account.headers()["x-ms-is-hns-enabled"], "true");
+
+    let created = emulator.dfs(
+        Method::PUT,
+        &format!("{EMPTY}?resource=directory"),
+        &[("if-none-match", "*")],
+        b"",
+    );
+    assert_eq!(created.status(), 201);
+    let dir_tag = etag(&created);
+    dfs_error(
+        emulator.dfs(
+            Method::PUT,
+            &format!("{EMPTY}?resource=directory"),
+            &[("if-none-match", "*")],
+            b"",
+        ),
+        412,
+        "ConditionNotMet",
+    );
+    let body = b"visible on both endpoints";
+    let file = emulator.put(BLOB, &[], body);
+    assert_eq!(file.status(), 201);
+    let file_tag = etag(&file);
+    assert_eq!(
+        emulator
+            .put("/testaccount/container/docs2/other", &[], b"not under docs")
+            .status(),
+        201,
+    );
+    let root_page = emulator.dfs(Method::GET, &format!("{ROOT}&maxresults=2"), &[], b"");
+    assert_eq!(root_page.status(), 200);
+    let token = root_page.headers()["x-ms-continuation"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let page: serde_json::Value = serde_json::from_slice(&root_page.bytes().unwrap()).unwrap();
+    assert_eq!(page["paths"].as_array().unwrap().len(), 2);
+    assert_eq!(page["paths"][0]["name"], "docs");
+    assert_eq!(page["paths"][0]["isDirectory"], true);
+    assert_eq!(page["paths"][1]["name"], "docs2");
+    let next = emulator.dfs(
+        Method::GET,
+        &format!("{ROOT}&maxresults=2&continuation={token}"),
+        &[],
+        b"",
+    );
+    assert_eq!(next.status(), 200);
+    assert!(!next.headers().contains_key("x-ms-continuation"));
+    let page: serde_json::Value = serde_json::from_slice(&next.bytes().unwrap()).unwrap();
+    assert_eq!(page["paths"].as_array().unwrap().len(), 1);
+    assert_eq!(page["paths"][0]["name"], "empty");
+
+    drop(emulator);
+    let emulator = start();
+    let head = emulator.dfs(Method::HEAD, EMPTY, &[], b"");
+    assert_eq!(head.status(), 200);
+    assert_eq!(etag(&head), dir_tag);
+    assert_eq!(head.headers()["x-ms-resource-type"], "directory");
+    let blob_head = emulator.request(Method::HEAD, EMPTY, &[], b"");
+    assert_eq!(blob_head.status(), 200);
+    assert_eq!(etag(&blob_head), dir_tag);
+    let listed = emulator.dfs(
+        Method::GET,
+        "/testaccount/container?directory=docs&recursive=true&resource=filesystem",
+        &[],
+        b"",
+    );
+    assert_eq!(listed.status(), 200);
+    let page: serde_json::Value = serde_json::from_slice(&listed.bytes().unwrap()).unwrap();
+    assert_eq!(page["paths"].as_array().unwrap().len(), 1);
+    assert_eq!(page["paths"][0]["name"], "docs/a&b.txt");
+    assert_eq!(page["paths"][0]["etag"], file_tag);
+    assert_eq!(page["paths"][0]["contentLength"], body.len());
+    assert_eq!(page["paths"][0]["isDirectory"], false);
+    dfs_error(
+        emulator.dfs(
+            Method::GET,
+            "/testaccount/container?directory=absent&recursive=false&resource=filesystem",
+            &[],
+            b"",
+        ),
+        404,
+        "PathNotFound",
+    );
+    let blob_list = emulator.request(
+        Method::GET,
+        &format!("{CONTAINER}&comp=list&prefix=empty"),
+        &[],
+        b"",
+    );
+    let xml = blob_list.text().unwrap();
+    assert!(
+        xml.contains("<Name>empty/sub</Name>")
+            && xml.contains("<ResourceType>directory</ResourceType>"),
+        "{xml}"
+    );
+
+    dfs_error(
+        emulator.dfs(Method::DELETE, &format!("{DOCS}?recursive=false"), &[], b""),
+        409,
+        "DirectoryNotEmpty",
+    );
+    dfs_error(
+        emulator.dfs(
+            Method::DELETE,
+            &format!("{EMPTY}?recursive=false"),
+            &[("if-match", "\"not-current\"")],
+            b"",
+        ),
+        412,
+        "ConditionNotMet",
+    );
+    assert_eq!(
+        emulator
+            .dfs(
+                Method::DELETE,
+                &format!("{EMPTY}?recursive=false"),
+                &[("if-match", &dir_tag)],
+                b""
+            )
+            .status(),
+        202,
+    );
+    assert_eq!(
+        emulator.request(Method::HEAD, EMPTY, &[], b"").status(),
+        404
+    );
+    assert_eq!(
+        emulator
+            .request(Method::GET, BLOB, &[], b"")
+            .bytes()
+            .unwrap()
+            .as_ref(),
+        body
+    );
+}
+
+#[test]
+fn hns_blob_commits_do_not_replace_directories_or_publish_staged_paths() {
+    const PATH: &str = "/testaccount/container/automatic/nested/block";
+    const PARENT: &str = "/testaccount/container/automatic";
+    let emulator = Emulator::start_services(None, "blob,dfs", &["--hns-accounts", ACCOUNT]);
+    emulator.create_container();
+    assert_eq!(
+        emulator
+            .request(
+                Method::PUT,
+                &format!("{PATH}?comp=block&blockid=YQ%3D%3D"),
+                &[],
+                b"block"
+            )
+            .status(),
+        201,
+    );
+    assert_eq!(emulator.dfs(Method::HEAD, PARENT, &[], b"").status(), 404);
+    let commit = |id| {
+        emulator.request(
+            Method::PUT,
+            &format!("{PATH}?comp=blocklist"),
+            &[],
+            format!("<BlockList><Latest>{id}</Latest></BlockList>").as_bytes(),
+        )
+    };
+    error(commit("Yg=="), 400, "InvalidBlockList");
+    assert_eq!(emulator.dfs(Method::HEAD, PARENT, &[], b"").status(), 404);
+    let committed = commit("YQ==");
+    assert_eq!(committed.status(), 201);
+    let parent = emulator.dfs(Method::HEAD, PARENT, &[], b"");
+    assert_eq!(parent.status(), 200);
+    assert_eq!(parent.headers()["x-ms-resource-type"], "directory");
+    error(
+        emulator.put(PARENT, &[], b"overwrite"),
+        409,
+        "BlobOperationNotSupported",
+    );
+    error(
+        emulator.put(&format!("{PATH}/child"), &[], b"child"),
+        409,
+        "BlobOperationNotSupported",
+    );
+    dfs_error(
+        emulator.dfs(Method::PUT, &format!("{PATH}?resource=directory"), &[], b""),
+        409,
+        "PathConflict",
+    );
+    let read = emulator.dfs(Method::GET, PATH, &[], b"");
+    assert_eq!(etag(&read), etag(&committed));
+    assert_eq!(read.bytes().unwrap().as_ref(), b"block");
+}
+
+#[test]
+fn enabling_hns_keeps_existing_blob_identity_and_creates_missing_parents() {
+    let location = tempfile::tempdir().unwrap();
+    let flat = Emulator::start(Some(location.path()), &[]);
+    flat.create_container();
+    let written = flat.put(BLOB, &[], b"prior data");
+    assert_eq!(written.status(), 201);
+    let tag = etag(&written);
+    drop(flat);
+
+    let hns = Emulator::start_services(
+        Some(location.path()),
+        "blob,dfs",
+        &["--hns-accounts", ACCOUNT],
+    );
+    let directory = hns.dfs(Method::HEAD, "/testaccount/container/docs", &[], b"");
+    assert_eq!(directory.status(), 200);
+    assert_eq!(directory.headers()["x-ms-resource-type"], "directory");
+    let file = hns.dfs(Method::GET, BLOB, &[], b"");
+    assert_eq!(etag(&file), tag);
+    assert_eq!(file.bytes().unwrap().as_ref(), b"prior data");
+}
+
+#[test]
+fn dfs_cannot_delete_a_file_protected_by_a_blob_lease() {
+    let emulator = Emulator::start_services(None, "blob,dfs", &["--hns-accounts", ACCOUNT]);
+    emulator.create_container();
+    let blob = emulator.put(BLOB, &[], b"protected by a lease");
+    assert_eq!(blob.status(), 201);
+
+    let leased = emulator.request(
+        Method::PUT,
+        &format!("{BLOB}?comp=lease"),
+        &[
+            ("x-ms-lease-action", "acquire"),
+            ("x-ms-lease-duration", "-1"),
+        ],
+        b"",
+    );
+    assert_eq!(leased.status(), 201);
+    let lease = leased.headers()["x-ms-lease-id"].to_str().unwrap();
+    dfs_error(
+        emulator.dfs(Method::DELETE, BLOB, &[], b""),
+        412,
+        "LeaseIdMissing",
+    );
+    let still_exists = emulator.request(Method::HEAD, BLOB, &[], b"");
+    assert_eq!(etag(&still_exists), etag(&blob));
+    assert_eq!(
+        emulator
+            .dfs(Method::DELETE, BLOB, &[("x-ms-lease-id", lease)], b"")
+            .status(),
+        202,
+    );
+    assert_eq!(emulator.request(Method::HEAD, BLOB, &[], b"").status(), 404);
+}
+
+#[test]
+fn enabling_hns_rejects_existing_file_parent_conflicts_without_changing_flat_data() {
+    const FILE: &str = "/testaccount/container/docs";
+    let location = tempfile::tempdir().unwrap();
+    let flat = Emulator::start(Some(location.path()), &[]);
+    flat.create_container();
+    assert_eq!(flat.put(FILE, &[], b"parent file").status(), 201);
+    assert_eq!(flat.put(BLOB, &[], b"nested file").status(), 201);
+    drop(flat);
+
+    let result = emulator_command()
+        .args([
+            "serve",
+            "--port",
+            "0",
+            "--admin-port",
+            "0",
+            "--services",
+            "blob,dfs",
+            "--hns-accounts",
+            ACCOUNT,
+            "--shutdown-on-stdin-eof",
+            "--location",
+        ])
+        .arg(location.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("cannot be opened with HNS"));
+
+    let flat = Emulator::start(Some(location.path()), &[]);
+    for (name, bytes) in [(FILE, b"parent file"), (BLOB, b"nested file")] {
+        let response = flat.request(Method::GET, name, &[], b"");
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.bytes().unwrap().as_ref(), bytes);
+    }
+}
+
+#[test]
 fn restart_preserves_acknowledged_data_and_recovers_an_interrupted_upload() {
     let root = tempfile::tempdir().unwrap();
     let location = root.path().join("store with spaces");

@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS account_settings (
     account TEXT NOT NULL PRIMARY KEY, service_properties TEXT NOT NULL
 ) STRICT;";
 
-const MIGRATIONS: [&str; 1] = [V1];
+const MIGRATIONS: [&str; 2] = [V1, super::namespace::SCHEMA];
 
 pub(super) fn migrate(db: &mut Connection) -> rusqlite::Result<()> {
     db.execute_batch(BASE)?;
@@ -108,6 +108,6 @@ mod tests {
         let version: i64 = db
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 }

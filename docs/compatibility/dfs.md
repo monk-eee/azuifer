@@ -1,6 +1,6 @@
 # Data Lake Storage Gen2 wire compatibility
 
-Blob and DFS share a store on hierarchical namespace (HNS) accounts. A filesystem created on DFS is visible as a Blob container. A committed Blob is readable as a file on DFS, with the same bytes and ETag.
+Blob and DFS share a store on hierarchical namespace (HNS) accounts. A filesystem created on DFS is visible as a Blob container. A committed Blob is readable as a file on DFS with the same bytes and ETag. Directories, including empty directories, are persistent resources visible on both endpoints.
 
 ## Run locally
 
@@ -20,12 +20,17 @@ Set `AZUIFER_HNS_ACCOUNTS` or `hns_accounts` in the TOML config as an alternativ
 | --- | --- |
 | `/{account}?resource=account` | `GET` lists filesystems. Supports `prefix`, `maxResults`, and opaque `continuation` tokens from `x-ms-continuation`. |
 | `/{account}/{filesystem}?resource=filesystem` | `PUT` creates, `HEAD` reads properties, and `DELETE` removes the shared container and its contents. |
-| `/{account}/{filesystem}/{path}` | `GET` reads committed bytes and `HEAD` reads properties for a file. Supports `If-Match` or `If-None-Match`; `GET` also supports a single `Range` with a starting offset. |
+| `/{account}/{filesystem}?resource=filesystem&recursive={true\|false}` | `GET` lists files and directories, optionally under `directory`. Use `maxResults` and `continuation` to page. |
+| `/{account}/{filesystem}/{path}?resource=directory` | `PUT` creates a directory, including missing parents. Use `If-None-Match: *` to prevent replacing an existing directory's properties. |
+| `/{account}/{filesystem}/{path}` | `GET` reads committed file bytes; `HEAD` returns file or directory properties. Supports `If-Match` or `If-None-Match`; file reads also support a single `Range` with a starting offset. |
+| `/{account}/{filesystem}/{path}?recursive=false` | `DELETE` removes a file or empty directory. A non-empty directory returns `DirectoryNotEmpty` and is not changed. |
 
-File metadata written by Blob is returned in `x-ms-properties` with base64-encoded values. Filesystem metadata, soft delete, and the filesystem recreation delay are not implemented. Nested Blob names are readable as files but don't create usable directories on DFS yet. Path listing and writes, rename, ACLs, leases, date conditions, and requested range checksums are not implemented. See the [DFS operation inventory](../../specs/conformance/dfs.json) for the tracked differences.
+On an HNS account, a committed Blob write creates any missing parent directories in the same transaction. Staged blocks do not create visible directories. A file cannot replace a directory or have descendants. Enabling HNS on existing data creates the missing parents without replacing files; startup rejects paths that cannot form a hierarchy. Flat Blob listings show directories; Blob listings with a delimiter still derive prefixes from blob names.
+
+File metadata written by Blob is returned in `x-ms-properties` with base64-encoded values. A Blob lease protects a file from DFS deletion unless the caller supplies the matching lease ID. Filesystem metadata, soft delete, and the filesystem recreation delay are not implemented. Path listings use binary name order, not Azure's slash-first order. DFS file writes, recursive delete, rename, ACLs, lease management, date conditions, and requested range checksums are not implemented. See the [DFS operation inventory](../../specs/conformance/dfs.json) for the tracked differences.
 
 The Azure CLI command `az storage fs file show` also requests the file's ACL, so it isn't supported yet. Use `az storage fs file metadata show` to read user metadata.
 
 ## Verify it
 
-The [HTTP tests](../../tests/blob_http.rs) write over Blob, restart with only DFS enabled, and read and range-check the same file. They also verify that deletion over DFS is visible on the Blob endpoint. The [four-version Azure CLI matrix](blob.md#azure-cli) checks `az storage fs` and uses the official Data Lake SDK packaged with each pinned CLI image to call the DFS port directly. This matters because the CLI's high-level filesystem and file-property calls use Blob. These checks do not compare against live Azure.
+The [HTTP tests](../../tests/blob_http.rs) check directory identity across restart, rejected conflicts, and that staged Blob blocks don't publish paths. The [four-version Azure CLI matrix](blob.md#azure-cli) runs `az storage fs directory create` and pages `az storage fs file list` against DFS. It also uses the official Data Lake SDK packaged with each CLI image to read a CLI-uploaded file directly from the DFS port, since the CLI's file download routes through Blob. These checks do not compare against live Azure.

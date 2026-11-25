@@ -1,13 +1,13 @@
 use crate::{
     auth::header,
-    conditions::Guard,
+    conditions::{Conditions, Guard, STANDARD as CONDITION_HEADERS},
     config::Config,
     domain::{
-        AccountName, BlobKey, BlobRead, ByteRange, ContainerCreate, ContainerKey, Entity, Error,
-        Metadata, Page, PageRequest, PublicAccess, Result,
+        AccountName, BlobKey, BlobPath, BlobRead, ByteRange, ContainerCreate, ContainerKey, Entity,
+        Error, Metadata, Page, PageRequest, PathEntry, PublicAccess, Result,
     },
     protocol::{self, AuthenticatedRequest, Resource},
-    store::Store,
+    store::{PathRead, Store},
     wire::{self, empty, entity_response, json_response, modified, set},
 };
 use anyhow::Context as _;
@@ -36,11 +36,15 @@ enum Operation {
     FilesystemProperties(ContainerKey),
     DeleteFilesystem(ContainerKey, Guard),
     ListFilesystems(AccountName, PageRequest),
-    ReadFile(BlobKey, BlobRead),
+    CreateDirectory(BlobKey, Conditions),
+    ListPaths(ContainerKey, Option<BlobPath>, bool, PageRequest),
+    ReadPath(BlobKey, BlobRead),
+    DeletePath(BlobKey, Guard),
 }
 
 enum DfsError {
     NamespaceDisabled,
+    MissingRecursive,
     Request(Error),
 }
 
@@ -73,7 +77,7 @@ async fn dispatch(State(app): State<Arc<App>>, request: Request) -> Response {
     let mut response = match app.permits.clone().try_acquire_owned() {
         Ok(permit) => match parse(&parts, &app.config, &request_id) {
             Ok(op) => {
-                let download = matches!(&op, Operation::ReadFile(_, options) if options.with_body);
+                let download = matches!(&op, Operation::ReadPath(_, options) if options.with_body);
                 match execute(&app.store, op).await {
                     Ok(mut response) => {
                         if download {
@@ -126,12 +130,43 @@ fn parse(
     let check = |params: &[&str], fields: &[&str]| {
         protocol::check(&query, headers, params, &[fields], false)
     };
+    let conditions = ["if-match", "if-none-match"];
+    let file_conditions = ["if-match", "if-none-match", "x-ms-lease-id"];
     let op = match (resource, &parts.method, param("resource")) {
         (Resource::Account(account), &Method::GET, Some("account")) => {
             check(&["resource", "prefix", "continuation", "maxresults"], &[])?;
             let page =
                 PageRequest::parse(param("prefix"), param("continuation"), param("maxresults"))?;
             Operation::ListFilesystems(account, page)
+        }
+        (Resource::Container(key), &Method::GET, Some("filesystem")) => {
+            check(
+                &[
+                    "resource",
+                    "directory",
+                    "recursive",
+                    "continuation",
+                    "maxresults",
+                    "upn",
+                ],
+                &[],
+            )?;
+            let recursive =
+                boolean_parameter(param("recursive"))?.ok_or(DfsError::MissingRecursive)?;
+            if boolean_parameter(param("upn"))? == Some(true) {
+                return Err(Error::Unsupported.into());
+            }
+            let directory = param("directory")
+                .filter(|value| !matches!(*value, "" | "/"))
+                .map(|value| -> Result<_> {
+                    let path =
+                        BlobPath::parse(value.to_owned()).map_err(|_| Error::InvalidQuery)?;
+                    path.check_hns().map_err(|_| Error::InvalidQuery)?;
+                    Ok(path)
+                })
+                .transpose()?;
+            let page = PageRequest::parse(None, param("continuation"), param("maxresults"))?;
+            Operation::ListPaths(key, directory, recursive, page)
         }
         (Resource::Container(key), method, Some("filesystem")) => {
             check(&["resource"], &[])?;
@@ -142,19 +177,23 @@ fn parse(
                 _ => return Err(Error::Unsupported.into()),
             }
         }
+        (Resource::Blob(key), &Method::PUT, Some("directory")) => {
+            check(&["resource"], &conditions)?;
+            Operation::CreateDirectory(key, Conditions::parse(headers, &CONDITION_HEADERS)?)
+        }
         (Resource::Blob(key), method @ (&Method::GET | &Method::HEAD), None) => {
             let with_body = method == Method::GET;
             let fields: &[&str] = if with_body {
-                &["if-match", "if-none-match", "range"]
+                &["if-match", "if-none-match", "range", "x-ms-lease-id"]
             } else {
-                &["if-match", "if-none-match"]
+                &file_conditions
             };
             check(&[], fields)?;
             let range = header(headers, "x-ms-range")?
                 .or(header(headers, "range")?)
                 .map(ByteRange::parse)
                 .transpose()?;
-            Operation::ReadFile(
+            Operation::ReadPath(
                 key,
                 BlobRead {
                     guard: Guard::parse(headers)?,
@@ -164,9 +203,22 @@ fn parse(
                 },
             )
         }
+        (Resource::Blob(key), &Method::DELETE, None) => {
+            check(&["recursive"], &file_conditions)?;
+            if boolean_parameter(param("recursive"))? == Some(true) {
+                return Err(Error::Unsupported.into());
+            }
+            Operation::DeletePath(key, Guard::parse(headers)?)
+        }
         _ => return Err(Error::Unsupported.into()),
     };
     Ok(op)
+}
+
+fn boolean_parameter(value: Option<&str>) -> Result<Option<bool>> {
+    value
+        .map(|value| value.parse().map_err(|_| Error::InvalidQuery))
+        .transpose()
 }
 
 async fn execute(store: &Store, op: Operation) -> Result<Response> {
@@ -201,9 +253,28 @@ async fn execute(store: &Store, op: Operation) -> Result<Response> {
                 next: page.next,
             })
         }
-        Operation::ReadFile(key, options) => {
-            let download = store.read_blob(key, options).await?;
-            let (mut response, metadata) = wire::download_response(download)?;
+        Operation::CreateDirectory(key, conditions) => wire::directory_response(
+            StatusCode::CREATED,
+            store.create_directory(key, conditions).await?,
+        ),
+        Operation::ListPaths(key, directory, recursive, page) => {
+            let (entity, page) = store.list_paths(key, directory, recursive, page).await?;
+            list_paths(entity, page)
+        }
+        Operation::DeletePath(key, guard) => {
+            store.delete_path(key, guard).await?;
+            Ok(empty(StatusCode::ACCEPTED))
+        }
+        Operation::ReadPath(key, options) => {
+            let with_body = options.with_body;
+            let download = match store.read_path(key, options).await? {
+                PathRead::File(download) => download,
+                PathRead::Directory(_) if with_body => return Err(Error::PathConflict),
+                PathRead::Directory(entity) => {
+                    return wire::directory_response(StatusCode::OK, entity);
+                }
+            };
+            let (mut response, metadata) = wire::download_response(*download)?;
             let headers = response.headers_mut();
             headers.insert("x-ms-resource-type", HeaderValue::from_static("file"));
             if !metadata.is_empty() {
@@ -217,6 +288,29 @@ async fn execute(store: &Store, op: Operation) -> Result<Response> {
             Ok(response)
         }
     }
+}
+
+fn list_paths(entity: Entity, page: Page<PathEntry>) -> Result<Response> {
+    let paths = page
+        .items
+        .into_iter()
+        .map(|(name, entry)| {
+            let (entity, directory, length) = match entry {
+                PathEntry::File(entity, length) => (entity, false, length.0),
+                PathEntry::Directory(entity) => (entity, true, 0),
+            };
+            Ok(serde_json::json!({
+                "name": name,
+                "etag": entity.etag().as_str(),
+                "lastModified": modified(entity)?,
+                "isDirectory": directory,
+                "contentLength": length,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut response = list_response(serde_json::json!({ "paths": paths }), &page.next)?;
+    wire::entity_headers(response.headers_mut(), entity)?;
+    Ok(response)
 }
 
 fn filesystem(status: StatusCode, entity: Entity) -> Result<Response> {
@@ -239,13 +333,16 @@ fn list_filesystems(page: Page<Entity>) -> Result<Response> {
             }))
         })
         .collect::<Result<Vec<_>>>()?;
-    let mut response = json_response(
-        StatusCode::OK,
+    list_response(
         serde_json::json!({ "filesystems": filesystems }),
-        JSON,
-    );
-    if !page.next.is_empty() {
-        set(response.headers_mut(), "x-ms-continuation", &page.next)?;
+        &page.next,
+    )
+}
+
+fn list_response(body: serde_json::Value, next: &str) -> Result<Response> {
+    let mut response = json_response(StatusCode::OK, body, JSON);
+    if !next.is_empty() {
+        set(response.headers_mut(), "x-ms-continuation", next)?;
     }
     Ok(response)
 }
@@ -262,6 +359,11 @@ fn error_response(error: DfsError) -> Response {
             S::CONFLICT,
             "HierarchicalNamespaceNotEnabled",
             "The account does not have a hierarchical namespace enabled.",
+        ),
+        DfsError::MissingRecursive => (
+            S::BAD_REQUEST,
+            "MissingRequiredQueryParameter",
+            "The recursive query parameter is required for listing paths.",
         ),
         DfsError::Request(error) => match error {
             Error::AuthenticationFailed => (
@@ -313,6 +415,36 @@ fn error_response(error: DfsError) -> Response {
                 S::NOT_FOUND,
                 "PathNotFound",
                 "The specified path does not exist.",
+            ),
+            Error::PathConflict => (
+                S::CONFLICT,
+                "PathConflict",
+                "The path conflicts with a file or directory.",
+            ),
+            Error::DirectoryNotEmpty => (
+                S::CONFLICT,
+                "DirectoryNotEmpty",
+                "The recursive query parameter value must be true to delete a non-empty directory.",
+            ),
+            Error::LeaseIdMissing => (
+                S::PRECONDITION_FAILED,
+                "LeaseIdMissing",
+                "There is currently a lease on the resource and no lease ID was specified.",
+            ),
+            Error::LeaseMismatchBlob | Error::LeaseMismatchContainer => (
+                S::PRECONDITION_FAILED,
+                "LeaseIdMismatch",
+                "The lease ID does not match the lease on the resource.",
+            ),
+            Error::LeaseNotPresentBlob | Error::LeaseNotPresentContainer => (
+                S::PRECONDITION_FAILED,
+                "LeaseNotPresent",
+                "There is no active lease on the resource.",
+            ),
+            Error::LeaseLost => (
+                S::PRECONDITION_FAILED,
+                "LeaseLost",
+                "The lease has expired.",
             ),
             Error::ConditionNotMet => (
                 S::PRECONDITION_FAILED,

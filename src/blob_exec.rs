@@ -13,8 +13,8 @@ use crate::{
     respond::{self, empty, entity_response, set, write_response},
     server::App,
     service_props::ServiceProperties,
-    store::{LeaseResult, SourceBytes, Upload, Uploaded},
-    wire::Xml,
+    store::{LeaseResult, PathRead, SourceBytes, Upload, Uploaded},
+    wire::{self, Xml},
 };
 use axum::{
     body::{Body, to_bytes},
@@ -72,7 +72,15 @@ pub(crate) async fn execute(
             let headers = response.headers_mut();
             set(headers, "x-ms-sku-name", "Standard_LRS")?;
             set(headers, "x-ms-account-kind", "StorageV2")?;
-            set(headers, "x-ms-is-hns-enabled", "false")?;
+            set(
+                headers,
+                "x-ms-is-hns-enabled",
+                if app.config.hns_accounts.contains(ctx.account) {
+                    "true"
+                } else {
+                    "false"
+                },
+            )?;
             Ok(response)
         }
         Operation::CreateContainer(key, options) => entity_response(
@@ -115,6 +123,7 @@ pub(crate) async fn execute(
             let delimiter = request.delimiter.clone();
             let limit = request.page.limit;
             let include = request.include.clone();
+            let hierarchical = app.config.hns_accounts.contains(&key.account);
             let listing = store.list_blobs(key, request, lease).await?;
             respond::list_blobs(
                 &endpoint,
@@ -122,6 +131,7 @@ pub(crate) async fn execute(
                 (&prefix, delimiter.as_deref(), limit),
                 listing,
                 &include,
+                hierarchical,
             )
         }
         Operation::PutBlob(key, body_options, options) => {
@@ -166,13 +176,15 @@ pub(crate) async fn execute(
         Operation::GetBlockList(key, kind, guard) => {
             block_list_response(store.blocks(key, kind, guard).await?)
         }
-        Operation::ReadBlob(key, options) => {
-            let download = store.read_blob(key, options).await?;
-            respond::download_response(download, ctx.credentials.overrides())
-        }
+        Operation::ReadBlob(key, options) => match store.read_path(key, options).await? {
+            PathRead::File(download) => {
+                respond::download_response(*download, ctx.credentials.overrides())
+            }
+            PathRead::Directory(entity) => wire::directory_response(StatusCode::OK, entity),
+        },
         Operation::BlobMetadata(key, guard) => {
             let download = store
-                .read_blob(
+                .read_path(
                     key,
                     crate::domain::BlobRead {
                         guard,
@@ -182,7 +194,10 @@ pub(crate) async fn execute(
                     },
                 )
                 .await?;
-            respond::blob_metadata_response(download)
+            match download {
+                PathRead::File(download) => respond::blob_metadata_response(*download),
+                PathRead::Directory(entity) => wire::directory_response(StatusCode::OK, entity),
+            }
         }
         Operation::SetBlobProperties(key, headers, md5, replace, guard) => entity_response(
             StatusCode::OK,
@@ -230,7 +245,7 @@ pub(crate) async fn execute(
             Ok(empty(StatusCode::NO_CONTENT))
         }
         Operation::DeleteBlob(key, guard) => {
-            store.delete_blob(key, guard).await?;
+            store.delete_path(key, guard).await?;
             Ok(empty(StatusCode::ACCEPTED))
         }
     }

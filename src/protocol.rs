@@ -244,6 +244,7 @@ pub(crate) fn parse(parts: &Parts, config: &Config, now: SystemTime) -> Result<P
         target: &target,
         now,
     })?;
+    check_hns_path(&target, config)?;
     if matches!(credentials, Credentials::Sas(_)) {
         query.retain(|name, _| !blob_sas::is_sas_param(name));
     }
@@ -1065,11 +1066,21 @@ pub(crate) fn authenticate(parts: &Parts, config: &Config) -> Result<Authenticat
         headers,
         SystemTime::now(),
     )?;
+    check_hns_path(&resource, config)?;
     Ok(AuthenticatedRequest {
         requested_version,
         resource,
         query,
     })
+}
+
+fn check_hns_path(target: &Target, config: &Config) -> Result<()> {
+    if let Target::Blob(key) = target
+        && config.hns_accounts.contains(&key.container.account)
+    {
+        key.path.check_hns()?;
+    }
+    Ok(())
 }
 
 pub(crate) fn parse_query(query: Option<&str>) -> Result<Query> {

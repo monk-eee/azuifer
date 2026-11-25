@@ -1,4 +1,4 @@
-use super::{BLOB_COLUMNS, Store, blob_row, containers::require_container, db_error};
+use super::{BLOB_COLUMNS, Store, blob_row, containers::require_container, db_error, entity_row};
 use crate::{
     domain::{BlobListing, Include, ListEntry, ListRequest, Result},
     lease::{LeaseId, LeaseNeed, LeaseOwner},
@@ -15,7 +15,7 @@ fn query(
     arguments: &[&str],
     limit: usize,
     now: i64,
-) -> Result<Vec<(String, crate::domain::BlobInfo)>> {
+) -> Result<Vec<ListEntry>> {
     let mut statement = db.prepare(sql).map_err(db_error)?;
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
     statement
@@ -28,10 +28,15 @@ fn query(
                 limit
             ],
             |row| {
-                let committed: i64 = row.get(22)?;
-                let mut info = blob_row(row, now)?.info;
-                info.uncommitted = committed == 0;
-                Ok((row.get(21)?, info))
+                let kind: i64 = row.get(22)?;
+                let name = row.get(21)?;
+                if kind == 2 {
+                    Ok(ListEntry::Directory(name, entity_row(row)?))
+                } else {
+                    let mut info = blob_row(row, now)?.info;
+                    info.uncommitted = kind == 0;
+                    Ok(ListEntry::Blob(name, Box::new(info)))
+                }
             },
         )
         .map_err(db_error)?
@@ -40,25 +45,38 @@ fn query(
 }
 
 /// Committed blobs, plus (when requested) names that exist only as staged blocks.
-fn listing_sql(uncommitted: bool) -> String {
-    let committed = format!(
+fn listing_sql(uncommitted: bool, directories: bool) -> String {
+    let mut sql = format!(
         "SELECT {BLOB_COLUMNS}, name, 1 FROM blobs
          WHERE account=?1 AND container=?2 AND name>?3 AND instr(name, ?4)=1"
     );
-    if !uncommitted {
-        return format!("{committed} ORDER BY name LIMIT ?5");
+    if directories {
+        sql.push_str(
+            " UNION ALL SELECT id, modified, etag, modified, 0, '', '', '', '', '', '', '{}', '',
+                       0, NULL, 0, 0, 0, '', '', 0, name, 2
+              FROM directories WHERE account=?1 AND container=?2 AND name>?3 AND instr(name, ?4)=1",
+        );
     }
-    format!(
-        "{committed} UNION ALL
+    if uncommitted {
+        sql.push_str(
+            " UNION ALL
          SELECT randomblob(16), 0, randomblob(16), 0, 0, 'application/octet-stream', '', '', '', '', '',
-                '{{}}', '', 0, NULL, 0, 0, 0, '', '', 0, name, 0
+                '{}', '', 0, NULL, 0, 0, 0, '', '', 0, name, 0
          FROM staged_blocks s
          WHERE account=?1 AND container=?2 AND name>?3 AND instr(name, ?4)=1
            AND NOT EXISTS (SELECT 1 FROM blobs b
-                           WHERE b.account=s.account AND b.container=s.container AND b.name=s.name)
-         GROUP BY name
-         ORDER BY name LIMIT ?5"
-    )
+                           WHERE b.account=s.account AND b.container=s.container AND b.name=s.name)",
+        );
+        if directories {
+            sql.push_str(
+                " AND NOT EXISTS (SELECT 1 FROM directories d
+                                  WHERE d.account=s.account AND d.container=s.container AND d.name=s.name)",
+            );
+        }
+        sql.push_str(" GROUP BY name");
+    }
+    sql.push_str(" ORDER BY name LIMIT ?5");
+    sql
 }
 
 impl Store {
@@ -68,12 +86,13 @@ impl Store {
         request: ListRequest,
         lease: Option<LeaseId>,
     ) -> Result<BlobListing> {
+        let directories = self.hierarchical(&key) && request.delimiter.is_none();
         self.run(move |db, _, now| {
             let container = require_container(db, &key, now)?;
             container
                 .lease
                 .check(lease, LeaseNeed::Optional, LeaseOwner::Container, now)?;
-            let sql = listing_sql(request.include.contains(&Include::Uncommitted));
+            let sql = listing_sql(request.include.contains(&Include::Uncommitted), directories);
             let limit = request.page.limit as usize;
             let prefix = request.page.prefix.as_str();
             let mut cursor = request.page.after.clone();
@@ -88,7 +107,12 @@ impl Store {
                 ];
                 let rows = query(&sql, db, &arguments, limit + 1, now)?;
                 let fetched = rows.len();
-                for (name, info) in rows {
+                for entry in rows {
+                    let name = match &entry {
+                        ListEntry::Blob(name, _)
+                        | ListEntry::Directory(name, _)
+                        | ListEntry::Prefix(name) => name,
+                    };
                     let collapsed = request.delimiter.as_deref().and_then(|delimiter| {
                         let rest = name.get(prefix.len()..)?;
                         let end = prefix.len() + rest.find(delimiter)? + delimiter.len();
@@ -103,7 +127,7 @@ impl Store {
                         continue 'scan;
                     }
                     cursor = name.clone();
-                    entries.push((ListEntry::Blob(name.clone(), Box::new(info)), name));
+                    entries.push((entry, cursor.clone()));
                     if entries.len() > limit {
                         break 'scan;
                     }

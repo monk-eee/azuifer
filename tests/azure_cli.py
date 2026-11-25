@@ -52,10 +52,20 @@ def wait_ready(admin):
             time.sleep(0.2)
 
 
+def connection_string(endpoint, key):
+    return (
+        f"DefaultEndpointsProtocol=http;AccountName={ACCOUNT};AccountKey={key};"
+        f"BlobEndpoint={endpoint}/{ACCOUNT};"
+    )
+
+
 def exercise(az, env, root, key, dfs_url):
-    def run(*args, expected_error=None, timeout=45):
+    def run(*args, expected_error=None, timeout=45, endpoint=None):
         command = [az, "storage", *args, "--auth-mode", "key", "--output", "json", "--only-show-errors"]
-        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=timeout)
+        command_env = env if endpoint is None else dict(
+            env, AZURE_STORAGE_CONNECTION_STRING=connection_string(endpoint, key),
+        )
+        result = subprocess.run(command, env=command_env, capture_output=True, text=True, timeout=timeout)
         name = "az storage " + " ".join(args[:2])
         errors = result.stderr.replace(key, "[redacted]").strip()
         if expected_error is not None:
@@ -145,6 +155,7 @@ def exercise(az, env, root, key, dfs_url):
         evidence["checks"].extend([
             "Azure CLI filesystem listing, file metadata, and download",
             "DFS filesystem lifecycle and read of CLI-uploaded Blob bytes",
+            "Azure CLI directory create and paged listing on the DFS endpoint",
         ])
     return evidence
 
@@ -207,6 +218,21 @@ def exercise_dfs(run, root, dfs_url, key):
             received = b"".join(chunks)
             require(received == contents, "DFS returned different bytes from the Blob uploaded by CLI")
 
+        run("fs", "directory", "create", "--file-system", filesystem,
+            "--name", "empty/child", endpoint=dfs_url)
+        scope = ["fs", "file", "list", "--file-system", filesystem, "--recursive", "false"]
+        first = run(*scope, "--num-results", "1", "--show-next-marker", endpoint=dfs_url)
+        require(len(first) == 2 and first[0]["name"] == "empty" and first[0]["isDirectory"],
+                "DFS root page did not contain the new directory")
+        marker = first[1]["nextMarker"]
+        require(bool(marker), "DFS listing did not provide a continuation token")
+        next_page = run(*scope, "--num-results", "1", "--marker", marker, endpoint=dfs_url)
+        require(len(next_page) == 1 and next_page[0]["name"] == "folder" and next_page[0]["isDirectory"],
+                "DFS second page did not contain the implicit parent of the CLI upload")
+        children = run(*scope, "--path", "empty", endpoint=dfs_url)
+        require(len(children) == 1 and children[0]["name"] == "empty/child" and children[0]["isDirectory"],
+                "DFS listing did not see the empty child")
+
         status, _, _ = dfs.delete(cls=result)
         require(status == 202, "DFS did not delete the filesystem")
     require(not run("container", "exists", "--name", filesystem)["exists"],
@@ -215,6 +241,7 @@ def exercise_dfs(run, root, dfs_url, key):
         "sdk_version": __version__,
         "read_bytes": len(received),
         "read_sha256": hashlib.sha256(received).hexdigest(),
+        "root_directories": [first[0]["name"], next_page[0]["name"]],
     }
 
 
@@ -246,10 +273,7 @@ def main():
             AZURE_EXTENSION_USE_DYNAMIC_INSTALL="no",
             NO_PROXY="127.0.0.1",
             no_proxy="127.0.0.1",
-            AZURE_STORAGE_CONNECTION_STRING=(
-                f"DefaultEndpointsProtocol=http;AccountName={ACCOUNT};AccountKey={key};"
-                f"BlobEndpoint={args.blob_url}/{ACCOUNT};"
-            ),
+            AZURE_STORAGE_CONNECTION_STRING=connection_string(args.blob_url, key),
         )
         version = subprocess.run([az, "version", "--output", "json"], env=env, capture_output=True, text=True, timeout=30)
         require(version.returncode == 0, f"az version: {version.stderr.replace(key, '[redacted]').strip()}")
