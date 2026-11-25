@@ -1,14 +1,25 @@
 mod auth;
 mod checksum;
+// Foundations awaiting their first service consumers (ADR-0011, ADR-0012); drop these allows when used.
+#[allow(dead_code)]
+mod clock;
 mod config;
+mod conformance;
+mod dfs;
 mod domain;
+mod files;
 mod protocol;
+mod queue;
+#[allow(dead_code)]
+mod sas;
 mod server;
 mod store;
+mod table;
+mod wire;
 
 use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
-use config::{CONFORMANCE, Config, Options};
+use config::{Config, Options};
 
 #[derive(Parser)]
 #[command(
@@ -47,7 +58,10 @@ enum ConfigCommand {
 
 #[derive(Subcommand)]
 enum ConformanceCommand {
-    Export,
+    Export {
+        #[arg(long, value_enum, default_value = "json")]
+        format: conformance::Format,
+    },
 }
 
 #[tokio::main]
@@ -73,10 +87,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Conformance {
-            command: ConformanceCommand::Export,
-        } => {
-            print!("{CONFORMANCE}");
-            Ok(())
-        }
+            command: ConformanceCommand::Export { format },
+        } => conformance::export(format),
     }
 }

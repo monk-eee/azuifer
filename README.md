@@ -1,33 +1,112 @@
 # Azuifer
 
 <p align="center">
-  <img src="assets/azuifer_logo.jpg" alt="Azuifer fish mascot holding a storage cube" width="500">
+  <img src="assets/azuifer_logo.jpg" alt="Azuifer fish mascot holding a storage cube" width="360">
 </p>
 
-Azuifer is a Rust emulator for Azure Storage. The goal is **100% wire compatibility** across Blob, Data Lake Storage Gen2 (DFS), Azure Files FileREST, Queue, and Table.
+[![CI](https://github.com/monk-eee/azuifer/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/monk-eee/azuifer/actions/workflows/rust.yml)
 
-Point existing SDKs, Azure CLI, AzCopy, and REST clients at Azuifer. The same requests should produce the same responses, errors, and storage state as Azure. That includes one namespace for Blob and DFS on hierarchical namespace (HNS) accounts. The [compatibility guide](docs/compatibility/blob.md) tracks what works and what has been verified.
+**Run Azure Storage clients locally.** Azuifer is a Rust emulator for Azure Storage. The goal is **100% wire compatibility** across Blob, Data Lake Storage Gen2 (DFS), Azure Files FileREST, Queue, and Table: change the endpoint, not your application.
 
-The [Azure Linux container](docs/compatibility/blob.md#container) is the primary way to run Azuifer. The same Rust workspace targets native macOS, Linux, and Windows for local development and testing.
+Blob is available now: create containers, upload and download block blobs, read byte ranges, and keep data across restarts. The primary runtime is a non-root Azure Linux container.
+
+[Docker quickstart](#run-locally) | [Connect an SDK](#connect-an-sdk) | [Supported operations](#what-works) | [Compatibility evidence](#verify-compatibility)
 
 ## Run locally
 
-Install Rustup and a native C toolchain for bundled SQLite: Command Line Tools on macOS, GCC or Clang on Linux, or MSVC Build Tools on Windows. From the repository root:
+### 1. Start the container
+
+These Bash commands use Git, Docker, OpenSSL, and Azure CLI (`az`). No Azure account or `az login` is needed. Use the same shell for both steps so the client gets the disposable key.
+
+```sh
+git clone https://github.com/monk-eee/azuifer.git
+cd azuifer
+docker build -t azuifer:quickstart .
+
+export AZUIFER_ACCOUNT_KEY="$(openssl rand -base64 32)"
+docker run --detach --rm --name azuifer-quickstart --read-only \
+  -p 127.0.0.1:10000:10000 -p 127.0.0.1:10005:10005 \
+  -e AZUIFER_ACCOUNT_KEY azuifer:quickstart \
+  serve --bind 0.0.0.0 --in-memory --skip-api-version-check
+curl --noproxy 127.0.0.1 --fail --retry 5 --retry-connrefused http://127.0.0.1:10005/readyz
+```
+
+The readiness endpoint returns `ready`. Blob listens on port `10000`; health and readiness are on `10005`. Both ports are published only on localhost.
+
+### 2. Upload and download a blob
+
+```sh
+export AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=$AZUIFER_ACCOUNT_KEY;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+scratch="$(mktemp -d)"
+printf 'hello Azuifer\n' > "$scratch/hello.txt"
+
+az storage container create --name example --auth-mode key --output none
+az storage blob upload --container-name example --name hello.txt \
+  --file "$scratch/hello.txt" --overwrite false --auth-mode key --output none
+az storage blob download --container-name example --name hello.txt \
+  --file "$scratch/downloaded.txt" --auth-mode key --output none
+cmp "$scratch/hello.txt" "$scratch/downloaded.txt" && printf 'Download matches the upload.\n'
+```
+
+This run keeps data in memory. To use a persistent Docker volume, add `--mount type=volume,source=azuifer-data,target=/data` before the image name and replace `--in-memory` with `--location /data`. Keep the same key and volume when recreating the container.
+
+## Connect an SDK
+
+Leave the container running and reuse `AZURE_STORAGE_CONNECTION_STRING` from the quickstart. The endpoint includes the account name, and the Blob API baseline is `2023-11-03`. The quickstart enables version fallback for newer Azure CLI clients; omit `--skip-api-version-check` when testing a client pinned to the baseline.
+
+For example, with `azure-storage-blob` installed, read the same blob from Python:
+
+```python
+import os
+
+from azure.storage.blob import BlobServiceClient
+
+with BlobServiceClient.from_connection_string(
+    os.environ["AZURE_STORAGE_CONNECTION_STRING"], api_version="2023-11-03"
+) as service:
+    blob = service.get_blob_client(container="example", blob="hello.txt")
+    print(blob.download_blob().readall().decode(), end="")
+```
+
+Stop the container with `docker stop azuifer-quickstart` when you're done.
+
+## What works
+
+| Blob workflow | Available on Azuifer |
+| --- | --- |
+| Authentication | Shared Key at a path-style endpoint |
+| Containers | Create, list, read properties, and delete |
+| Block blobs | Upload, read, list, delete, stage blocks, and get or commit block lists |
+| Reads and writes | Byte ranges, ETag conditions, upload checksums, and metadata on writes |
+| Storage | In-memory or SQLite metadata with persistent payloads |
+
+Use the [Blob compatibility guide](docs/compatibility/blob.md) for operation details, limits, and CLI flags. The [product specification](docs/specs/azuifer.md) tracks DFS, Files, Queue, and Table. The storage design uses one namespace for Blob and DFS on hierarchical namespace (HNS) accounts.
+
+## Verify compatibility
+
+The [required CI check](https://github.com/monk-eee/azuifer/actions/workflows/rust.yml) runs the current pinned Azure CLI release and its three predecessors against fresh Azuifer containers. It checks bytes, range results, metadata, rejected overwrites, ETags, and a hash-matching multipart upload and download of **256 MiB + 1 byte**. Each run publishes the image IDs and per-version outcomes as `azure-cli-compatibility`.
+
+See [how to run the same matrix locally](docs/compatibility/blob.md#azure-cli). To see the operation inventory from your built image:
+
+```sh
+docker run --rm azuifer:quickstart conformance export
+```
+
+## Build natively
+
+Use Rustup and a C compiler for bundled SQLite: Command Line Tools on macOS, GCC or Clang on Linux, or MSVC Build Tools on Windows. From the repository root:
 
 ```sh
 cargo run --locked -- serve --in-memory
 ```
 
-Blob listens on `127.0.0.1:10000`; the admin listener serves `/healthz` and `/readyz` on `127.0.0.1:10005`. Stop with Ctrl+C. To keep data across runs, use `serve --location ./data` instead. A persistent directory is dedicated to one running Azuifer process.
+Native runs use the same Blob and admin ports. Use `--location ./data` for persistence or `--skip-api-version-check` for newer CLI clients. SDKs that accept `UseDevelopmentStorage=true` can use it with the loopback Blob endpoint and the pinned API version.
 
-Point a Blob client at `http://127.0.0.1:10000/devstoreaccount1`. Use Shared Key and set API version `2023-11-03`. Clients that accept `UseDevelopmentStorage=true` can use its Blob endpoint and credentials with that API version. The well-known development key is allowed only on loopback. For your own development key, put its Base64 value in `AZUIFER_ACCOUNT_KEY` and optionally set `AZUIFER_ACCOUNT_NAME`.
-
-The [local Blob guide](docs/compatibility/blob.md) lists the implemented operations, flags, and container setup. For the newer API version sent by `az storage`, see the [Azure CLI setup](docs/compatibility/blob.md#azure-cli). Export the version and operation inventory with `cargo run --locked -- conformance export`.
+## Project docs
 
 | Start here | What you'll find |
 | --- | --- |
-| [Product and technical specification](docs/specs/azuifer.md) | The wire contract, architecture, and functional scope |
-| [Onboarding](ONBOARDING.md) | How the pieces fit together and where to make a first contribution |
+| [Onboarding](ONBOARDING.md) | How the pieces fit together and where to contribute |
 | [Architecture decision records](docs/adr.d/README.md) | Design choices, alternatives, and the evidence each choice will need |
 | [Contributing](CONTRIBUTING.md) | How to propose, validate, and review changes |
 | [Releases](docs/releases.md) | Native archives, the Azure Linux image, and Docker Hub opt-in |

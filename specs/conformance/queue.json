@@ -1,0 +1,22 @@
+{
+  "service": "queue",
+  "api_version": "2023-11-03",
+  "operations": [
+    {"name": "List Queues", "state": "unsupported", "authorization": []},
+    {"name": "Create Queue", "state": "unsupported", "authorization": []},
+    {"name": "Delete Queue", "state": "unsupported", "authorization": []},
+    {"name": "Get Queue Metadata", "state": "unsupported", "authorization": []},
+    {"name": "Set Queue Metadata", "state": "unsupported", "authorization": []},
+    {"name": "Get Queue ACL", "state": "unsupported", "authorization": []},
+    {"name": "Set Queue ACL", "state": "unsupported", "authorization": []},
+    {"name": "Get Queue Service Properties", "state": "unsupported", "authorization": []},
+    {"name": "Set Queue Service Properties", "state": "unsupported", "authorization": []},
+    {"name": "Get Queue Service Stats", "state": "unsupported", "authorization": []},
+    {"name": "Put Message", "state": "unsupported", "authorization": []},
+    {"name": "Get Messages", "state": "unsupported", "authorization": []},
+    {"name": "Peek Messages", "state": "unsupported", "authorization": []},
+    {"name": "Update Message", "state": "unsupported", "authorization": []},
+    {"name": "Delete Message", "state": "unsupported", "authorization": []},
+    {"name": "Clear Messages", "state": "unsupported", "authorization": []}
+  ]
+}

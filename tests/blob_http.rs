@@ -58,6 +58,7 @@ impl Drop for TestProcess {
 struct Emulator {
     process: TestProcess,
     blob: String,
+    dfs: Option<String>,
     admin: String,
     client: Client,
 }
@@ -81,8 +82,20 @@ fn emulator_command() -> Command {
 
 impl Emulator {
     fn start(location: Option<&Path>, extra: &[&str]) -> Self {
+        Self::start_services(location, "blob", extra)
+    }
+
+    fn start_services(location: Option<&Path>, services: &str, extra: &[&str]) -> Self {
         let mut command = emulator_command();
-        command.args(["serve", "--port", "0", "--admin-port", "0"]);
+        command.args([
+            "serve",
+            "--port",
+            "0",
+            "--admin-port",
+            "0",
+            "--services",
+            services,
+        ]);
         if let Some(location) = location {
             command.arg("--location").arg(location);
         } else {
@@ -101,17 +114,26 @@ impl Emulator {
         let stdout = process.0.stdout.take().expect("piped startup addresses");
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
-            let lines = BufReader::new(stdout)
-                .lines()
-                .take(2)
-                .collect::<std::io::Result<Vec<_>>>();
-            sender.send(lines).ok();
+            let addresses = || {
+                let mut lines = BTreeMap::new();
+                for line in BufReader::new(stdout).lines().take(6) {
+                    let line = line?;
+                    let (name, url) = line
+                        .split_once("_url=")
+                        .ok_or_else(|| std::io::Error::other("expected a listener URL"))?;
+                    lines.insert(name.to_owned(), url.to_owned());
+                    if name == "admin" {
+                        break;
+                    }
+                }
+                Ok::<_, std::io::Error>(lines)
+            };
+            sender.send(addresses()).ok();
         });
-        let lines = receiver
+        let mut lines = receiver
             .recv_timeout(Duration::from_secs(10))
             .expect("server bound its ports")
             .expect("read startup addresses");
-        let [blob, admin]: [String; 2] = lines.try_into().expect("two listener addresses");
         let client = Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(10))
@@ -119,8 +141,9 @@ impl Emulator {
             .unwrap();
         let started = Self {
             process,
-            blob: blob.strip_prefix("blob_url=").unwrap().to_owned(),
-            admin: admin.strip_prefix("admin_url=").unwrap().to_owned(),
+            blob: lines.remove("blob").expect("Blob listener URL"),
+            dfs: lines.remove("dfs"),
+            admin: lines.remove("admin").expect("admin listener URL"),
             client,
         };
         assert_eq!(
@@ -148,7 +171,30 @@ impl Emulator {
         body: &[u8],
         key: &[u8],
     ) -> Response {
-        let url = Url::parse(&format!("{}{path}", self.blob)).unwrap();
+        self.request_at(&self.blob, method, path, extra, body, key)
+    }
+
+    fn dfs(&self, method: Method, path: &str, extra: &[(&str, &str)], body: &[u8]) -> Response {
+        self.request_at(
+            self.dfs.as_deref().expect("DFS listener URL"),
+            method,
+            path,
+            extra,
+            body,
+            &KEY,
+        )
+    }
+
+    fn request_at(
+        &self,
+        endpoint: &str,
+        method: Method,
+        path: &str,
+        extra: &[(&str, &str)],
+        body: &[u8],
+        key: &[u8],
+    ) -> Response {
+        let url = Url::parse(&format!("{endpoint}{path}")).unwrap();
         let length = (method == Method::PUT).then_some(body.len());
         let headers = signed(&method, &url, extra, length, key);
         let mut request = self.client.request(method, url);
@@ -581,9 +627,15 @@ fn cli_overrides_environment_and_toml_for_upload_limits_and_storage_mode() {
     fs::write(&file, "in_memory = true\nmax_blob_bytes = 2\n").unwrap();
     for (env_limit, limit) in [(None, 2), (Some("4"), 4)] {
         let mut command = emulator_command();
-        command
-            .env("AZUIFER_CONFIG", &file)
-            .args(["serve", "--port", "0", "--admin-port", "0"]);
+        command.env("AZUIFER_CONFIG", &file).args([
+            "serve",
+            "--port",
+            "0",
+            "--admin-port",
+            "0",
+            "--services",
+            "blob",
+        ]);
         if let Some(value) = env_limit {
             command.env("AZUIFER_MAX_BLOB_BYTES", value);
         }
@@ -609,6 +661,8 @@ fn cli_overrides_environment_and_toml_for_upload_limits_and_storage_mode() {
             "0",
             "--admin-port",
             "0",
+            "--services",
+            "blob",
             "--in-memory=false",
             "--max-blob-bytes",
             "6",
@@ -698,7 +752,19 @@ fn cli_validation_rejects_misconfiguration_without_leaking_keys() {
             &["--port", "6000", "--admin-port", "6000"][..],
             "ports must differ",
         ),
-        (&["--services", "blob,dfs"][..], "only the Blob service"),
+        (&["--services", "blob,bogus"][..], "unknown service"),
+        (&["--services", "blob,blob"][..], "duplicate service"),
+        (
+            &[
+                "--services",
+                "blob,queue",
+                "--queue-port",
+                "6001",
+                "--port",
+                "6001",
+            ][..],
+            "ports must differ",
+        ),
         (
             &["--upload-timeout-seconds", "0"][..],
             "upload-timeout-seconds must be between",
@@ -1177,6 +1243,130 @@ fn zero_length_blocks_commit_and_read_in_memory() {
             .unwrap()
             .contains("<Name>QQ==</Name><Size>0</Size>")
     );
+}
+
+#[test]
+fn dfs_requires_hns_and_authentication() {
+    let server = Emulator::start_services(None, "blob,dfs", &[]);
+    let response = server.dfs(Method::GET, "/testaccount?resource=account", &[], b"");
+    dfs_error(response, 409, "HierarchicalNamespaceNotEnabled");
+
+    let hns = Emulator::start_services(None, "blob,dfs", &["--hns-accounts", ACCOUNT]);
+    let unsigned = hns
+        .client
+        .get(format!(
+            "{}/testaccount?resource=account",
+            hns.dfs.as_deref().unwrap()
+        ))
+        .header("x-ms-version", VERSION)
+        .send()
+        .unwrap();
+    dfs_error(unsigned, 403, "AuthorizationFailure");
+}
+
+#[test]
+fn dfs_filesystems_and_blob_bytes_share_the_same_persistent_store() {
+    const FILESYSTEM: &str = "/testaccount/container?resource=filesystem";
+    let location = tempfile::tempdir().unwrap();
+    let start = || {
+        Emulator::start_services(
+            Some(location.path()),
+            "blob,dfs",
+            &["--hns-accounts", ACCOUNT, "--skip-api-version-check"],
+        )
+    };
+    let server = start();
+    let created = server.dfs(Method::PUT, FILESYSTEM, &[], b"");
+    assert_eq!(created.status(), 201);
+    assert_eq!(created.headers()["x-ms-namespace-enabled"], "true");
+    let container_tag = etag(&created);
+    let blob_container = server.request(Method::HEAD, CONTAINER, &[], b"");
+    assert_eq!(blob_container.status(), 200);
+    assert_eq!(etag(&blob_container), container_tag);
+    let properties = server.dfs(Method::HEAD, FILESYSTEM, &[], b"");
+    assert_eq!(properties.status(), 200);
+    assert_eq!(etag(&properties), container_tag);
+    dfs_error(
+        server.dfs(Method::PUT, FILESYSTEM, &[], b""),
+        409,
+        "FilesystemAlreadyExists",
+    );
+
+    assert_eq!(
+        server
+            .request(
+                Method::PUT,
+                "/testaccount/second?restype=container",
+                &[],
+                b"",
+            )
+            .status(),
+        201,
+    );
+    let page = server.dfs(
+        Method::GET,
+        "/testaccount?resource=account&maxresults=1",
+        &[],
+        b"",
+    );
+    assert_eq!(page.status(), 200);
+    let marker = page.headers()["x-ms-continuation"].to_str().unwrap().to_owned();
+    let listed: serde_json::Value = serde_json::from_slice(&page.bytes().unwrap()).unwrap();
+    assert_eq!(listed["filesystems"][0]["name"], "container");
+    assert_eq!(listed["filesystems"][0]["eTag"], container_tag);
+    let next = server.dfs(
+        Method::GET,
+        &format!("/testaccount?resource=account&maxresults=1&continuation={marker}"),
+        &[],
+        b"",
+    );
+    assert_eq!(next.status(), 200);
+    assert!(!next.headers().contains_key("x-ms-continuation"));
+    let listed: serde_json::Value = serde_json::from_slice(&next.bytes().unwrap()).unwrap();
+    assert_eq!(listed["filesystems"][0]["name"], "second");
+
+    let written = server.put(BLOB, &[("x-ms-meta-origin", "blob")], b"shared bytes");
+    assert_eq!(written.status(), 201);
+    let tag = etag(&written);
+    drop(server);
+    let server = start();
+    let metadata = server.dfs(Method::HEAD, BLOB, &[], b"");
+    assert_eq!(metadata.status(), 200);
+    assert_eq!(metadata.headers()["x-ms-resource-type"], "file");
+    assert_eq!(metadata.headers()["x-ms-properties"], "origin=YmxvYg==");
+    assert_eq!(metadata.headers()["content-length"], "12");
+    assert_eq!(etag(&metadata), tag);
+    assert!(metadata.bytes().unwrap().is_empty());
+
+    let ranged = server.dfs(
+        Method::GET,
+        BLOB,
+        &[("range", "bytes=7-11"), ("if-match", &tag), ("x-ms-version", "2026-04-06")],
+        b"",
+    );
+    assert_eq!(ranged.status(), 206);
+    assert_eq!(ranged.headers()["x-ms-version"], VERSION);
+    assert_eq!(ranged.headers()["content-range"], "bytes 7-11/12");
+    assert_eq!(ranged.bytes().unwrap().as_ref(), b"bytes");
+    dfs_error(
+        server.dfs(Method::GET, BLOB, &[("if-match", "\"not-current\"")], b""),
+        412,
+        "ConditionNotMet",
+    );
+    dfs_error(
+        server.dfs(Method::GET, "/testaccount/container/missing", &[], b""),
+        404,
+        "PathNotFound",
+    );
+    assert_eq!(server.dfs(Method::DELETE, FILESYSTEM, &[], b"").status(), 202);
+    error(server.request(Method::GET, BLOB, &[], b""), 404, "ContainerNotFound");
+}
+
+fn dfs_error(response: Response, status: u16, code: &str) {
+    assert_eq!(response.status().as_u16(), status);
+    assert_eq!(response.headers()["x-ms-error-code"], code);
+    let body: serde_json::Value = serde_json::from_slice(&response.bytes().unwrap()).unwrap();
+    assert_eq!(body["error"]["code"], code);
 }
 
 #[test]

@@ -46,11 +46,6 @@ The matrix uses `--skip-api-version-check` because these clients request a newer
 
 ## Container
 
-Build the [Azure Linux image](../../Dockerfile) locally. Set `AZUIFER_ACCOUNT_KEY` in your environment to a fresh Base64-encoded random key of 32 to 64 bytes. Don't reuse production credentials.
+Follow the [Docker quickstart](../../README.md#run-locally) to build the [Azure Linux image](../../Dockerfile) and try it with Azure CLI. The explicit in-container bind allows port forwarding while the published host ports stay loopback-only. That bind requires a custom Shared Key: use 32 to 64 random bytes encoded in Base64, never a production credential.
 
-```sh
-docker build -t azuifer:local .
-docker run --rm --read-only -p 127.0.0.1:10000:10000 -p 127.0.0.1:10005:10005 -e AZUIFER_ACCOUNT_KEY azuifer:local serve --bind 0.0.0.0 --in-memory
-```
-
-The explicit in-container bind allows port forwarding; the published host ports remain loopback-only. For persistence, use `--location /data` instead of `--in-memory` and mount a writable volume at `/data`. The binary runs as UID and GID `65532`.
+The binary runs as UID and GID `65532`. For persistence, mount a volume writable by that user at `/data` and start with `--location /data` in place of `--in-memory`.

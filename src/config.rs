@@ -4,7 +4,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::Args;
 use serde::Deserialize;
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     time::Duration,
@@ -43,6 +43,62 @@ pub(crate) struct Options {
     skip_api_version_check: Option<bool>,
     #[arg(long, env = "AZUIFER_SERVICES", global = true)]
     services: Option<String>,
+    #[arg(long, env = "AZUIFER_QUEUE_PORT", global = true)]
+    queue_port: Option<u16>,
+    #[arg(long, env = "AZUIFER_TABLE_PORT", global = true)]
+    table_port: Option<u16>,
+    #[arg(long, env = "AZUIFER_DFS_PORT", global = true)]
+    dfs_port: Option<u16>,
+    /// Comma-separated configured accounts with the DFS namespace enabled.
+    #[arg(long, env = "AZUIFER_HNS_ACCOUNTS", global = true)]
+    hns_accounts: Option<String>,
+    #[arg(long, env = "AZUIFER_FILE_PORT", global = true)]
+    file_port: Option<u16>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum Service {
+    Blob,
+    Queue,
+    Table,
+    Dfs,
+    File,
+}
+
+impl Service {
+    pub(crate) const ALL: [Self; 5] = [Self::Blob, Self::Queue, Self::Table, Self::Dfs, Self::File];
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Blob => "blob",
+            Self::Queue => "queue",
+            Self::Table => "table",
+            Self::Dfs => "dfs",
+            Self::File => "file",
+        }
+    }
+
+    fn default_port(self) -> u16 {
+        match self {
+            Self::Blob => 10000,
+            Self::Queue => 10001,
+            Self::Table => 10002,
+            Self::Dfs => 10003,
+            Self::File => 10004,
+        }
+    }
+
+    fn parse_list(value: &str) -> Result<BTreeSet<Self>> {
+        let mut services = BTreeSet::new();
+        for name in value.split(',').map(str::trim) {
+            let service = Self::ALL
+                .into_iter()
+                .find(|service| service.name() == name)
+                .with_context(|| format!("unknown service `{name}`"))?;
+            ensure!(services.insert(service), "duplicate service `{name}`");
+        }
+        Ok(services)
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -59,6 +115,11 @@ struct FileConfig {
     upload_timeout_seconds: Option<u64>,
     skip_api_version_check: Option<bool>,
     services: Option<String>,
+    queue_port: Option<u16>,
+    table_port: Option<u16>,
+    dfs_port: Option<u16>,
+    hns_accounts: Option<String>,
+    file_port: Option<u16>,
     accounts: Vec<AccountConfig>,
 }
 
@@ -75,7 +136,12 @@ struct Manifest {
 }
 
 pub(crate) struct Config {
+    pub(crate) services: BTreeSet<Service>,
     pub(crate) blob: SocketAddr,
+    pub(crate) queue: SocketAddr,
+    pub(crate) table: SocketAddr,
+    pub(crate) dfs: SocketAddr,
+    pub(crate) file: SocketAddr,
     pub(crate) admin: SocketAddr,
     pub(crate) location: Option<PathBuf>,
     pub(crate) memory_limit: u64,
@@ -84,6 +150,7 @@ pub(crate) struct Config {
     pub(crate) upload_timeout: Duration,
     pub(crate) skip_api_version_check: bool,
     pub(crate) accounts: HashMap<AccountName, Vec<Vec<u8>>>,
+    pub(crate) hns_accounts: HashSet<AccountName>,
     pub(crate) api_version: ApiVersion,
 }
 
@@ -106,18 +173,55 @@ impl Config {
             .unwrap_or(Ipv4Addr::LOCALHOST.into());
         let port = options.port.or(file.port).unwrap_or(10000);
         let admin_port = options.admin_port.or(file.admin_port).unwrap_or(10005);
-        ensure!(
-            port == 0 || port != admin_port,
-            "Blob and admin ports must differ"
-        );
-        let services = options
-            .services
-            .or(file.services)
-            .unwrap_or_else(|| "blob".into());
-        ensure!(
-            services == "blob",
-            "only the Blob service is implemented in this build"
-        );
+        let services = Service::parse_list(
+            &options
+                .services
+                .or(file.services)
+                .unwrap_or_else(|| "blob,queue,table,dfs,file".into()),
+        )?;
+        // An ephemeral Blob port makes unspecified service ports ephemeral too,
+        // so parallel test runs never collide on the fixed defaults.
+        let service_port = |service: Service, explicit: Option<u16>| {
+            explicit.unwrap_or(if port == 0 { 0 } else { service.default_port() })
+        };
+        let ports = [
+            (Service::Blob, port),
+            (
+                Service::Queue,
+                service_port(Service::Queue, options.queue_port.or(file.queue_port)),
+            ),
+            (
+                Service::Table,
+                service_port(Service::Table, options.table_port.or(file.table_port)),
+            ),
+            (
+                Service::Dfs,
+                service_port(Service::Dfs, options.dfs_port.or(file.dfs_port)),
+            ),
+            (
+                Service::File,
+                service_port(Service::File, options.file_port.or(file.file_port)),
+            ),
+        ];
+        let mut used = BTreeSet::new();
+        for (service, port) in ports
+            .iter()
+            .filter(|(service, _)| services.contains(service))
+            .chain([&(Service::Blob, admin_port)])
+        {
+            ensure!(
+                *port == 0 || used.insert(*port),
+                "service ports must differ ({} conflicts)",
+                service.name()
+            );
+        }
+        let address = |service: Service| {
+            let port = ports
+                .iter()
+                .find_map(|(candidate, port)| (*candidate == service).then_some(*port))
+                .unwrap_or(0);
+            SocketAddr::new(binding, port)
+        };
         let in_memory = options.in_memory.or(file.in_memory).unwrap_or(false);
         let location = if in_memory {
             None
@@ -163,12 +267,28 @@ impl Config {
         );
 
         let accounts = load_accounts(file.accounts, binding.is_loopback())?;
+        let mut hns_accounts = HashSet::new();
+        if let Some(value) = options.hns_accounts.or(file.hns_accounts)
+            && !value.is_empty()
+        {
+            for name in value.split(',').map(str::trim) {
+                let account = AccountName::parse(name)
+                    .map_err(|_| anyhow::anyhow!("invalid name in hns-accounts"))?;
+                ensure!(accounts.contains_key(&account), "HNS account `{name}` is not configured");
+                ensure!(hns_accounts.insert(account), "duplicate HNS account `{name}`");
+            }
+        }
         let manifest: Manifest =
             serde_json::from_str(CONFORMANCE).context("invalid embedded protocol manifest")?;
         let api_version = ApiVersion::parse(&manifest.api_version)
             .map_err(|_| anyhow::anyhow!("invalid Blob API version in the protocol manifest"))?;
         Ok(Self {
-            blob: SocketAddr::new(binding, port),
+            blob: address(Service::Blob),
+            queue: address(Service::Queue),
+            table: address(Service::Table),
+            dfs: address(Service::Dfs),
+            file: address(Service::File),
+            services,
             admin: SocketAddr::new(binding, admin_port),
             location,
             memory_limit,
@@ -180,6 +300,7 @@ impl Config {
                 .or(file.skip_api_version_check)
                 .unwrap_or(false),
             accounts,
+            hns_accounts,
             api_version,
         })
     }

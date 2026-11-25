@@ -1,0 +1,23 @@
+{
+  "service": "table",
+  "api_version": "2023-11-03",
+  "operations": [
+    {"name": "Query Tables", "state": "unsupported", "authorization": []},
+    {"name": "Create Table", "state": "unsupported", "authorization": []},
+    {"name": "Delete Table", "state": "unsupported", "authorization": []},
+    {"name": "Get Table ACL", "state": "unsupported", "authorization": []},
+    {"name": "Set Table ACL", "state": "unsupported", "authorization": []},
+    {"name": "Get Table Service Properties", "state": "unsupported", "authorization": []},
+    {"name": "Set Table Service Properties", "state": "unsupported", "authorization": []},
+    {"name": "Get Table Service Stats", "state": "unsupported", "authorization": []},
+    {"name": "Query Entities", "state": "unsupported", "authorization": []},
+    {"name": "Get Entity", "state": "unsupported", "authorization": []},
+    {"name": "Insert Entity", "state": "unsupported", "authorization": []},
+    {"name": "Update Entity", "state": "unsupported", "authorization": []},
+    {"name": "Merge Entity", "state": "unsupported", "authorization": []},
+    {"name": "Delete Entity", "state": "unsupported", "authorization": []},
+    {"name": "Insert Or Replace Entity", "state": "unsupported", "authorization": []},
+    {"name": "Insert Or Merge Entity", "state": "unsupported", "authorization": []},
+    {"name": "Entity Group Batch", "state": "unsupported", "authorization": []}
+  ]
+}

@@ -1,31 +1,32 @@
 use crate::{
     checksum::{Checksums, Hasher},
-    config::Config,
+    config::{Config, Service},
+    dfs,
     domain::{BlobInfo, BlockList, Entity, Error, Metadata, Page, Result},
+    files,
     protocol::{self, Operation, UploadOptions},
-    store::{Download, Payload, Store, Upload, Uploaded},
+    queue,
+    store::{Download, Store, Upload, Uploaded},
+    table,
+    wire::{self, Xml, empty, entity_headers, entity_response, modified, set},
 };
 use anyhow::Context as _;
 use axum::{
     Router,
     body::{Body, to_bytes},
     extract::{Request, State},
-    http::{HeaderMap, HeaderValue, Method, StatusCode},
+    http::{HeaderValue, Method, StatusCode},
     response::Response,
     routing::get,
 };
-use futures_util::{StreamExt as _, TryStreamExt as _};
-use std::{
-    net::SocketAddr,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
-use tokio::{io::AsyncReadExt as _, net::TcpListener, sync::Semaphore};
-use tokio_util::{io::ReaderStream, sync::CancellationToken};
+use futures_util::StreamExt as _;
+use std::{net::SocketAddr, sync::Arc};
+use tokio::{net::TcpListener, sync::Semaphore};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 struct App {
-    config: Config,
+    config: Arc<Config>,
     version: HeaderValue,
     store: Store,
     address: SocketAddr,
@@ -33,53 +34,99 @@ struct App {
 }
 
 pub(crate) async fn serve(config: Config, shutdown_on_stdin_eof: bool) -> anyhow::Result<()> {
-    let version = HeaderValue::from_str(config.api_version.as_str())
-        .context("invalid HTTP version in the protocol manifest")?;
-    let blob = TcpListener::bind(config.blob)
-        .await
-        .context("could not bind the Blob listener")?;
+    let config = Arc::new(config);
     let admin = TcpListener::bind(config.admin)
         .await
         .context("could not bind the admin listener")?;
-    let location = config.location.clone();
-    let memory_limit = config.memory_limit;
-    let store = tokio::task::spawn_blocking(move || Store::open(location.as_deref(), memory_limit))
-        .await
-        .context("storage initialization did not complete")??;
-    let address = blob.local_addr()?;
     let admin_address = admin.local_addr()?;
-    let app = Arc::new(App {
-        config,
-        version,
-        store,
-        address,
-        permits: Arc::new(Semaphore::new(16)),
-    });
-    let blob_router = Router::new().fallback(dispatch).with_state(app);
+    let namespace = if config.services.contains(&Service::Blob)
+        || config.services.contains(&Service::Dfs)
+    {
+        let location = config.location.clone();
+        let memory_limit = config.memory_limit;
+        let store = tokio::task::spawn_blocking(move || Store::open(location.as_deref(), memory_limit))
+            .await
+            .context("storage initialization did not complete")??;
+        Some((store, Arc::new(Semaphore::new(16))))
+    } else {
+        None
+    };
+    let mut services = Vec::new();
+    for service in Service::ALL {
+        if !config.services.contains(&service) {
+            continue;
+        }
+        let requested = match service {
+            Service::Blob => config.blob,
+            Service::Queue => config.queue,
+            Service::Table => config.table,
+            Service::Dfs => config.dfs,
+            Service::File => config.file,
+        };
+        let listener = TcpListener::bind(requested)
+            .await
+            .with_context(|| format!("could not bind the {} listener", service.name()))?;
+        let address = listener.local_addr()?;
+        let router = match service {
+            Service::Blob | Service::Dfs => {
+                let (store, permits) = namespace
+                    .as_ref()
+                    .context("shared namespace store was not started")?;
+                if service == Service::Blob {
+                    blob_router(config.clone(), address, store.clone(), permits.clone())?
+                } else {
+                    dfs::router(config.clone(), store.clone(), permits.clone())?
+                }
+            }
+            Service::Queue => queue::router(config.clone(), address).await?,
+            Service::Table => table::router(config.clone(), address).await?,
+            Service::File => files::router(config.clone(), address).await?,
+        };
+        tracing::info!(service = service.name(), %address, "listening");
+        println!("{}_url=http://{address}", service.name());
+        services.push((listener, router));
+    }
     let admin_router = Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
         .route("/readyz", get(|| async { "ready\n" }));
     let stop = CancellationToken::new();
-    tracing::info!(blob = %address, admin = %admin_address, "listening");
-    println!("blob_url=http://{address}");
+    tracing::info!(admin = %admin_address, "listening");
     println!("admin_url=http://{admin_address}");
-    let blob_task = async {
-        axum::serve(blob, blob_router)
-            .with_graceful_shutdown(stop.clone().cancelled_owned())
-            .await
-    };
-    let admin_task = async {
-        axum::serve(admin, admin_router)
-            .with_graceful_shutdown(stop.clone().cancelled_owned())
-            .await
-    };
+    services.push((admin, admin_router));
+    let tasks =
+        futures_util::future::try_join_all(services.into_iter().map(|(listener, router)| {
+            let stop = stop.clone();
+            async move {
+                axum::serve(listener, router)
+                    .with_graceful_shutdown(stop.cancelled_owned())
+                    .await
+            }
+        }));
     let signal = async {
         wait_for_shutdown(shutdown_on_stdin_eof).await?;
         stop.cancel();
         Ok(())
     };
-    tokio::try_join!(blob_task, admin_task, signal).context("HTTP server exited unexpectedly")?;
+    tokio::try_join!(tasks, signal).context("HTTP server exited unexpectedly")?;
     Ok(())
+}
+
+fn blob_router(
+    config: Arc<Config>,
+    address: SocketAddr,
+    store: Store,
+    permits: Arc<Semaphore>,
+) -> anyhow::Result<Router> {
+    let version = HeaderValue::from_str(config.api_version.as_str())
+        .context("invalid HTTP version in the protocol manifest")?;
+    let app = Arc::new(App {
+        config,
+        version,
+        store,
+        address,
+        permits,
+    });
+    Ok(Router::new().fallback(dispatch).with_state(app))
 }
 
 async fn wait_for_shutdown(shutdown_on_stdin_eof: bool) -> std::io::Result<()> {
@@ -134,12 +181,7 @@ async fn dispatch(State(app): State<Arc<App>>, request: Request) -> Response {
                         if parts.method == Method::GET
                             && response.headers().contains_key("x-ms-blob-type")
                         {
-                            let body = std::mem::replace(response.body_mut(), Body::empty());
-                            *response.body_mut() =
-                                Body::from_stream(body.into_data_stream().map(move |item| {
-                                    let _permit = &permit;
-                                    item
-                                }));
+                            wire::retain_download_permit(&mut response, permit);
                         }
                         response
                     }
@@ -150,23 +192,8 @@ async fn dispatch(State(app): State<Arc<App>>, request: Request) -> Response {
         },
         Err(_) => error_response(Error::Busy),
     };
-    response
-        .headers_mut()
-        .insert("x-ms-version", app.version.clone());
-    if set(response.headers_mut(), "x-ms-request-id", &request_id)
-        .and_then(|_| {
-            set(
-                response.headers_mut(),
-                "date",
-                &httpdate::fmt_http_date(SystemTime::now()),
-            )
-        })
-        .is_err()
-    {
+    if wire::stamp_response(&mut response, &app.version, &request_id, head).is_err() {
         return error_response(Error::Internal);
-    }
-    if head {
-        *response.body_mut() = Body::empty();
     }
     tracing::info!(%request_id, status = response.status().as_u16(), "blob request");
     response
@@ -284,33 +311,6 @@ fn storage_endpoint(address: SocketAddr, account: &str) -> String {
     format!("http://{address}/{account}/")
 }
 
-fn empty(status: StatusCode) -> Response {
-    let mut response = Response::new(Body::empty());
-    *response.status_mut() = status;
-    response
-}
-
-fn modified(entity: Entity) -> Result<String> {
-    if entity.modified >= 253_402_300_800 {
-        tracing::error!("metadata timestamp is outside the HTTP date range");
-        return Err(Error::Internal);
-    }
-    Ok(httpdate::fmt_http_date(
-        UNIX_EPOCH + Duration::from_secs(entity.modified),
-    ))
-}
-
-fn entity_response(status: StatusCode, entity: Entity) -> Result<Response> {
-    let mut response = empty(status);
-    entity_headers(response.headers_mut(), entity)?;
-    Ok(response)
-}
-
-fn entity_headers(headers: &mut HeaderMap, entity: Entity) -> Result<()> {
-    set(headers, "etag", entity.etag().as_str())?;
-    set(headers, "last-modified", &modified(entity)?)
-}
-
 fn write_response(
     mut response: Response,
     (name, value): (&'static str, String),
@@ -323,46 +323,11 @@ fn write_response(
     Ok(response)
 }
 
-fn set(headers: &mut HeaderMap, name: &'static str, value: &str) -> Result<()> {
-    let value = HeaderValue::from_str(value).map_err(|_| {
-        tracing::error!(header = name, "could not encode response header");
-        Error::Internal
-    })?;
-    headers.insert(name, value);
-    Ok(())
-}
-
 fn download_response(download: Download) -> Result<Response> {
-    let Download {
-        info,
-        range,
-        payload,
-    } = download;
-    let status = if range.is_some() {
-        StatusCode::PARTIAL_CONTENT
-    } else {
-        StatusCode::OK
-    };
-    let mut response = entity_response(status, info.entity)?;
+    let (mut response, metadata) = wire::download_response(download)?;
     let headers = response.headers_mut();
-    let size = if let Some(range) = range {
-        set(
-            headers,
-            "content-range",
-            &format!("bytes {}-{}/{}", range.start, range.end - 1, info.length.0),
-        )?;
-        range.end - range.start
-    } else {
-        if let Some(md5) = &info.md5 {
-            set(headers, "content-md5", md5)?;
-        }
-        info.length.0
-    };
-    set(headers, "content-length", &size.to_string())?;
-    set(headers, "content-type", &info.content_type)?;
-    headers.insert("accept-ranges", HeaderValue::from_static("bytes"));
     headers.insert("x-ms-blob-type", HeaderValue::from_static("BlockBlob"));
-    for (name, value) in info.metadata {
+    for (name, value) in metadata {
         let name = axum::http::HeaderName::from_bytes(format!("x-ms-meta-{name}").as_bytes())
             .map_err(|_| {
                 tracing::error!("invalid stored metadata header");
@@ -374,16 +339,6 @@ fn download_response(download: Download) -> Result<Response> {
         })?;
         headers.insert(name, value);
     }
-    *response.body_mut() = match payload {
-        Some(Payload::Disk(file)) => {
-            let reader = tokio::fs::File::from_std(file).take(size);
-            Body::from_stream(ReaderStream::new(reader).inspect_err(|error| {
-                tracing::error!(kind = ?error.kind(), "content read failed");
-            }))
-        }
-        Some(Payload::Memory(bytes)) => Body::from(bytes),
-        None => Body::empty(),
-    };
     Ok(response)
 }
 
@@ -598,13 +553,7 @@ fn error_response(error: Error) -> Response {
             "The local storage operation failed.",
         ),
     };
-    let mut xml = Xml::root("Error", &[]);
-    xml.element("Code", code);
-    xml.element("Message", message);
-    let mut response = xml.finish("Error", status);
-    response
-        .headers_mut()
-        .insert("x-ms-error-code", HeaderValue::from_static(code));
+    let mut response = wire::xml_error(status, code, message);
     if let Error::InvalidRange(length) = error
         && set(
             response.headers_mut(),
@@ -618,55 +567,7 @@ fn error_response(error: Error) -> Response {
     response
 }
 
-struct Xml(String);
-
 impl Xml {
-    fn root(name: &str, attributes: &[(&str, &str)]) -> Self {
-        let mut xml = Self("<?xml version=\"1.0\" encoding=\"utf-8\"?>".to_owned());
-        xml.0.push('<');
-        xml.0.push_str(name);
-        for (key, value) in attributes {
-            xml.0.push(' ');
-            xml.0.push_str(key);
-            xml.0.push_str("=\"");
-            xml.text(value);
-            xml.0.push('"');
-        }
-        xml.0.push('>');
-        xml
-    }
-
-    fn open(&mut self, tag: &str) {
-        self.0.push('<');
-        self.0.push_str(tag);
-        self.0.push('>');
-    }
-
-    fn close(&mut self, tag: &str) {
-        self.0.push_str("</");
-        self.0.push_str(tag);
-        self.0.push('>');
-    }
-
-    fn text(&mut self, value: &str) {
-        for ch in value.chars() {
-            match ch {
-                '&' => self.0.push_str("&amp;"),
-                '<' => self.0.push_str("&lt;"),
-                '>' => self.0.push_str("&gt;"),
-                '"' => self.0.push_str("&quot;"),
-                '\'' => self.0.push_str("&apos;"),
-                _ => self.0.push(ch),
-            }
-        }
-    }
-
-    fn element(&mut self, tag: &str, value: &str) {
-        self.open(tag);
-        self.text(value);
-        self.close(tag);
-    }
-
     fn entity(&mut self, entity: Entity) -> Result<()> {
         self.element("Last-Modified", &modified(entity)?);
         self.element("Etag", entity.etag().as_str());
@@ -679,16 +580,5 @@ impl Xml {
             self.element(&name, &value);
         }
         self.close("Metadata");
-    }
-
-    fn finish(mut self, root: &str, status: StatusCode) -> Response {
-        self.close(root);
-        let mut response = Response::new(Body::from(self.0));
-        *response.status_mut() = status;
-        response.headers_mut().insert(
-            "content-type",
-            HeaderValue::from_static("application/xml; charset=utf-8"),
-        );
-        response
     }
 }

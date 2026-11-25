@@ -60,6 +60,13 @@ pub(crate) fn verify(
     let date = header(headers, "x-ms-date")?
         .or(header(headers, "date")?)
         .ok_or(Error::AuthenticationFailed)?;
+    check_skew(date, now)?;
+    let message = canonical(account, method, raw_path, query, headers)?;
+    verify_signature(keys, &message, signature)
+}
+
+/// Rejects a request date more than 15 minutes away from `now`.
+pub(crate) fn check_skew(date: &str, now: SystemTime) -> Result<()> {
     let date = httpdate::parse_http_date(date).map_err(|_| Error::AuthenticationFailed)?;
     if now
         .duration_since(date)
@@ -69,10 +76,15 @@ pub(crate) fn verify(
     {
         return Err(Error::AuthenticationFailed);
     }
+    Ok(())
+}
+
+/// Checks a Base64 HMAC-SHA256 signature of `message` against any account key
+/// in constant time, so either of two rotating keys validates.
+pub(crate) fn verify_signature(keys: &[Vec<u8>], message: &str, signature: &str) -> Result<()> {
     let signature = STANDARD
         .decode(signature)
         .map_err(|_| Error::AuthenticationFailed)?;
-    let message = canonical(account, method, raw_path, query, headers)?;
     let mut valid = false;
     for key in keys {
         let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| Error::Internal)?;

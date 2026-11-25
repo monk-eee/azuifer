@@ -17,14 +17,14 @@ use std::{collections::HashMap, time::SystemTime};
 const MAX_BLOCK_LIST_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_COMMITTED_BLOCKS: usize = 50_000;
 
-enum Resource {
+pub(crate) enum Resource {
     Account(AccountName),
     Container(ContainerKey),
     Blob(BlobKey),
 }
 
 impl Resource {
-    fn account(&self) -> &AccountName {
+    pub(crate) fn account(&self) -> &AccountName {
         match self {
             Self::Account(account) => account,
             Self::Container(key) => &key.account,
@@ -96,7 +96,13 @@ pub(crate) struct ParsedRequest {
     pub(crate) requested_version: ApiVersion,
 }
 
-pub(crate) fn parse(parts: &Parts, config: &Config) -> Result<ParsedRequest> {
+pub(crate) struct AuthenticatedRequest {
+    pub(crate) requested_version: ApiVersion,
+    pub(crate) resource: Resource,
+    pub(crate) query: Query,
+}
+
+pub(crate) fn authenticate(parts: &Parts, config: &Config) -> Result<AuthenticatedRequest> {
     let headers = &parts.headers;
     if headers.len() > 100
         || headers
@@ -133,6 +139,20 @@ pub(crate) fn parse(parts: &Parts, config: &Config) -> Result<ParsedRequest> {
         headers,
         SystemTime::now(),
     )?;
+    Ok(AuthenticatedRequest {
+        requested_version,
+        resource,
+        query,
+    })
+}
+
+pub(crate) fn parse(parts: &Parts, config: &Config) -> Result<ParsedRequest> {
+    let AuthenticatedRequest {
+        requested_version,
+        resource,
+        query,
+    } = authenticate(parts, config)?;
+    let headers = &parts.headers;
     let param = |name| query.get(name).map(String::as_str);
     let listing = || PageRequest::parse(param("prefix"), param("marker"), param("maxresults"));
     let op = match (resource, &parts.method, param("restype"), param("comp")) {
@@ -263,18 +283,7 @@ pub(crate) fn parse(parts: &Parts, config: &Config) -> Result<ParsedRequest> {
                 &["if-match", "if-none-match"]
             };
             check(&query, headers, &[], fields, false)?;
-            let range = header(headers, "x-ms-range")?
-                .or(header(headers, "range")?)
-                .map(ByteRange::parse)
-                .transpose()?;
-            Operation::ReadBlob(
-                key,
-                ReadOptions {
-                    condition: condition(headers)?,
-                    range,
-                    with_body,
-                },
-            )
+            Operation::ReadBlob(key, read_options(headers, with_body)?)
         }
         (Resource::Blob(key), &Method::DELETE, None, None) => {
             check(&query, headers, &[], &["if-match", "if-none-match"], false)?;
@@ -285,6 +294,18 @@ pub(crate) fn parse(parts: &Parts, config: &Config) -> Result<ParsedRequest> {
     Ok(ParsedRequest {
         operation: op,
         requested_version,
+    })
+}
+
+pub(crate) fn read_options(headers: &HeaderMap, with_body: bool) -> Result<ReadOptions> {
+    let range = header(headers, "x-ms-range")?
+        .or(header(headers, "range")?)
+        .map(ByteRange::parse)
+        .transpose()?;
+    Ok(ReadOptions {
+        condition: condition(headers)?,
+        range,
+        with_body,
     })
 }
 
@@ -434,7 +455,7 @@ pub(crate) fn parse_block_list(body: &[u8]) -> Result<Vec<BlockSelection>> {
     Ok(selections)
 }
 
-fn check(
+pub(crate) fn check(
     query: &Query,
     headers: &HeaderMap,
     allowed_query: &[&str],

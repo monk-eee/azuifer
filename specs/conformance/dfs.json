@@ -1,0 +1,24 @@
+{
+  "service": "dfs",
+  "api_version": "2023-11-03",
+  "operations": [
+    {"name": "List File Systems", "state": "unsupported", "authorization": []},
+    {"name": "Create File System", "state": "unsupported", "authorization": []},
+    {"name": "Get File System Properties", "state": "unsupported", "authorization": []},
+    {"name": "Set File System Properties", "state": "unsupported", "authorization": []},
+    {"name": "Delete File System", "state": "unsupported", "authorization": []},
+    {"name": "List Paths", "state": "unsupported", "authorization": []},
+    {"name": "Create Path", "state": "unsupported", "authorization": []},
+    {"name": "Rename Path", "state": "unsupported", "authorization": []},
+    {"name": "Append Data", "state": "unsupported", "authorization": []},
+    {"name": "Flush Data", "state": "unsupported", "authorization": []},
+    {"name": "Read File", "state": "unsupported", "authorization": []},
+    {"name": "Get Path Properties", "state": "unsupported", "authorization": []},
+    {"name": "Set Path Properties", "state": "unsupported", "authorization": []},
+    {"name": "Get Access Control", "state": "unsupported", "authorization": []},
+    {"name": "Set Access Control", "state": "unsupported", "authorization": []},
+    {"name": "Set Access Control Recursive", "state": "unsupported", "authorization": []},
+    {"name": "Lease Path", "state": "unsupported", "authorization": []},
+    {"name": "Delete Path", "state": "unsupported", "authorization": []}
+  ]
+}
