@@ -2,7 +2,6 @@ use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
-use hmac::{Hmac, Mac as _};
 use reqwest::{
     Method,
     blocking::{Client, Response},
@@ -10,7 +9,6 @@ use reqwest::{
 use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair, RsaPublicKeyComponents};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _};
 use serde_json::{Value, json};
-use sha2::Sha256;
 use std::{
     collections::HashMap,
     io::{BufRead as _, BufReader, Read as _, Write as _},
@@ -20,6 +18,8 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+mod contracts;
 
 const ACCOUNT: &str = "devstoreaccount1";
 const VERSION: &str = "2023-11-03";
@@ -868,7 +868,7 @@ fn xml_text<'a>(xml: &'a str, tag: &str) -> &'a str {
     let open = format!("<{tag}>");
     let start = xml
         .find(&open)
-        .unwrap_or_else(|| panic!("<{tag}> in {xml}"))
+        .unwrap_or_else(|| panic!("missing XML element {tag}"))
         + open.len();
     let end = xml[start..].find(&format!("</{tag}>")).unwrap() + start;
     &xml[start..end]
@@ -887,47 +887,14 @@ fn sas_query(fields: &[(&str, &str)]) -> String {
         .join("&")
 }
 
-/// Signs a user-delegation service SAS exactly as the documented string-to-sign
-/// for versions 2020-12-06 and later.
 fn delegation_sas(
     key: &str,
     container: &str,
     blob: Option<&str>,
-    resource: &str,
     permissions: &str,
     expiry: &str,
 ) -> String {
-    let (oid, tid) = (xml_text(key, "SignedOid"), xml_text(key, "SignedTid"));
-    let (start, end) = (xml_text(key, "SignedStart"), xml_text(key, "SignedExpiry"));
-    let (service, version) = (
-        xml_text(key, "SignedService"),
-        xml_text(key, "SignedVersion"),
-    );
-    let path = match blob {
-        Some(blob) => format!("/blob/{ACCOUNT}/{container}/{blob}"),
-        None => format!("/blob/{ACCOUNT}/{container}"),
-    };
-    let string_to_sign = format!(
-        "{permissions}\n\n{expiry}\n{path}\n{oid}\n{tid}\n{start}\n{end}\n{service}\n{version}\n\n\n\n\n\n{VERSION}\n{resource}\n\n\n\n\n\n\n"
-    );
-    let value = STANDARD.decode(xml_text(key, "Value")).unwrap();
-    assert_eq!(value.len(), 32);
-    let mut mac = Hmac::<Sha256>::new_from_slice(&value).unwrap();
-    mac.update(string_to_sign.as_bytes());
-    let signature = STANDARD.encode(mac.finalize().into_bytes());
-    sas_query(&[
-        ("sv", VERSION),
-        ("sr", resource),
-        ("sp", permissions),
-        ("se", expiry),
-        ("skoid", oid),
-        ("sktid", tid),
-        ("skt", start),
-        ("ske", end),
-        ("sks", service),
-        ("skv", version),
-        ("sig", &signature),
-    ])
+    contracts::sign_sas(key, (ACCOUNT, container, blob), permissions, expiry).unwrap()
 }
 
 fn iso(seconds_from_now: i64) -> String {
@@ -1042,13 +1009,13 @@ fn user_delegation_sas_is_issued_to_a_bearer_caller_and_honoured_by_blob() {
     assert_eq!(xml_text(&key, "SignedService"), "b");
 
     let expiry = iso(3600);
-    let sas = delegation_sas(&key, "delegated", Some("a.txt"), "b", "r", &expiry);
+    let sas = delegation_sas(&key, "delegated", Some("a.txt"), "r", &expiry);
     let read = trusting.get(format!("{blob_url}?{sas}")).send().unwrap();
     assert_eq!(read.status(), 200);
     assert_eq!(read.text().unwrap(), "delegated bytes");
 
     // A container SAS lists; a read-only blob SAS does not write; tampering fails.
-    let list_sas = delegation_sas(&key, "delegated", None, "c", "rl", &expiry);
+    let list_sas = delegation_sas(&key, "delegated", None, "rl", &expiry);
     let listing = trusting
         .get(format!(
             "{}/{ACCOUNT}/delegated?restype=container&comp=list&{list_sas}",
@@ -1084,7 +1051,7 @@ fn user_delegation_sas_is_issued_to_a_bearer_caller_and_honoured_by_blob() {
 
     // A key the server never issued, even with a valid-looking signature, fails.
     let foreign = key.replace(xml_text(&key, "Value"), &STANDARD.encode([9u8; 32]));
-    let unissued = delegation_sas(&foreign, "delegated", Some("a.txt"), "b", "r", &expiry);
+    let unissued = delegation_sas(&foreign, "delegated", Some("a.txt"), "r", &expiry);
     assert_eq!(
         trusting
             .get(format!("{blob_url}?{unissued}"))
@@ -1107,14 +1074,7 @@ fn user_delegation_sas_is_issued_to_a_bearer_caller_and_honoured_by_blob() {
     assert_eq!(advance(7200).status(), 200);
     let expired = trusting.get(format!("{blob_url}?{sas}")).send().unwrap();
     assert_eq!(expired.status(), 403, "the SAS expired two hours ago");
-    let long_sas = delegation_sas(
-        &key,
-        "delegated",
-        Some("a.txt"),
-        "b",
-        "r",
-        &iso(10 * 86_400),
-    );
+    let long_sas = delegation_sas(&key, "delegated", Some("a.txt"), "r", &iso(10 * 86_400));
     assert_eq!(
         trusting
             .get(format!("{blob_url}?{long_sas}"))

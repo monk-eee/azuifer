@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "source": "synthetic",
+  "scenario": "blob-user-delegation-sas-read-only",
+  "api_version": "2023-11-03",
+  "exchanges": [
+    {
+      "step": "head",
+      "status": 200,
+      "media": "text_plain",
+      "content_length": 35,
+      "content_range": "missing",
+      "blob_type": "matches",
+      "accept_ranges": "matches",
+      "fixture_metadata": "matches",
+      "etag": "matches",
+      "api_version": "matches",
+      "request_id": "matches",
+      "last_modified": "matches",
+      "error_header": "missing",
+      "body": {"kind": "empty"}
+    },
+    {
+      "step": "range",
+      "status": 206,
+      "media": "text_plain",
+      "content_length": 7,
+      "content_range": "matches",
+      "blob_type": "matches",
+      "accept_ranges": "matches",
+      "fixture_metadata": "matches",
+      "etag": "matches",
+      "api_version": "matches",
+      "request_id": "matches",
+      "last_modified": "matches",
+      "error_header": "missing",
+      "body": {"kind": "fixture_range"}
+    },
+    {
+      "step": "denied_delete",
+      "status": 403,
+      "media": "xml",
+      "content_length": null,
+      "content_range": "missing",
+      "blob_type": "missing",
+      "accept_ranges": "missing",
+      "fixture_metadata": "missing",
+      "etag": "missing",
+      "api_version": "matches",
+      "request_id": "matches",
+      "last_modified": "missing",
+      "error_header": "permission_mismatch",
+      "body": {
+        "kind": "xml_error",
+        "code": "permission_mismatch",
+        "permission_message": true,
+        "correlation": "missing",
+        "extra_elements": false
+      }
+    },
+    {
+      "step": "read_back",
+      "status": 200,
+      "media": "text_plain",
+      "content_length": 35,
+      "content_range": "missing",
+      "blob_type": "matches",
+      "accept_ranges": "matches",
+      "fixture_metadata": "matches",
+      "etag": "matches",
+      "api_version": "matches",
+      "request_id": "matches",
+      "last_modified": "matches",
+      "error_header": "missing",
+      "body": {"kind": "fixture_full"}
+    }
+  ]
+}

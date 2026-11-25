@@ -109,6 +109,8 @@ See [how to run the same matrix locally](docs/compatibility/blob.md#azure-cli). 
 docker run --rm azuifer:quickstart conformance export
 ```
 
+The [Azure contract harness](docs/compatibility/azure-contracts.md) can separately compare a Blob SAS scenario with a dedicated Azure test account. The regular Rust suite replays contract fixtures offline; it doesn't need Azure credentials.
+
 ## Build natively
 
 Use Rustup and a C compiler for bundled SQLite: Command Line Tools on macOS, GCC or Clang on Linux, or MSVC Build Tools on Windows. From the repository root:

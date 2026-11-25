@@ -14,6 +14,8 @@ The opt-in `--skip-api-version-check` flag lets newer clients use the current ba
 
 Back each compatibility claim with a differential test against real Azure Storage and Azuifer. Compare observable responses and resulting state; normalize only inherently variable fields where the protocol permits it.
 
+Collect a typed contract cassette in the test process rather than capturing authenticated HTTP traffic in a proxy. Each versioned scenario selects the request templates and response fields it checks. The cassette keeps stable protocol facts and relationships, such as a matching ETag across two responses. It cannot represent credentials, endpoint URLs, raw headers, or arbitrary bodies. A recorded cassette is reviewed before it becomes an offline regression fixture. Keep differences in the evidence; do not make a test pass by normalizing them away.
+
 ## Alternatives and consequences
 
 A manually edited support table is quicker to start but drifts across releases and cannot drive test selection. Claiming parity based on a supported SDK's happy path misses wire and state differences. A manifest and differential evidence cost ongoing maintenance but make the boundary checkable.
@@ -24,3 +26,4 @@ A manually edited support table is quicker to start but drifts across releases a
 - Version and protocol tests cover version rejection, negotiated behavior where applicable, status, headers, response bodies (including Azure error codes), and post-request state.
 - The current pinned Azure CLI release and its three predecessors each run real Blob operations against the release image build in CI. Report per-version outcomes and the tested image IDs. Passing that workflow is client interoperability evidence, not Azure differential evidence.
 - Each compatibility claim links to evidence from a protected differential run for the claimed operation, API version, authentication mode, and feature. No credentials or customer data appear in the evidence.
+- The same case replays against the built emulator without Azure credentials. A changed response field fails replay. Injected credentials and unknown fields cannot survive writing and reloading the cassette.
