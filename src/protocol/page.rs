@@ -9,8 +9,9 @@ use super::{
 use crate::{
     auth::header,
     blob_page::{
-        AppendCondition, AppendWrite, Creation, MAX_WRITE_BYTES, PageOperation, PageWrite,
-        RangeQuery, SequenceConditions, page_blob_length, page_range, sequence_number,
+        AppendCondition, AppendWrite, Creation, MAX_APPEND_BLOCK_BYTES, MAX_WRITE_BYTES,
+        PageOperation, PageWrite, RangeQuery, SequenceConditions, page_blob_length, page_range,
+        sequence_number,
     },
     conditions::Guard,
     domain::{BlobKey, ByteRange, Error, Result},
@@ -215,7 +216,7 @@ impl Request<'_> {
             &[CONDITIONS, LEASE, CHECKSUMS, APPEND_CONDITIONS],
             false,
         )?;
-        let options = upload_options(self.headers, MAX_WRITE_BYTES)?;
+        let options = upload_options(self.headers, MAX_APPEND_BLOCK_BYTES)?;
         if options.length.0 == 0 {
             return Err(Error::InvalidHeader);
         }

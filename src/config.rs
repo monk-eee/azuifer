@@ -16,6 +16,9 @@ const DEV_ACCOUNT: &str = "devstoreaccount1";
 const PUBLIC_DEV_KEY: &str =
     "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
 const MIB: u64 = 1024 * 1024;
+/// How long a request queues for one of the 16 active-request permits before the
+/// listener answers `503 ServerBusy`; AzCopy opens hundreds of connections at once.
+pub(crate) const PERMIT_WAIT: Duration = Duration::from_secs(5);
 pub(crate) const CONFORMANCE: &str = include_str!("../specs/conformance/blob.json");
 
 #[derive(Args, Default)]

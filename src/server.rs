@@ -5,7 +5,7 @@ use crate::{
     blob_exec::{self, Context},
     blob_sas::Connection,
     clock::{self, Clock},
-    config::{Config, Service},
+    config::{Config, PERMIT_WAIT, Service},
     dfs,
     domain::{AccountName, Error, Result},
     files, oauth,
@@ -247,25 +247,26 @@ async fn dispatch(State(app): State<Arc<App>>, request: Request) -> Response {
     } else if parts.method == Method::OPTIONS {
         preflight(&app, &parts).await
     } else {
-        let mut response = match app.permits.clone().try_acquire_owned() {
-            Ok(permit) => match handle(&app, &parts, body, &request_id).await {
-                Ok(mut response) => {
-                    if parts.method == Method::GET
-                        && response.headers().contains_key("x-ms-blob-type")
-                    {
-                        let body = std::mem::replace(response.body_mut(), Body::empty());
-                        *response.body_mut() =
-                            Body::from_stream(body.into_data_stream().map(move |item| {
-                                let _permit = &permit;
-                                item
-                            }));
+        let mut response =
+            match tokio::time::timeout(PERMIT_WAIT, app.permits.clone().acquire_owned()).await {
+                Ok(Ok(permit)) => match handle(&app, &parts, body, &request_id).await {
+                    Ok(mut response) => {
+                        if parts.method == Method::GET
+                            && response.headers().contains_key("x-ms-blob-type")
+                        {
+                            let body = std::mem::replace(response.body_mut(), Body::empty());
+                            *response.body_mut() =
+                                Body::from_stream(body.into_data_stream().map(move |item| {
+                                    let _permit = &permit;
+                                    item
+                                }));
+                        }
+                        response
                     }
-                    response
-                }
-                Err(error) => error_response(error),
-            },
-            Err(_) => error_response(Error::Busy),
-        };
+                    Err(error) => error_response(error),
+                },
+                _ => error_response(Error::Busy),
+            };
         add_cors(&app, &parts, &mut response).await;
         response
     };

@@ -1182,8 +1182,9 @@ fn append_conditions_checksums_and_limits_are_enforced() {
     );
     error(server.append(APPEND, b"", &[]), 400, "InvalidHeaderValue");
     let four_mib = 4 * 1024 * 1024;
+    // Version 2022-11-02 raised the Append Block limit to 100 MiB.
     error(
-        server.append(APPEND, &vec![1u8; four_mib + 1], &[]),
+        server.append(APPEND, &vec![1u8; 100 * 1024 * 1024 + 1], &[]),
         413,
         "RequestBodyTooLarge",
     );

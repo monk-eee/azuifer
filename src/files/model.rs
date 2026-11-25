@@ -3,6 +3,7 @@
 use super::{
     error::{Error, Result},
     lease::Lease,
+    time::TICKS_PER_MILLI,
 };
 use std::collections::BTreeMap;
 
@@ -46,11 +47,12 @@ pub(crate) enum TimeSpec {
 }
 
 impl TimeSpec {
+    /// `now` is Unix milliseconds; `current` and the result are 100 ns ticks.
     pub(crate) fn resolve(self, now: i64, current: i64) -> i64 {
         match self {
-            Self::Now => now,
+            Self::Now => now * TICKS_PER_MILLI,
             Self::Preserve => current,
-            Self::At(time) => time,
+            Self::At(ticks) => ticks,
         }
     }
 }
@@ -221,6 +223,7 @@ pub(crate) struct NodeInfo {
     pub(crate) etag: String,
     pub(crate) modified: i64,
     pub(crate) attributes: Attributes,
+    /// SMB timestamps in Unix 100 ns ticks.
     pub(crate) creation: i64,
     pub(crate) last_write: i64,
     pub(crate) change: i64,
@@ -349,7 +352,7 @@ mod tests {
 
     #[test]
     fn time_specs_resolve_against_now_and_current() {
-        assert_eq!(TimeSpec::Now.resolve(5, 1), 5);
+        assert_eq!(TimeSpec::Now.resolve(5, 1), 50_000);
         assert_eq!(TimeSpec::Preserve.resolve(5, 1), 1);
         assert_eq!(TimeSpec::At(9).resolve(5, 1), 9);
     }

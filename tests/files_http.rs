@@ -1867,12 +1867,8 @@ fn unsupported_operations_return_a_stable_error() {
     expect_error(
         emulator.send(
             "PUT",
-            &format!("/{ACCOUNT}/later/f.txt?comp=range"),
-            &[
-                ("x-ms-range", "bytes=0-0"),
-                ("x-ms-write", "update"),
-                ("x-ms-copy-source", "http://x/y"),
-            ],
+            &format!("/{ACCOUNT}/later/f.txt?comp=hardlink"),
+            &[],
             b"",
         ),
         501,

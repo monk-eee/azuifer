@@ -300,7 +300,6 @@ impl Operation {
             Self::GetFileServiceProperties
                 | Self::SetFileServiceProperties
                 | Self::RestoreShare
-                | Self::PutRangeFromUrl
                 | Self::CreateHardLink
                 | Self::CreateSymbolicLink
                 | Self::GetSymbolicLink
@@ -343,6 +342,7 @@ impl Operation {
             Self::SetFileProperties
             | Self::SetFileMetadata
             | Self::PutRange
+            | Self::PutRangeFromUrl
             | Self::AbortCopyFile
             | Self::LeaseFile
             | Self::RenameFile
@@ -351,7 +351,6 @@ impl Operation {
             Self::GetFileServiceProperties
             | Self::SetFileServiceProperties
             | Self::RestoreShare
-            | Self::PutRangeFromUrl
             | Self::CreateHardLink
             | Self::CreateSymbolicLink
             | Self::GetSymbolicLink => (Level::Account, "s", "", ""),
@@ -577,10 +576,10 @@ impl Headers<'_> {
 
     fn time_spec(&self, name: &str) -> Result<Option<TimeSpec>> {
         self.get(name)?
-            .map(|value| match value {
+            .map(|value| match value.to_ascii_lowercase().as_str() {
                 "now" => Ok(TimeSpec::Now),
                 "preserve" => Ok(TimeSpec::Preserve),
-                other => time::parse_iso(other)
+                _ => time::parse_iso_ticks(value)
                     .map(TimeSpec::At)
                     .ok_or(Error::InvalidHeaderValue),
             })

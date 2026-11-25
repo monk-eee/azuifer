@@ -11,6 +11,7 @@ use crate::{
         lease::{self, Action, Kind, Outcome, State, Use},
         model::{AccessPolicy, Attributes, Metadata, NodeInfo, ShareInfo},
         name::ShareName,
+        time::TICKS_PER_MILLI,
     },
 };
 use rusqlite::{Connection, OptionalExtension as _, params};
@@ -219,9 +220,9 @@ impl Store {
                 etag: new_etag(),
                 modified: now,
                 attributes: Attributes::DIRECTORY,
-                creation: now,
-                last_write: now,
-                change: now,
+                creation: now * TICKS_PER_MILLI,
+                last_write: now * TICKS_PER_MILLI,
+                change: now * TICKS_PER_MILLI,
                 permission_key: key,
                 metadata: Metadata::new(),
                 length: 0,

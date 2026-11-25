@@ -13,8 +13,10 @@ use std::ops::Range;
 
 pub(crate) const PAGE_SIZE: u64 = 512;
 pub(crate) const MAX_PAGE_BLOB_BYTES: u64 = 8 * 1024 * 1024 * 1024 * 1024;
-/// The largest Put Page update and the largest Append Block.
+/// The largest Put Page update.
 pub(crate) const MAX_WRITE_BYTES: u64 = 4 * 1024 * 1024;
+/// The largest Append Block, which API version 2022-11-02 raised from 4 MiB.
+pub(crate) const MAX_APPEND_BLOCK_BYTES: u64 = 100 * 1024 * 1024;
 pub(crate) const MAX_APPEND_BLOCKS: u64 = 50_000;
 
 /// The type of a blob and the state that belongs to that type.

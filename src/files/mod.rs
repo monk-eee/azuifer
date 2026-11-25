@@ -12,7 +12,12 @@ mod store;
 mod time;
 mod xml;
 
-use crate::{address, clock::Clock, config::Config, domain::ApiVersion};
+use crate::{
+    address,
+    clock::Clock,
+    config::{Config, PERMIT_WAIT},
+    domain::ApiVersion,
+};
 use anyhow::Context as _;
 use auth::{Credentials, Signed};
 use axum::{
@@ -98,10 +103,9 @@ async fn dispatch(State(app): State<Arc<App>>, request: Request) -> Response {
 }
 
 async fn handle(app: &Arc<App>, parts: &Parts, body: Body) -> Result<Response> {
-    let permit = app
-        .permits
-        .clone()
-        .try_acquire_owned()
+    let permit = tokio::time::timeout(PERMIT_WAIT, app.permits.clone().acquire_owned())
+        .await
+        .map_err(|_| Error::ServerBusy)?
         .map_err(|_| Error::ServerBusy)?;
     if parts.headers.len() > MAX_HEADER_COUNT
         || parts

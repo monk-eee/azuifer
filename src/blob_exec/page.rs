@@ -3,7 +3,7 @@
 use super::{Context, copy_write, read_source, receive_upload};
 use crate::{
     blob_copy::Resolved,
-    blob_page::{MAX_WRITE_BYTES, PageOperation},
+    blob_page::{MAX_APPEND_BLOCK_BYTES, MAX_WRITE_BYTES, PageOperation},
     domain::{BlobInfo, BlobKey, BlobWrite, Error, Result},
     protocol::SourceRequest,
     respond::{entity_headers, entity_response, set, write_response},
@@ -55,7 +55,7 @@ pub(super) async fn execute(
         }
         PageOperation::AppendBlockFromUrl(key, write, request) => {
             let (source, _) = read_source(app, ctx, request).await?;
-            if source.upload.len() == 0 || source.upload.len() > MAX_WRITE_BYTES {
+            if source.upload.len() == 0 || source.upload.len() > MAX_APPEND_BLOCK_BYTES {
                 return Err(Error::InvalidHeader);
             }
             let checksum = ("content-md5", source.upload.checksums.md5_text());

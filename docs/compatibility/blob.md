@@ -25,7 +25,7 @@ Page and append blob content is a map from blob offsets to immutable extents ([A
 - **Put Page.** `x-ms-page-write: update` writes up to 4 MiB at a 512-aligned `x-ms-range` or `Range` and accepts `Content-MD5` or `x-ms-content-crc64`. `clear` takes `Content-Length: 0` and any aligned range. `x-ms-if-sequence-number-le`, `-lt`, and `-eq` must all hold or the answer is 412 `SequenceNumberConditionNotMet`. A misaligned or out-of-bounds range is 416 `InvalidPageRange`. Responses carry `x-ms-blob-sequence-number`.
 - **Get Page Ranges.** `GET comp=pagelist` lists allocated ranges, optionally inside an `x-ms-range` or `Range` window, with `maxresults` and `marker` paging through `NextMarker`. Touching allocated ranges are reported as one range. `snapshot` and `prevsnapshot` answer `NotImplemented` until snapshots exist, so no clear ranges are reported.
 - **Resize and sequence number.** Set Blob Properties with `x-ms-blob-content-length` resizes (shrinking discards trailing data, growing adds a hole). `x-ms-sequence-number-action` is `max`, `update`, or `increment` with `x-ms-blob-sequence-number` for the first two. Either can accompany content properties.
-- **Append Block.** Up to 4 MiB and 50,000 blocks, with `Content-MD5` or crc64, `x-ms-blob-condition-maxsize` (412 `MaxBlobSizeConditionNotMet`), and `x-ms-blob-condition-appendpos` (412 `AppendPositionConditionNotMet`). The 201 response reports `x-ms-blob-append-offset` and `x-ms-blob-committed-block-count`. The 50,001st block is 409 `BlockCountExceedsLimit`. Zero-length blocks are rejected.
+- **Append Block.** Up to 100 MiB (4 MiB before API version 2022-11-02; AzCopy sends 8 MiB blocks) and 50,000 blocks, with `Content-MD5` or crc64, `x-ms-blob-condition-maxsize` (412 `MaxBlobSizeConditionNotMet`), and `x-ms-blob-condition-appendpos` (412 `AppendPositionConditionNotMet`). The 201 response reports `x-ms-blob-append-offset` and `x-ms-blob-committed-block-count`. The 50,001st block is 409 `BlockCountExceedsLimit`. Zero-length blocks are rejected.
 - **Seal.** `PUT comp=seal` (optionally with `x-ms-blob-condition-appendpos`) makes an append blob read-only: later appends are 409 `BlobIsSealed`, while metadata changes and delete still work. Sealing a sealed blob changes nothing.
 - **Reads and listings.** Get Blob streams page blob holes as zeros and returns an append blob as its concatenated blocks, both with range support. Get and Head report `x-ms-blob-type`, `x-ms-blob-sequence-number` (page), and `x-ms-blob-committed-block-count` and `x-ms-blob-sealed` (append, sealed only when true). List Blobs reports `BlobType`, `Content-Length` (the logical length), `x-ms-blob-sequence-number`, and `Sealed`. Page blobs show an access tier only after one was set, and the tiers `P4` to `P80` are accepted only on page blobs.
 - **Wrong blob type.** Put Block, Put Block List, and Get Block List on a page or append blob, Put Page, Get Page Ranges, resize, and sequence changes on other types, and Append Block and Seal on other types answer 409 `InvalidBlobType`.
@@ -161,6 +161,30 @@ python3 tests/azure_cli_matrix.py
 The report is written to `dist/azure-cli-compatibility.json`. When updating the CLI window, pin the new stable image and keep its three immediate predecessors. Verify all four without skipping failing cases.
 
 The matrix uses `--skip-api-version-check` because these clients request a newer API version than the Blob baseline. To exercise your installed CLI instead, start Azuifer with that flag, a disposable data directory, and a synthetic `AZUIFER_ACCOUNT_KEY`, then run `python3 tests/azure_cli.py` with the same key. `--blob-url` and `--admin-url` select non-default loopback ports. The default single-request limit of 256 MiB already covers the CLI's upload threshold. Beyond the matrix, lease, tier, metadata, `generate-sas`, container policy, service-properties, and `copy start --source-uri` commands were run by hand against this build.
+
+## AzCopy
+
+AzCopy 10.34.2 (Windows amd64) was run against a debug build with `serve --in-memory --memory-limit 4294967296 --skip-api-version-check --services blob,file,dfs`. AzCopy cannot sign with an account key, so every command used an account or container SAS made with `azure-storage-blob` and the public `devstoreaccount1` key (loopback only). The scenarios that pass:
+
+- `copy` up of one file, of a directory tree (many small files and a 300 MiB file, so block uploads run in parallel), and with `--put-md5`, `--metadata`, `--blob-tags`, `--block-blob-tier`, content headers, and `--blob-type PageBlob` or `AppendBlob` (including a sparse 20 MiB page blob); `copy` down with `--check-md5 FailIfDifferent` (and its rejection of a wrong `Content-MD5`), each compared by SHA-256.
+- `list` with `--properties`, `sync` in both directions (nothing is re-sent when unchanged; changed, new, and `--delete-destination` files are), `--compare-hash MD5`, `remove --recursive`, container and account SAS, names with spaces, `+`, `#`, `&`, `%`, Unicode, and empty files.
+- `copy --from-to BlobBlob` inside one account (Put Block From URL, Put Blob From URL, Put Page From URL, Append Block From URL), with and without `--s2s-preserve-properties`.
+- Killing a throttled upload and finishing it with `jobs resume <id> --destination-sas`.
+
+Limits you meet when using AzCopy against Azuifer:
+
+- AzCopy does not recognise a bare IP endpoint, so pass `--from-to` (`LocalBlob`, `BlobLocal`, `BlobBlob`, `BlobTrash`) to `copy`, `sync` and `remove`, and `--location Blob` to `list`. `azcopy make` has no such flag and rejects `http://127.0.0.1:10000/…`; use the host-style URL `http://devstoreaccount1.blob.localhost:10000/{container}?{sas}` (it worked here), or create the container with any other client. AzCopy never creates a missing container.
+- AzCopy opens up to 256 connections, but 16 requests are active at a time. A request waits up to 5 seconds for a slot before it is answered `503 ServerBusy`, which AzCopy retries; under heavy load the log still shows some. The in-memory default of 64 MiB of payload is too small for large transfers: raise `--memory-limit`.
+- `azcopy make` and `--from-to` pairs involving Files, and Blob to Files copies, are covered in [files.md](files.md#azcopy). Blob to Files and Files to Blob server-side copies fail because the two services keep separate stores and Azuifer makes no outbound requests, so download to disk first.
+
+`tests/azcopy_smoke.py` runs a compact version of this against a running server and prints `PASS` or `FAIL` for each of 30 steps, Blob and Files together:
+
+```sh
+azuifer serve --in-memory --memory-limit 1073741824 --skip-api-version-check --services blob,file
+python tests/azcopy_smoke.py --azcopy /path/to/azcopy        # pip install azure-storage-blob azure-storage-file-share
+```
+
+It downloads nothing and keeps AzCopy's logs and job plans in a temporary directory (AzCopy still writes `~/.azcopy/installation_id` and a `pids` folder). It takes `--blob-url`, `--file-url`, `--blob-sas` and `--file-sas` to use your own endpoints and tokens. A pass shows that this AzCopy version completes those workflows with the expected bytes, MD5s and sync decisions; it does not show wire equivalence with Azure Storage. [`tests/azcopy_regressions_http.rs`](../../tests/azcopy_regressions_http.rs) pins each defect AzCopy found as an HTTP test.
 
 ## Container
 

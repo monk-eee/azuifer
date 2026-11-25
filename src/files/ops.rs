@@ -308,6 +308,7 @@ pub(super) async fn execute(ctx: Context<'_>, body: Body) -> Result<Response> {
             Ok(empty(StatusCode::ACCEPTED))
         }
         O::PutRange => put_range(&ctx, body).await,
+        O::PutRangeFromUrl => put_range_from_url(&ctx).await,
         O::ListRanges => list_ranges(&ctx).await,
         O::CopyFile => copy_file(&ctx).await,
         O::AbortCopyFile => {
@@ -342,7 +343,6 @@ pub(super) async fn execute(ctx: Context<'_>, body: Body) -> Result<Response> {
         O::GetFileServiceProperties
         | O::SetFileServiceProperties
         | O::RestoreShare
-        | O::PutRangeFromUrl
         | O::CreateHardLink
         | O::CreateSymbolicLink
         | O::GetSymbolicLink => Err(Error::NotImplemented),
@@ -752,17 +752,23 @@ async fn get_file(ctx: &Context<'_>) -> Result<Response> {
     Ok(reply)
 }
 
+/// `x-ms-file-last-write-time` of a range write: `now` (default) or `preserve`, in any case.
+fn last_write_spec(ctx: &Context<'_>) -> Result<TimeSpec> {
+    match ctx.headers.get("x-ms-file-last-write-time")? {
+        None => Ok(TimeSpec::Now),
+        Some(value) if value.eq_ignore_ascii_case("now") => Ok(TimeSpec::Now),
+        Some(value) if value.eq_ignore_ascii_case("preserve") => Ok(TimeSpec::Preserve),
+        Some(_) => Err(Error::InvalidHeaderValue),
+    }
+}
+
 async fn put_range(ctx: &Context<'_>, body: Body) -> Result<Response> {
     let (offset, length) = ctx
         .headers
         .range()?
         .ok_or(Error::MissingRequiredHeader)?
         .exact()?;
-    let last_write = match ctx.headers.get("x-ms-file-last-write-time")? {
-        None | Some("now") => TimeSpec::Now,
-        Some("preserve") => TimeSpec::Preserve,
-        Some(_) => return Err(Error::InvalidHeaderValue),
-    };
+    let last_write = last_write_spec(ctx)?;
     let request_length = ctx.headers.content_length()?;
     match ctx.headers.required("x-ms-write")? {
         "clear" => {
@@ -796,43 +802,114 @@ async fn put_range(ctx: &Context<'_>, body: Body) -> Result<Response> {
                 (None, None) => None,
                 (Some(_), Some(_)) => return Err(Error::InvalidHeaderValue),
             };
-            let mut upload = ctx.app.store.begin_upload(length).await?;
-            let receive = async {
-                let mut data = body.into_data_stream();
-                while let Some(chunk) = data.next().await {
-                    upload
-                        .append(&chunk.map_err(|_| Error::InvalidInput)?)
-                        .await?;
-                }
-                Ok::<_, Error>(())
-            };
-            tokio::time::timeout(ctx.app.config.upload_timeout, receive)
-                .await
-                .map_err(|_| Error::OperationTimedOut)??;
-            let staged = upload.finish(checksum).await?;
-            let checksums = (
-                STANDARD_MD5.encode(staged.checksums.md5),
-                staged.checksums.response(Some(Checksum::Crc64(0))).1,
-            );
-            let node = ctx
-                .app
-                .store
-                .put_range(
-                    ctx.live()?,
-                    ctx.target.path.clone(),
-                    ctx.lease_id()?,
-                    offset,
-                    staged,
-                    last_write,
-                )
-                .await?;
-            range_response(
-                &node,
-                Some((checksums, matches!(checksum, Some(Checksum::Crc64(_))))),
-            )
+            write_range(ctx, (offset, length), checksum, last_write, body).await
         }
         _ => Err(Error::InvalidHeaderValue),
     }
+}
+
+/// Stages `body` and publishes it at `range` (`offset`, `length`), as Put Range
+/// and Put Range From URL both do.
+async fn write_range(
+    ctx: &Context<'_>,
+    (offset, length): (u64, u64),
+    checksum: Option<Checksum>,
+    last_write: TimeSpec,
+    body: Body,
+) -> Result<Response> {
+    let mut upload = ctx.app.store.begin_upload(length).await?;
+    let receive = async {
+        let mut data = body.into_data_stream();
+        while let Some(chunk) = data.next().await {
+            upload
+                .append(&chunk.map_err(|_| Error::InvalidInput)?)
+                .await?;
+        }
+        Ok::<_, Error>(())
+    };
+    tokio::time::timeout(ctx.app.config.upload_timeout, receive)
+        .await
+        .map_err(|_| Error::OperationTimedOut)??;
+    let staged = upload.finish(checksum).await?;
+    let checksums = (
+        STANDARD_MD5.encode(staged.checksums.md5),
+        staged.checksums.response(Some(Checksum::Crc64(0))).1,
+    );
+    let node = ctx
+        .app
+        .store
+        .put_range(
+            ctx.live()?,
+            ctx.target.path.clone(),
+            ctx.lease_id()?,
+            offset,
+            staged,
+            last_write,
+        )
+        .await?;
+    range_response(
+        &node,
+        Some((checksums, matches!(checksum, Some(Checksum::Crc64(_))))),
+    )
+}
+
+/// Put Range From URL: writes a range read from a file on this instance and account.
+async fn put_range_from_url(ctx: &Context<'_>) -> Result<Response> {
+    let (offset, length) = ctx
+        .headers
+        .range()?
+        .ok_or(Error::MissingRequiredHeader)?
+        .exact()?;
+    let source_range = ByteRange::parse(ctx.headers.required("x-ms-source-range")?)?;
+    if ctx.headers.required("x-ms-write")? != "update"
+        || length > MAX_RANGE_BYTES
+        || source_range.exact()?.1 != length
+        || ctx.headers.content_length()? != 0
+    {
+        return Err(Error::InvalidHeaderValue);
+    }
+    let last_write = last_write_spec(ctx)?;
+    let (source, query) = local_source(ctx, ctx.headers.required("x-ms-copy-source")?)?;
+    if source.account != ctx.target.account {
+        return Err(Error::CannotVerifyCopySource);
+    }
+    let from = ShareRef {
+        account: source.account.clone(),
+        share: source.share.clone().ok_or(Error::InvalidHeaderValue)?,
+        snapshot: query.snapshot("sharesnapshot")?,
+    };
+    let read = ctx
+        .app
+        .store
+        .read_file(
+            from,
+            source.path,
+            ReadOptions {
+                lease_id: None,
+                conditions: Default::default(),
+                range: Some(ReadRange {
+                    start: source_range.start,
+                    end: source_range.end,
+                }),
+                want_md5: false,
+                with_body: true,
+            },
+        )
+        .await?;
+    if read
+        .range
+        .is_none_or(|range| range.end - range.start != length)
+    {
+        return Err(Error::InvalidRange);
+    }
+    write_range(
+        ctx,
+        (offset, length),
+        None,
+        last_write,
+        Body::from_stream(read.body.into_stream()),
+    )
+    .await
 }
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as STANDARD_MD5};
@@ -847,7 +924,7 @@ fn range_response(node: &super::model::NodeInfo, checksums: Option<Checksums>) -
     set(
         headers,
         "x-ms-file-last-write-time",
-        &time::iso(node.last_write),
+        &time::iso_ticks(node.last_write),
     )?;
     if let Some(((md5, crc64), wants_crc64)) = checksums {
         set(headers, "content-md5", &md5)?;

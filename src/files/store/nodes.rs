@@ -14,6 +14,7 @@ use crate::{
             SmbProperties, TimeSpec,
         },
         name::{EntryPath, fold},
+        time::TICKS_PER_MILLI,
     },
     ranges::RangeMap,
 };
@@ -183,9 +184,9 @@ fn blank(parent: &NodeInfo, name: &str, directory: bool, now: i64) -> NodeInfo {
         etag: new_etag(),
         modified: now,
         attributes: Attributes::default(),
-        creation: now,
-        last_write: now,
-        change: now,
+        creation: now * TICKS_PER_MILLI,
+        last_write: now * TICKS_PER_MILLI,
+        change: now * TICKS_PER_MILLI,
         permission_key: parent.permission_key.clone(),
         metadata: Metadata::new(),
         length: 0,
@@ -348,7 +349,7 @@ impl Store {
                 lease::after_write(Kind::File, &mut node.lease, now);
             }
             node.metadata = metadata;
-            node.change = now;
+            node.change = now * TICKS_PER_MILLI;
             touch(&mut node, now);
             save_node(db, share.id, &node)?;
             Ok(node)
@@ -602,7 +603,7 @@ impl Store {
                 content::save_map(&tx, share.id, node.file_id, &old, &new)?;
                 reclaim.add_map(&old);
                 node.length = length;
-                node.last_write = now;
+                node.last_write = now * TICKS_PER_MILLI;
             }
             if let Some(http) = http {
                 node.http = file_http(http);
@@ -949,7 +950,7 @@ impl Store {
             } else {
                 touch(&mut node, now);
             }
-            node.change = now;
+            node.change = now * TICKS_PER_MILLI;
             let copy_id = uuid::Uuid::new_v4().hyphenated().to_string();
             node.copy = Some(CopyState {
                 id: copy_id.clone(),
@@ -1028,7 +1029,7 @@ impl Store {
 
 fn stamp_write(node: &mut NodeInfo, last_write: TimeSpec, now: i64) {
     node.last_write = last_write.resolve(now, node.last_write);
-    node.change = now;
+    node.change = now * TICKS_PER_MILLI;
     lease::after_write(Kind::File, &mut node.lease, now);
     touch(node, now);
 }

@@ -108,14 +108,18 @@ pub(super) fn node_headers(headers: &mut HeaderMap, node: &NodeInfo) -> Result<(
     set(
         headers,
         "x-ms-file-creation-time",
-        &time::iso(node.creation),
+        &time::iso_ticks(node.creation),
     )?;
     set(
         headers,
         "x-ms-file-last-write-time",
-        &time::iso(node.last_write),
+        &time::iso_ticks(node.last_write),
     )?;
-    set(headers, "x-ms-file-change-time", &time::iso(node.change))?;
+    set(
+        headers,
+        "x-ms-file-change-time",
+        &time::iso_ticks(node.change),
+    )?;
     set(headers, "x-ms-file-id", &node.file_id.to_string())?;
     if let Some(parent) = node.parent_id {
         set(headers, "x-ms-file-parent-id", &parent.to_string())?;
@@ -295,10 +299,10 @@ pub(super) fn list_entries(view: &ListEntriesView<'_>, listing: &Listing) -> Res
                 xml.element("Content-Length", &node.length.to_string());
             }
             if detail.timestamps {
-                xml.element("CreationTime", &time::iso(node.creation));
-                xml.element("LastAccessTime", &time::iso(node.last_write));
-                xml.element("LastWriteTime", &time::iso(node.last_write));
-                xml.element("ChangeTime", &time::iso(node.change));
+                xml.element("CreationTime", &time::iso_ticks(node.creation));
+                xml.element("LastAccessTime", &time::iso_ticks(node.last_write));
+                xml.element("LastWriteTime", &time::iso_ticks(node.last_write));
+                xml.element("ChangeTime", &time::iso_ticks(node.change));
                 xml.element("Last-Modified", &time::http_date(node.modified));
             }
             if detail.etag {

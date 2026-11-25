@@ -15,8 +15,8 @@ Clients keep their storage client and set only the file endpoint, for example th
 | --- | --- |
 | Shares | List Shares, Create, Get Properties, Get/Set Metadata, Set Properties, Delete, Get/Set ACL, Get Stats, Lease, Snapshot, Create/Get Permission |
 | Directories | Create, Get Properties, Set Properties, Get/Set Metadata, Delete, List Directories and Files, Rename, List Handles, Force Close Handles |
-| Files | Create, Get, Get Properties, Set Properties, Get/Set Metadata, Delete, Put Range (update and clear), List Ranges (including `prevsharesnapshot` diffs), Copy, Abort Copy, Lease, Rename, List/Force Close Handles |
-| Recognised, answered with `501 NotImplemented` | File service properties, Restore Share, Put Range From URL, and the NFS hard link and symbolic link operations |
+| Files | Create, Get, Get Properties, Set Properties, Get/Set Metadata, Delete, Put Range (update and clear), Put Range From URL (a file on this instance and account), List Ranges (including `prevsharesnapshot` diffs), Copy, Abort Copy, Lease, Rename, List/Force Close Handles |
+| Recognised, answered with `501 NotImplemented` | File service properties, Restore Share, and the NFS hard link and symbolic link operations |
 
 Share, directory and file URIs are `/{account}/{share}/{path}`. Resources are selected by `restype` and `comp` exactly as in the Microsoft reference; an unknown combination returns `InvalidQueryParameterValue` and a known one with the wrong verb returns `UnsupportedHttpVerb`.
 
@@ -48,11 +48,29 @@ Any `{account}.file.{domain}` host names the account, so `http://{account}.file.
 ## Known differences
 
 - Handles are not modeled: List Handles returns an empty list and Force Close Handles reports zero closed.
+- Put Range From URL takes `x-ms-copy-source`, `x-ms-source-range`, and `x-ms-range` of the same length (up to 4 MiB), with `Content-Length: 0` and `x-ms-write: update`. Like Copy File it reads a file on this listener and account (a share snapshot is allowed) and does not check a SAS on the source URL; a source on another host or account, including a Blob, is not served. It takes no source checksum or conditions.
+- SMB timestamps (creation, last write, change) keep the 100 ns precision of the seven-digit ISO form; `Last-Modified` and share times stay in milliseconds. `x-ms-file-last-write-time` accepts `now` and `preserve` in any case on Put Range, and AzCopy sends `Preserve`. A data directory written before this change stored these timestamps in milliseconds, and they now read as dates near 1970.
 - Copy File is synchronous and limited to a source on this instance and account (a share snapshot is allowed). `{account}.file.*` host names of a configured account are treated as local because Azure CLI builds source URLs that way. Abort Copy always returns `NoPendingCopyOperation`.
 - Set File Properties replaces the HTTP properties as a set only when one of them is sent, so a pure resize keeps the content type.
 - Standard conditional headers are evaluated on reads even though Azure does not document them for Files. Permissions are stored SDDL strings and are never evaluated; there is no SMB or NFS.
 - Soft delete, provisioned IOPS and bandwidth, the 200-snapshot limit and access-tier transition rules are not modeled.
 - Unsupported operations and options return a stable `501 NotImplemented` Azure-shaped error.
+
+## AzCopy
+
+AzCopy 10.34.2 (Windows amd64) ran against a debug build serving `--services blob,file,dfs` with an account SAS (`ss=f`, `srt=sco`) made from the public `devstoreaccount1` key, loopback only. These pass:
+
+- `copy --from-to LocalFile` of one file and of a tree of 60 small files plus a 300 MiB file, and `copy --from-to FileLocal` back, compared by SHA-256; `list --location File`; `remove --from-to FileTrash --recursive`.
+- `sync` in both directions: nothing is re-sent when unchanged, and only changed files are when they differ. AzCopy creates a file with a write time of 1970, uploads, then sets the source's NTFS timestamp, and re-sends any file whose source time is newer than the stored one, so the 100 ns precision above is what makes the second `sync` a no-op.
+- `copy --from-to FileFile --recursive` between two shares of the account, which uses Put Range From URL.
+
+Limits you meet when using AzCopy against Azuifer:
+
+- Files addressing is path-style only, so AzCopy needs `--from-to` (`LocalFile`, `FileLocal`, `FileFile`, `FileTrash`) and `--location File` for `list`, and `azcopy make` cannot create a share: it rejects an IP endpoint, and Files has no `{account}.file.…` host-style addressing to fall back on. Create the share with the SDK, `az storage share create`, or one HTTP request. AzCopy never creates a missing share.
+- Copies between Blob and Files (`BlobFile`, `FileBlob`) fail: the two services keep separate stores and Azuifer makes no outbound requests. Download to disk and upload instead.
+- A request waits up to 5 seconds for one of the 16 active-request slots before it is answered `503 ServerBusy`, which AzCopy retries.
+
+[`tests/azcopy_smoke.py`](../../tests/azcopy_smoke.py) runs a compact Blob and Files scenario with 30 `PASS`/`FAIL` steps against a running server; the Files half covers the items above. Start Azuifer with `--services blob,file --skip-api-version-check --memory-limit 1073741824`, then `python tests/azcopy_smoke.py --azcopy /path/to/azcopy` (`pip install azure-storage-blob azure-storage-file-share` generates the SAS tokens; `--file-url` and `--file-sas` select your own). It shows that this AzCopy version moves the expected bytes and makes the expected `sync` decisions, not wire equivalence with Azure Files. [`tests/azcopy_regressions_http.rs`](../../tests/azcopy_regressions_http.rs) pins each defect AzCopy found as an HTTP test.
 
 ## Verification
 

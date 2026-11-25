@@ -809,7 +809,7 @@ impl Request<'_> {
                 Operation::SetBlobProperties(
                     key,
                     headers,
-                    decode_hash(header(self.headers, "x-ms-blob-content-md5")?)?,
+                    blob_content_md5(self.headers)?,
                     replace,
                     guard()?,
                     crate::blob_page::PropertyChange::parse(self.headers)?,
@@ -1005,6 +1005,11 @@ fn decode_hash<const N: usize>(value: Option<&str>) -> Result<Option<[u8; N]>> {
         .transpose()
 }
 
+/// `x-ms-blob-content-md5`, which AzCopy sends empty when it has no hash to set.
+fn blob_content_md5(headers: &HeaderMap) -> Result<Option<[u8; 16]>> {
+    decode_hash(header(headers, "x-ms-blob-content-md5")?.filter(|value| !value.is_empty()))
+}
+
 /// Reads the content headers. The `x-ms-blob-*` form wins over the plain
 /// header; `plain` also accepts the plain `Content-Type` of a Put Blob request.
 /// The flag reports whether any content property was supplied.
@@ -1091,7 +1096,7 @@ fn blob_write(headers: &HeaderMap, plain: bool) -> Result<BlobWrite> {
             .map(AccessTier::parse)
             .transpose()?,
         copy: None,
-        md5: decode_hash(header(headers, "x-ms-blob-content-md5")?)?,
+        md5: blob_content_md5(headers)?,
         tags: header(headers, "x-ms-tags")?
             .map(crate::blob_tags::from_header)
             .transpose()?
