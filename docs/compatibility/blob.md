@@ -83,7 +83,7 @@ Requests authenticate with Shared Key, Shared Key Lite, an account SAS, a servic
 - Errors use Azure's codes: `AuthenticationFailed` for signature, window, and resource mismatches, `AuthorizationPermissionMismatch`, `AuthorizationResourceTypeMismatch`, `AuthorizationServiceMismatch`, and `AuthorizationProtocolMismatch` (`spr=https` on this HTTP-only listener).
 - `sip` is parsed but not enforced: the listener does not expose the client address to the router. User-delegation SAS (`skoid`) needs Get User Delegation Key and answers `NotImplemented`.
 - A container's public access level (`x-ms-blob-public-access`, stored with its ACL) allows anonymous Get Blob, Get Blob Properties and Metadata, and Get Block List at `blob` level, and also List Blobs and Get Container Properties and Metadata at `container` level. A blocked anonymous blob read answers 404 `ResourceNotFound`; other blocked requests answer 403.
-- `x-ms-version` is required on Shared Key requests and optional with SAS or anonymous access. `--skip-api-version-check` still lets a client that sends a newer well-formed version use the baseline; the response reports the effective version. `x-ms-client-request-id` is echoed.
+- `x-ms-version` is required on Shared Key requests and optional with SAS or anonymous access. Every version from 2009-09-19 up to the baseline is served with baseline behavior, as older SDKs and `az` send them; `--skip-api-version-check` additionally lets a client that sends a newer well-formed version use the baseline. The response reports the effective version. `x-ms-client-request-id` is echoed.
 
 ## Service properties and CORS
 

@@ -1658,7 +1658,7 @@ fn authentication_accepts_valid_credentials_and_rejects_the_rest() {
             &target,
             &[
                 ("authorization", &format!("SharedKey {ACCOUNT}:AAAA")),
-                ("x-ms-version", "2019-02-02"),
+                ("x-ms-version", "2009-09-18"),
             ],
         ),
         400,

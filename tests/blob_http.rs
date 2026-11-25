@@ -811,13 +811,32 @@ fn newer_version_fallback_is_opt_in_and_does_not_change_auth_or_operations() {
         501,
         "NotImplemented",
     );
-    for version in ["2014-12-01", "2026-02-29", "2026-4-06", "nonsense"] {
+    for version in ["2009-09-18", "2026-02-29", "2026-4-06", "nonsense"] {
         error(
             compatible.request(Method::GET, CONTAINER, &[("x-ms-version", version)], b""),
             400,
             "InvalidHeaderValue",
         );
     }
+    // Older versions are served with baseline behavior, in strict mode too.
+    let older = compatible.request(
+        Method::GET,
+        CONTAINER,
+        &[("x-ms-version", "2014-12-01")],
+        b"",
+    );
+    assert_eq!(older.status(), 200);
+    assert_eq!(older.headers()["x-ms-version"], VERSION);
+    error(
+        strict.request(
+            Method::GET,
+            CONTAINER,
+            &[("x-ms-version", "2014-12-01")],
+            b"",
+        ),
+        404,
+        "ContainerNotFound",
+    );
 }
 
 #[test]
@@ -4879,7 +4898,15 @@ fn version_header_and_client_request_id_follow_the_wire_contract() {
         &[("x-ms-version", "2014-02-14")],
         b"",
     );
-    error(older, 400, "InvalidHeaderValue");
+    assert_eq!(older.status(), 200, "older versions get baseline behavior");
+    assert_eq!(older.headers()["x-ms-version"], VERSION);
+    let too_old = server.raw(
+        Method::GET,
+        &format!("{BLOB}?{sas}"),
+        &[("x-ms-version", "2009-09-18")],
+        b"",
+    );
+    error(too_old, 400, "InvalidHeaderValue");
 }
 
 #[test]

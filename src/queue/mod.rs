@@ -161,14 +161,16 @@ fn check_version(app: &App, parts: &Parts) -> Result<()> {
     if requested == app.baseline {
         return Ok(());
     }
-    if !app.config.skip_api_version_check || requested < app.baseline {
+    if !requested.is_served(&app.baseline, app.config.skip_api_version_check) {
         return Err(invalid());
     }
-    tracing::info!(
-        requested_api_version = requested.as_str(),
-        effective_api_version = app.baseline.as_str(),
-        "using the configured Queue protocol baseline"
-    );
+    if requested > app.baseline {
+        tracing::info!(
+            requested_api_version = requested.as_str(),
+            effective_api_version = app.baseline.as_str(),
+            "using the configured Queue protocol baseline"
+        );
+    }
     Ok(())
 }
 

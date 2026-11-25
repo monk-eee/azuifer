@@ -1476,11 +1476,18 @@ fn api_version_policy_matches_the_blob_service() {
     let body = error(newer, 400, "InvalidHeaderValue");
     assert!(body.contains("<HeaderName>x-ms-version</HeaderName>"));
     assert!(body.contains("<HeaderValue>2099-01-01</HeaderValue>"));
+    let older = strict.call(
+        Method::GET,
+        "/versions?comp=metadata",
+        &[("x-ms-version", "2015-04-05")],
+        "",
+    );
+    assert_eq!(older.status(), 200, "older versions get baseline behavior");
     error(
         strict.call(
             Method::GET,
             "/versions?comp=metadata",
-            &[("x-ms-version", "2015-04-05")],
+            &[("x-ms-version", "2009-09-18")],
             "",
         ),
         400,
@@ -1511,16 +1518,13 @@ fn api_version_policy_matches_the_blob_service() {
         VERSION,
         "the effective version is reported"
     );
-    error(
-        lenient.call(
-            Method::GET,
-            "/versions?comp=metadata",
-            &[("x-ms-version", "2015-04-05")],
-            "",
-        ),
-        400,
-        "InvalidHeaderValue",
+    let older_lenient = lenient.call(
+        Method::GET,
+        "/versions?comp=metadata",
+        &[("x-ms-version", "2015-04-05")],
+        "",
     );
+    assert_eq!(older_lenient.status(), 200);
 }
 
 impl Emulator {

@@ -278,9 +278,7 @@ fn parse_with(
         None if inherited.is_some() => ApiVersion::parse(inherited.unwrap_or_default())?,
         None => return Err(Error::InvalidVersion),
     };
-    if requested_version != config.api_version
-        && (!config.skip_api_version_check || requested_version < config.api_version)
-    {
+    if !requested_version.is_served(&config.api_version, config.skip_api_version_check) {
         return Err(Error::InvalidVersion);
     }
     let mut query = parse_query(parts.uri.query())?;
@@ -1235,9 +1233,7 @@ pub(crate) fn authenticate(parts: &Parts, config: &Config) -> Result<Authenticat
     }
     let requested_version =
         ApiVersion::parse(header(headers, "x-ms-version")?.ok_or(Error::InvalidVersion)?)?;
-    if requested_version != config.api_version
-        && (!config.skip_api_version_check || requested_version < config.api_version)
-    {
+    if !requested_version.is_served(&config.api_version, config.skip_api_version_check) {
         return Err(Error::InvalidVersion);
     }
     let query = parse_query(parts.uri.query())?;

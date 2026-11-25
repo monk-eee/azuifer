@@ -165,6 +165,13 @@ pub(crate) struct BlobKey {
 pub(crate) struct ApiVersion(String);
 
 impl ApiVersion {
+    /// Azure serves every version since the first public one. The emulator answers
+    /// older versions with its baseline behavior and newer ones only when the
+    /// version check is skipped.
+    pub(crate) fn is_served(&self, baseline: &Self, skip_newer: bool) -> bool {
+        self.0.as_str() >= "2009-09-19" && (self <= baseline || skip_newer)
+    }
+
     pub(crate) fn parse(value: &str) -> Result<Self> {
         let digits =
             |part: &str, width| part.len() == width && part.bytes().all(|b| b.is_ascii_digit());

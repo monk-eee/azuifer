@@ -189,8 +189,8 @@ async fn stored_policy(
     Ok(policies.into_iter().find(|policy| policy.id == id))
 }
 
-/// `x-ms-version` is required except on SAS requests; newer versions need
-/// `--skip-api-version-check`, older ones are not supported.
+/// `x-ms-version` is required except on SAS requests. Older versions get baseline
+/// behavior; newer ones need `--skip-api-version-check`.
 fn check_version(app: &App, headers: &Headers<'_>, sas: bool) -> Result<()> {
     let Some(value) = headers.get("x-ms-version")? else {
         return if sas {
@@ -200,8 +200,7 @@ fn check_version(app: &App, headers: &Headers<'_>, sas: bool) -> Result<()> {
         };
     };
     let requested = ApiVersion::parse(value).map_err(|_| Error::InvalidHeaderValue)?;
-    if requested != app.baseline && (!app.config.skip_api_version_check || requested < app.baseline)
-    {
+    if !requested.is_served(&app.baseline, app.config.skip_api_version_check) {
         return Err(Error::InvalidHeaderValue);
     }
     Ok(())
