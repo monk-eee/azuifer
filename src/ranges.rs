@@ -42,6 +42,8 @@ pub(crate) enum Segment<E> {
     Hole { offset: u64, length: u64 },
 }
 
+// Part of the shared range-map surface (ADR-0015); not every service calls each accessor.
+#[allow(dead_code)]
 impl<E> Segment<E> {
     pub(crate) fn offset(&self) -> u64 {
         match self {
@@ -117,15 +119,18 @@ impl<E: Clone + Eq> RangeMap<E> {
     }
 
     /// Logical length in bytes, including trailing holes.
+    #[allow(dead_code)] // Shared surface; see `Segment`.
     pub(crate) fn len(&self) -> u64 {
         self.length
     }
 
+    #[allow(dead_code)] // Shared surface; see `Segment`.
     pub(crate) fn is_empty(&self) -> bool {
         self.length == 0
     }
 
     /// Number of stored mappings, a measure of fragmentation.
+    #[allow(dead_code)] // Shared surface; see `Segment`.
     pub(crate) fn mapping_count(&self) -> usize {
         self.mappings.len()
     }

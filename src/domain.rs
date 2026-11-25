@@ -66,6 +66,7 @@ pub(crate) enum Error {
     CopySourceMissing,
     CorsPreflight,
     SourceConditionNotMet,
+    Page(crate::blob_page::PageError),
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -388,6 +389,18 @@ pub(crate) enum AccessTier {
     Cool,
     Cold,
     Archive,
+    /// Premium page blob tiers.
+    P4,
+    P6,
+    P10,
+    P15,
+    P20,
+    P30,
+    P40,
+    P50,
+    P60,
+    P70,
+    P80,
 }
 
 impl AccessTier {
@@ -397,6 +410,17 @@ impl AccessTier {
             "Cool" => Ok(Self::Cool),
             "Cold" => Ok(Self::Cold),
             "Archive" => Ok(Self::Archive),
+            "P4" => Ok(Self::P4),
+            "P6" => Ok(Self::P6),
+            "P10" => Ok(Self::P10),
+            "P15" => Ok(Self::P15),
+            "P20" => Ok(Self::P20),
+            "P30" => Ok(Self::P30),
+            "P40" => Ok(Self::P40),
+            "P50" => Ok(Self::P50),
+            "P60" => Ok(Self::P60),
+            "P70" => Ok(Self::P70),
+            "P80" => Ok(Self::P80),
             _ => Err(Error::InvalidHeader),
         }
     }
@@ -407,7 +431,22 @@ impl AccessTier {
             Self::Cool => "Cool",
             Self::Cold => "Cold",
             Self::Archive => "Archive",
+            Self::P4 => "P4",
+            Self::P6 => "P6",
+            Self::P10 => "P10",
+            Self::P15 => "P15",
+            Self::P20 => "P20",
+            Self::P30 => "P30",
+            Self::P40 => "P40",
+            Self::P50 => "P50",
+            Self::P60 => "P60",
+            Self::P70 => "P70",
+            Self::P80 => "P80",
         }
+    }
+
+    pub(crate) fn is_premium(self) -> bool {
+        !matches!(self, Self::Hot | Self::Cool | Self::Cold | Self::Archive)
     }
 }
 
@@ -425,6 +464,7 @@ pub(crate) struct CopyInfo {
     pub(crate) completed: u64,
 }
 
+#[derive(Clone)]
 pub(crate) struct BlobWrite {
     pub(crate) headers: ContentHeaders,
     pub(crate) metadata: Metadata,
@@ -448,6 +488,7 @@ pub(crate) struct BlobInfo {
     pub(crate) copy: Option<CopyInfo>,
     /// True for a blob that exists only as uncommitted blocks (listings only).
     pub(crate) uncommitted: bool,
+    pub(crate) kind: crate::blob_page::BlobKind,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

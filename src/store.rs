@@ -1,9 +1,11 @@
+mod append;
 mod blobs;
 mod blocks;
 mod containers;
 mod copy;
 mod listing;
 mod namespace;
+mod pages;
 mod schema;
 mod service;
 
@@ -28,8 +30,10 @@ use tempfile::NamedTempFile;
 use tokio::io::AsyncWriteExt as _;
 use uuid::Uuid;
 
+pub(crate) use append::Appended;
 pub(crate) use containers::LeaseResult;
 pub(crate) use copy::SourceBytes;
+pub(crate) use pages::{PageRanges, PageWritten, RangeBody};
 
 #[derive(Clone)]
 pub(crate) struct Store(Arc<Inner>);
@@ -78,6 +82,8 @@ enum UploadedData {
 pub(crate) enum Payload {
     Disk(File),
     Memory(Vec<u8>),
+    /// Sparse content of a page or append blob: extent slices and zero-filled holes.
+    Ranges(RangeBody),
 }
 
 pub(crate) struct Download {
@@ -354,7 +360,7 @@ fn remove_staged(db: &Connection, key: &BlobKey) -> Result<Vec<Uuid>> {
 fn check_memory_quota(db: &Connection, mode: &Mode, removed: u64, added: u64) -> Result<()> {
     if let Mode::Memory { limit } = mode {
         let stored = db.query_row(
-            "SELECT (SELECT COALESCE(SUM(length),0) FROM blobs) + (SELECT COALESCE(SUM(length),0) FROM staged_blocks)",
+            "SELECT (SELECT COALESCE(SUM(length),0) FROM blobs WHERE blob_type=0) + (SELECT COALESCE(SUM(length),0) FROM staged_blocks) + (SELECT COALESCE(SUM(length),0) FROM blob_extents)",
             [], |row| row_uint(row, 0),
         ).map_err(db_error)?;
         let remaining = stored
@@ -370,7 +376,10 @@ fn check_memory_quota(db: &Connection, mode: &Mode, removed: u64, added: u64) ->
 const BLOB_COLUMNS: &str = "id, modified, COALESCE(etag, id), created, length, content_type, \
     content_encoding, content_language, content_disposition, cache_control, md5, metadata, \
     access_tier, access_tier_changed, lease_id, lease_state, lease_duration, lease_expiry, \
-    copy_id, copy_source, copy_completed";
+    copy_id, copy_source, copy_completed, blob_type, sequence_number, append_count, sealed";
+
+/// The number of `BLOB_COLUMNS`; a query that selects more starts them at this index.
+const BLOB_COLUMN_COUNT: usize = 25;
 
 /// A blob row with its stored lease, for operations that must check or change it.
 struct BlobRow {
@@ -398,6 +407,23 @@ fn save_blob(
         data,
         computed_md5,
     } = content;
+    crate::blob_page::check_tier(crate::blob_page::BlobKind::Block, options.tier)?;
+    let entity = save_row(db, key, options, length, data.bytes(), computed_md5, now)?;
+    data.persist(mode, entity.id)?;
+    Ok(entity)
+}
+
+/// Publishes the blob row and resets its type to a block blob; page and append
+/// callers set their type afterwards. Content persistence is the caller's job.
+fn save_row(
+    db: &Connection,
+    key: &BlobKey,
+    options: &crate::domain::BlobWrite,
+    length: ContentLength,
+    bytes: Option<&[u8]>,
+    computed_md5: Option<[u8; 16]>,
+    now: i64,
+) -> Result<Entity> {
     let entity = new_entity(now)?;
     let metadata = serde_json::to_string(&options.metadata)
         .map_err(|_| internal("could not encode metadata"))?;
@@ -421,7 +447,8 @@ fn save_blob(
            md5=excluded.md5, metadata=excluded.metadata, bytes=excluded.bytes,
            access_tier=excluded.access_tier, access_tier_changed=excluded.access_tier_changed,
            copy_id=excluded.copy_id, copy_source=excluded.copy_source,
-           copy_completed=excluded.copy_completed",
+           copy_completed=excluded.copy_completed,
+           blob_type=0, sequence_number=0, append_count=0, sealed=0",
         params![
             account,
             container,
@@ -436,7 +463,7 @@ fn save_blob(
             options.headers.cache_control,
             md5.map_or_else(String::new, |md5| STANDARD.encode(md5)),
             metadata,
-            data.bytes(),
+            bytes,
             tier,
             if options.tier.is_some() { sqlite_int(entity.modified)? } else { 0 },
             copy_id,
@@ -450,7 +477,6 @@ fn save_blob(
         blob_params(key),
     )
     .map_err(db_error)?;
-    data.persist(mode, entity.id)?;
     Ok(entity)
 }
 
@@ -581,6 +607,12 @@ fn blob_row(row: &Row<'_>, now: i64) -> rusqlite::Result<BlobRow> {
                 })
             },
             uncommitted: false,
+            kind: crate::blob_page::BlobKind::from_stored(
+                row.get(21)?,
+                row.get(22)?,
+                row.get(23)?,
+                row.get(24)?,
+            ),
         },
         lease,
     })
@@ -632,7 +664,7 @@ fn recover(db: &Connection, dir: &Path) -> anyhow::Result<()> {
             .and_then(|id| Uuid::parse_str(id).ok())
         {
             !db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM blobs WHERE id=?1 UNION ALL SELECT 1 FROM staged_blocks WHERE id=?1)",
+                "SELECT EXISTS(SELECT 1 FROM blobs WHERE id=?1 UNION ALL SELECT 1 FROM staged_blocks WHERE id=?1 UNION ALL SELECT 1 FROM blob_ranges WHERE extent=?1)",
                 [id],
                 |row| row.get::<_, bool>(0),
             )?
@@ -649,6 +681,7 @@ fn recover(db: &Connection, dir: &Path) -> anyhow::Result<()> {
 fn reclaim(mode: &Mode, id: Uuid) {
     if let Mode::Disk { extents, .. } = mode
         && let Err(error) = fs::remove_file(extent(extents, id))
+        && error.kind() != std::io::ErrorKind::NotFound
     {
         tracing::warn!(kind = ?error.kind(), "content cleanup deferred until recovery");
     }

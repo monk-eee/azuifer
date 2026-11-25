@@ -227,7 +227,7 @@ impl Store {
             let row = require_container(&tx, &key, now)?;
             lease_guard(&row, &guard, LeaseNeed::Required, now)?;
             let values = params![key.account.as_str(), key.name.as_str()];
-            let ids = if matches!(mode, super::Mode::Disk { .. }) {
+            let mut reclaimed = if matches!(mode, super::Mode::Disk { .. }) {
                 let mut statement = tx
                     .prepare("SELECT id FROM blobs WHERE account=?1 AND container=?2
                               UNION ALL SELECT id FROM staged_blocks WHERE account=?1 AND container=?2")
@@ -240,13 +240,14 @@ impl Store {
             } else {
                 Vec::new()
             };
+            reclaimed.extend(super::pages::retire_container(&tx, mode, &key)?);
             tx.execute(
                 "DELETE FROM containers WHERE account=?1 AND name=?2",
                 values,
             )
             .map_err(db_error)?;
             tx.commit().map_err(db_error)?;
-            for id in ids {
+            for id in reclaimed {
                 reclaim(mode, id);
             }
             Ok(())

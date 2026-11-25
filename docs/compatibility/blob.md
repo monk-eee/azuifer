@@ -2,7 +2,7 @@
 
 Use the [quick start](../../README.md#run-locally) with the Blob API version `2023-11-03`. [The manifest](../../specs/conformance/blob.json) is the operation inventory: each operation is `implemented`, `known-difference`, or `unsupported`, with its authorization modes and notes. No operation has been rated `exact`, and none has been differentially verified against Azure Storage yet.
 
-This slice covers block blobs. Page blobs, append blobs, snapshots, versions, tags, batch, and DFS are separate work.
+This slice covers block, page, and append blobs. Snapshots, versions, tags, batch, and DFS are separate work.
 
 ## Operations
 
@@ -10,11 +10,27 @@ This slice covers block blobs. Page blobs, append blobs, snapshots, versions, ta
 | --- | --- |
 | `/{account}` | `GET comp=list` (List Containers, `include=metadata`); `GET` or `PUT restype=service&comp=properties` (service properties and CORS); `GET restype=service&comp=stats`; `GET` or `HEAD restype=account&comp=properties` |
 | `/{account}/{container}` | `PUT`, `GET`, `HEAD`, `DELETE` with `restype=container`; `comp=metadata` (`GET`, `HEAD`, `PUT`); `comp=acl` (`GET`, `PUT`); `PUT comp=lease`; `GET comp=list` (List Blobs); `GET` or `HEAD restype=account&comp=properties` |
-| `/{account}/{container}/{blob}` | `PUT` with `x-ms-blob-type: BlockBlob` (Put Blob, or Put Blob From URL with `x-ms-copy-source`); `PUT` with `x-ms-copy-source` and no blob type (Copy Blob); `GET`, `HEAD`, `DELETE` |
-| `…/{blob}?comp=…` | `block` (Put Block, or Put Block From URL), `blocklist` (`PUT`, `GET`), `properties` (`PUT`), `metadata` (`PUT`, `GET`, `HEAD`), `tier` (`PUT`), `lease` (`PUT`), `copy&copyid=…` (Abort Copy, `x-ms-copy-action: abort`) |
+| `/{account}/{container}/{blob}` | `PUT` with `x-ms-blob-type: BlockBlob`, `PageBlob`, or `AppendBlob` (Put Blob; Put Blob From URL with `x-ms-copy-source` for block blobs); `PUT` with `x-ms-copy-source` and no blob type (Copy Blob); `GET`, `HEAD`, `DELETE` |
+| `…/{blob}?comp=…` | `block` (Put Block, or Put Block From URL), `blocklist` (`PUT`, `GET`), `page` (Put Page, or Put Page From URL), `pagelist` (`GET`), `appendblock` (Append Block, or Append Block From URL), `seal` (`PUT`), `properties` (`PUT`, including page blob resize and sequence number), `metadata` (`PUT`, `GET`, `HEAD`), `tier` (`PUT`), `lease` (`PUT`), `copy&copyid=…` (Abort Copy, `x-ms-copy-action: abort`) |
 | any path | `OPTIONS` preflight, answered from the account's CORS rules |
 
 Anything else, including unsupported query parameters and `x-ms-*` headers, answers an Azure-shaped `NotImplemented` error instead of being ignored.
+
+### Page blobs and append blobs
+
+Page and append blob content is a map from blob offsets to immutable extents ([ADR-0015](../adr.d/0015-map-mutable-ranges-over-immutable-extents.md)). Every write streams into a new extent, is made durable, and then commits its range rows and new ETag in one metadata transaction ([ADR-0004](../adr.d/0004-commit-durable-content-references.md)), so a crash exposes the previous content or the whole new write. Clearing and shrinking change rows only, unwritten ranges allocate nothing, and extents are deleted when no blob references them. Startup recovery keeps referenced extents and removes staging files and orphans.
+
+- **Create.** `Put Blob` with `x-ms-blob-type: PageBlob` requires `x-ms-blob-content-length` (a multiple of 512 up to 8 TiB) and accepts `x-ms-blob-sequence-number` and a premium `x-ms-access-tier` (`P4` to `P80`). `AppendBlob` creates an empty blob. Both need `Content-Length: 0`, replace any blob of the same name (and so change its type) subject to the usual conditions and lease, and discard uncommitted blocks.
+- **Put Page.** `x-ms-page-write: update` writes up to 4 MiB at a 512-aligned `x-ms-range` or `Range` and accepts `Content-MD5` or `x-ms-content-crc64`. `clear` takes `Content-Length: 0` and any aligned range. `x-ms-if-sequence-number-le`, `-lt`, and `-eq` must all hold or the answer is 412 `SequenceNumberConditionNotMet`. A misaligned or out-of-bounds range is 416 `InvalidPageRange`. Responses carry `x-ms-blob-sequence-number`.
+- **Get Page Ranges.** `GET comp=pagelist` lists allocated ranges, optionally inside an `x-ms-range` or `Range` window, with `maxresults` and `marker` paging through `NextMarker`. Touching allocated ranges are reported as one range. `snapshot` and `prevsnapshot` answer `NotImplemented` until snapshots exist, so no clear ranges are reported.
+- **Resize and sequence number.** Set Blob Properties with `x-ms-blob-content-length` resizes (shrinking discards trailing data, growing adds a hole). `x-ms-sequence-number-action` is `max`, `update`, or `increment` with `x-ms-blob-sequence-number` for the first two. Either can accompany content properties.
+- **Append Block.** Up to 4 MiB and 50,000 blocks, with `Content-MD5` or crc64, `x-ms-blob-condition-maxsize` (412 `MaxBlobSizeConditionNotMet`), and `x-ms-blob-condition-appendpos` (412 `AppendPositionConditionNotMet`). The 201 response reports `x-ms-blob-append-offset` and `x-ms-blob-committed-block-count`. The 50,001st block is 409 `BlockCountExceedsLimit`. Zero-length blocks are rejected.
+- **Seal.** `PUT comp=seal` (optionally with `x-ms-blob-condition-appendpos`) makes an append blob read-only: later appends are 409 `BlobIsSealed`, while metadata changes and delete still work. Sealing a sealed blob changes nothing.
+- **Reads and listings.** Get Blob streams page blob holes as zeros and returns an append blob as its concatenated blocks, both with range support. Get and Head report `x-ms-blob-type`, `x-ms-blob-sequence-number` (page), and `x-ms-blob-committed-block-count` and `x-ms-blob-sealed` (append, sealed only when true). List Blobs reports `BlobType`, `Content-Length` (the logical length), `x-ms-blob-sequence-number`, and `Sealed`. Page blobs show an access tier only after one was set, and the tiers `P4` to `P80` are accepted only on page blobs.
+- **Wrong blob type.** Put Block, Put Block List, and Get Block List on a page or append blob, Put Page, Get Page Ranges, resize, and sequence changes on other types, and Append Block and Seal on other types answer 409 `InvalidBlobType`.
+- **From URL and copy.** Put Page From URL and Append Block From URL read a range of a same-instance source with the same authorization as Copy Blob; Put Page From URL needs `x-ms-source-range` and a `Content-Length: 0` request. Copy Blob of a page or append blob keeps the type, sequence number, and committed block count, shares the source's extents (so holes stay holes), and leaves the copy unsealed.
+
+Known differences: `x-ms-source-content-md5`, `x-ms-seal-blob`, and incremental copy are not implemented. Put Blob From URL and Put Block From URL accept only block blob destinations, and a page blob source is read densely (holes become zeros), so reading a very large sparse source this way is costly. Premium tiers are stored and reported but do not change behavior. A partly overwritten extent stays allocated until every range using it is replaced, so storage can exceed the live data. Snapshot and version interaction arrives with [ADR-0018](../adr.d/0018-model-snapshots-versions-and-copy-as-immutable-references.md).
 
 ### Properties, metadata, conditions
 
@@ -32,7 +48,7 @@ Blob and container leases follow [ADR-0017](../adr.d/0017-model-leases-as-a-cloc
 
 ### Copy
 
-Copy Blob, Put Blob From URL, and Put Block From URL accept **same-instance sources only**: a path-style (`http://127.0.0.1:10000/{account}/…`) or host-style URL on this listener. A URL for any other host answers `NotImplemented`, which the manifest records as a known difference. Copies complete synchronously with `x-ms-copy-status: success` and an `x-ms-copy-id`, so Abort Copy always answers `NoPendingCopyOperation` (or `CopyIdMismatch`). The source is readable with the caller's Shared Key inside the same account, with a read SAS on the source URL, or through public access; otherwise the request answers 403 `CannotVerifyCopySource`. Copies duplicate the bytes for now; sharing extents arrives with snapshots ([ADR-0018](../adr.d/0018-model-snapshots-versions-and-copy-as-immutable-references.md)). Note that `az storage blob copy start --source-blob` builds a `core.windows.net` source URL, so use `--source-uri` with the local URL.
+Copy Blob, Put Blob From URL, and Put Block From URL accept **same-instance sources only**: a path-style (`http://127.0.0.1:10000/{account}/…`) or host-style URL on this listener. A URL for any other host answers `NotImplemented`, which the manifest records as a known difference. Copies complete synchronously with `x-ms-copy-status: success` and an `x-ms-copy-id`, so Abort Copy always answers `NoPendingCopyOperation` (or `CopyIdMismatch`). The source is readable with the caller's Shared Key inside the same account, with a read SAS on the source URL, or through public access; otherwise the request answers 403 `CannotVerifyCopySource`. Copies of block blobs duplicate the bytes for now; page and append blob copies already share extents (see above), and block blob sharing arrives with snapshots ([ADR-0018](../adr.d/0018-model-snapshots-versions-and-copy-as-immutable-references.md)). Note that `az storage blob copy start --source-blob` builds a `core.windows.net` source URL, so use `--source-uri` with the local URL.
 
 ## Authentication
 
@@ -55,7 +71,7 @@ Both addressing styles work: `http://127.0.0.1:10000/{account}/{container}/{blob
 ## Storage and configuration
 
 - `serve --location ./data` uses SQLite WAL for metadata and filesystem extents for payloads. Uploads are staged, checked, and synced before publishing the metadata reference. Startup reclaims unreferenced files from interrupted writes. Keep the directory private to one process and use a local filesystem. Opening a directory created by an earlier release adds the new columns and tables with defaults (`PRAGMA user_version`); old blobs keep their ETags, and a container keeps its ETag until it changes.
-- `serve --in-memory` keeps storage off disk, discards it at shutdown, and defaults to 64 MiB of committed and staged payloads (`--memory-limit` in bytes).
+- `serve --in-memory` keeps storage off disk, discards it at shutdown, and defaults to 64 MiB of committed and staged payloads (`--memory-limit` in bytes). Page and append blobs count the bytes of their extents, not their logical length, so a sparse 8 TiB page blob costs nothing until written.
 - Per-request limits, all in bytes: `--max-blob-bytes` for a single Put Blob request (default 256 MiB, up to 5000 MiB), `--max-block-bytes` for Put Block (default 5000 MiB), and `--max-assembled-blob-bytes` for a committed block blob (default 512 MiB).
 - `--port`, `--admin-port`, and `--bind` select the listeners. Use `--config` for a TOML file; flags override `AZUIFER_*` environment values, then file values, then defaults. Run `cargo run --locked -- config validate` with the same options to validate settings.
 - `--skip-api-version-check` is described under Authentication. Omit it for strict mode, or use `--skip-api-version-check=false` to override a setting from the environment or file.
@@ -68,7 +84,8 @@ Blob names are case-sensitive database keys, not filenames. The [HTTP suite](../
 ## Tests
 
 - The [HTTP suite](../../tests/blob_http.rs) drives the built binary for every operation above: status, headers, body, and resulting state, including lease and SAS tables run on the test clock, anonymous access, CORS, copy, host-style addressing, restart persistence, and opening a data directory from the previous schema.
-- The [Python SDK script](../../tests/blob_sdk.py) runs the official `azure-storage-blob` client against a running Azuifer: containers, properties, metadata, leases, SAS tokens the SDK generates, stored policies, anonymous access, delimiter listings, copy, and service properties. Start Azuifer with `--skip-api-version-check --test-clock`, then run `python tests/blob_sdk.py`.
+- The [page and append blob suite](../../tests/blob_page_append_http.rs) drives the built binary for page and append blobs: sparse reads, alignment, sequence numbers, resize, append conditions and sealing, copy and from-URL sources, type errors, quota, restart, and interrupted writes.
+- The [Python SDK script](../../tests/blob_sdk.py) runs the official `azure-storage-blob` client against a running Azuifer: containers, properties, metadata, leases, SAS tokens the SDK generates, stored policies, anonymous access, delimiter listings, copy, and service properties. Start Azuifer with `--skip-api-version-check --test-clock`, then run `python tests/blob_sdk.py`. [tests/blob_page_append_sdk.py](../../tests/blob_page_append_sdk.py) does the same for `PageBlobClient` and `AppendBlobClient`.
 
 ## Azure CLI
 

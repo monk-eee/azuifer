@@ -63,16 +63,39 @@ CREATE TABLE IF NOT EXISTS account_settings (
     account TEXT NOT NULL PRIMARY KEY, service_properties TEXT NOT NULL
 ) STRICT;";
 
-const MIGRATIONS: [&str; 2] = [V1, super::namespace::SCHEMA];
+/// Version 4: page and append blobs (ADR-0015). `blob_type` is 0 block, 1 page, 2
+/// append. `blob_ranges` maps blob offsets to immutable extents; `blob_extents`
+/// holds the extent bytes of an in-memory instance.
+const V4: &str = "
+ALTER TABLE blobs ADD COLUMN blob_type INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE blobs ADD COLUMN sequence_number INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE blobs ADD COLUMN append_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE blobs ADD COLUMN sealed INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS blob_ranges (
+    account TEXT NOT NULL, container TEXT NOT NULL, name TEXT NOT NULL,
+    offset INTEGER NOT NULL, length INTEGER NOT NULL,
+    extent BLOB NOT NULL, extent_offset INTEGER NOT NULL,
+    PRIMARY KEY (account, container, name, offset),
+    FOREIGN KEY (account, container, name) REFERENCES blobs (account, container, name)
+        ON DELETE CASCADE ON UPDATE CASCADE
+) STRICT;
+CREATE INDEX IF NOT EXISTS blob_ranges_extent ON blob_ranges (extent);
+CREATE TABLE IF NOT EXISTS blob_extents (
+    id BLOB NOT NULL PRIMARY KEY, length INTEGER NOT NULL, bytes BLOB NOT NULL
+) STRICT;";
+
+/// Each migration is keyed by the `PRAGMA user_version` it leaves behind. Numbers
+/// need not be consecutive here: branches that add migrations in parallel reserve
+/// their own number, and a database applies every migration above its version.
+const MIGRATIONS: &[(i64, &str)] = &[(1, V1), (2, super::namespace::SCHEMA), (4, V4)];
 
 pub(super) fn migrate(db: &mut Connection) -> rusqlite::Result<()> {
     db.execute_batch(BASE)?;
     let current: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    let applied = usize::try_from(current).unwrap_or(0);
-    for (index, migration) in MIGRATIONS.iter().enumerate().skip(applied) {
+    for (version, migration) in MIGRATIONS.iter().filter(|(version, _)| *version > current) {
         let tx = db.transaction()?;
         tx.execute_batch(migration)?;
-        tx.execute_batch(&format!("PRAGMA user_version = {}", index + 1))?;
+        tx.execute_batch(&format!("PRAGMA user_version = {version}"))?;
         tx.commit()?;
     }
     Ok(())
@@ -108,6 +131,37 @@ mod tests {
         let version: i64 = db
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 4);
+    }
+
+    #[test]
+    fn page_and_append_columns_and_tables_arrive_with_their_migration() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.pragma_update(None, "foreign_keys", true).unwrap();
+        db.execute_batch(BASE).unwrap();
+        db.execute_batch(V1).unwrap();
+        db.pragma_update(None, "user_version", 1).unwrap();
+        db.execute_batch(
+            "INSERT INTO containers (account, name, id, modified) VALUES ('acct', 'box', x'01', 5);
+             INSERT INTO blobs (account, container, name, id, modified, length, content_type, md5, metadata)
+             VALUES ('acct', 'box', 'a', x'02', 7, 3, 'text/plain', '', '{}');",
+        )
+        .unwrap();
+        migrate(&mut db).unwrap();
+        db.execute_batch("INSERT INTO blob_ranges VALUES ('acct', 'box', 'a', 0, 3, x'0a', 0);")
+            .unwrap();
+        let (kind, sequence, count, sealed): (i64, i64, i64, i64) = db
+            .query_row(
+                "SELECT blob_type, sequence_number, append_count, sealed FROM blobs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((kind, sequence, count, sealed), (0, 0, 0, 0));
+        db.execute("DELETE FROM blobs", []).unwrap();
+        let ranges: i64 = db
+            .query_row("SELECT COUNT(*) FROM blob_ranges", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(ranges, 0, "deleting a blob drops its ranges");
     }
 }

@@ -46,6 +46,9 @@ impl Store {
                 None => 0..info.length.0,
             };
             let length = window.end - window.start;
+            if !info.kind.is_block() {
+                return super::pages::source_bytes(db, mode, &key, info, window);
+            }
             let mut hasher = Hasher::new();
             let data = match mode {
                 Mode::Disk { extents, .. } => {

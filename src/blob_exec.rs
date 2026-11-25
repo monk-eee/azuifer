@@ -25,6 +25,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::StreamExt as _;
 use uuid::Uuid;
 
+mod page;
+
 /// Facts about the request that operations need beyond their typed arguments.
 pub(crate) struct Context<'a> {
     pub(crate) host: Option<&'a str>,
@@ -199,12 +201,20 @@ pub(crate) async fn execute(
                 PathRead::Directory(entity) => wire::directory_response(StatusCode::OK, entity),
             }
         }
-        Operation::SetBlobProperties(key, headers, md5, replace, guard) => entity_response(
-            StatusCode::OK,
-            store
-                .set_blob_properties(key, headers, md5, replace, guard)
-                .await?,
-        ),
+        Operation::SetBlobProperties(key, headers, md5, replace, guard, change) => {
+            let (entity, sequence) = store
+                .set_blob_properties(key, headers, md5, replace, guard, change)
+                .await?;
+            let mut response = entity_response(StatusCode::OK, entity)?;
+            if let Some(sequence) = sequence {
+                set(
+                    response.headers_mut(),
+                    "x-ms-blob-sequence-number",
+                    &sequence.to_string(),
+                )?;
+            }
+            Ok(response)
+        }
         Operation::SetBlobMetadata(key, metadata, guard) => {
             let entity = store.set_blob_metadata(key, metadata, guard).await?;
             let mut response = entity_response(StatusCode::OK, entity)?;
@@ -227,7 +237,13 @@ pub(crate) async fn execute(
         }
         Operation::CopyBlob(key, options, request) => {
             let replace_metadata = request.replace_metadata;
-            let (source, display) = read_source(app, ctx, request).await?;
+            let resolved = resolve_source(app, ctx, &request).await?;
+            if let Some(response) =
+                page::copy_ranges(app, &key, &options, &resolved, &request).await?
+            {
+                return Ok(response);
+            }
+            let (source, display) = read_resolved(app, resolved, request).await?;
             let write = copy_write(options, &source.info, replace_metadata, display);
             let id = write
                 .copy
@@ -248,6 +264,7 @@ pub(crate) async fn execute(
             store.delete_path(key, guard).await?;
             Ok(empty(StatusCode::ACCEPTED))
         }
+        Operation::Page(operation) => page::execute(app, operation, body, ctx).await,
     }
 }
 
@@ -261,6 +278,16 @@ async fn read_source(
     ctx: &Context<'_>,
     request: SourceRequest,
 ) -> Result<(SourceBytes, String)> {
+    let resolved = resolve_source(app, ctx, &request).await?;
+    read_resolved(app, resolved, request).await
+}
+
+/// Resolves a copy source on this listener and checks the caller may read it.
+async fn resolve_source(
+    app: &App,
+    ctx: &Context<'_>,
+    request: &SourceRequest,
+) -> Result<blob_copy::Resolved> {
     let resolved = request.url.resolve(app.address.port(), ctx.host)?;
     blob_copy::authorize_source(
         &app.store,
@@ -271,6 +298,14 @@ async fn read_source(
         ctx.connection,
     )
     .await?;
+    Ok(resolved)
+}
+
+async fn read_resolved(
+    app: &App,
+    resolved: blob_copy::Resolved,
+    request: SourceRequest,
+) -> Result<(SourceBytes, String)> {
     let source = app
         .store
         .read_source(resolved.key.clone(), request.guard, request.range)

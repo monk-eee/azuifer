@@ -21,6 +21,8 @@ use percent_encoding::percent_decode_str;
 use quick_xml::{Reader, events::Event};
 use std::{collections::HashMap, time::SystemTime};
 
+mod page;
+
 const MAX_BLOCK_LIST_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_XML_BODY_BYTES: u64 = 1024 * 1024;
 const MAX_COMMITTED_BLOCKS: usize = 50_000;
@@ -128,13 +130,21 @@ pub(crate) enum Operation {
     GetBlockList(BlobKey, BlockListKind, Guard),
     ReadBlob(BlobKey, BlobRead),
     BlobMetadata(BlobKey, Guard),
-    SetBlobProperties(BlobKey, ContentHeaders, Option<[u8; 16]>, bool, Guard),
+    SetBlobProperties(
+        BlobKey,
+        ContentHeaders,
+        Option<[u8; 16]>,
+        bool,
+        Guard,
+        crate::blob_page::PropertyChange,
+    ),
     SetBlobMetadata(BlobKey, Metadata, Guard),
     SetBlobTier(BlobKey, AccessTier, Option<LeaseId>),
     LeaseBlob(BlobKey, LeaseAction, Conditions),
     CopyBlob(BlobKey, BlobWrite, SourceRequest),
     AbortCopy(BlobKey, String, Option<LeaseId>),
     DeleteBlob(BlobKey, Guard),
+    Page(crate::blob_page::PageOperation),
 }
 
 pub(crate) struct UploadOptions {
@@ -303,6 +313,7 @@ impl Operation {
             | Self::LeaseBlob(..)
             | Self::AbortCopy(..) => WRITE_BLOB,
             Self::DeleteBlob(..) => DELETE_BLOB,
+            Self::Page(operation) => operation.need(),
         }
     }
 }
@@ -481,6 +492,9 @@ impl Request<'_> {
         }
         if restype.is_some() {
             return Err(Error::Unsupported);
+        }
+        if let Some(operation) = self.page_operation(&key)? {
+            return Ok(Operation::Page(operation));
         }
         Ok(match (self.method, comp) {
             (&Method::PUT, None) if self.headers.contains_key("x-ms-copy-source") => {
@@ -661,7 +675,16 @@ impl Request<'_> {
                 Operation::DeleteBlob(key, guard()?)
             }
             (&Method::PUT, Some("properties")) => {
-                self.check(&["comp"], &[CONDITIONS, LEASE, BLOB_PROPERTIES], false)?;
+                self.check(
+                    &["comp"],
+                    &[
+                        CONDITIONS,
+                        LEASE,
+                        BLOB_PROPERTIES,
+                        crate::blob_page::PROPERTY_HEADERS,
+                    ],
+                    false,
+                )?;
                 let (headers, replace) = content_headers(self.headers, false)?;
                 Operation::SetBlobProperties(
                     key,
@@ -669,6 +692,7 @@ impl Request<'_> {
                     decode_hash(header(self.headers, "x-ms-blob-content-md5")?)?,
                     replace,
                     guard()?,
+                    crate::blob_page::PropertyChange::parse(self.headers)?,
                 )
             }
             (&Method::PUT, Some("metadata")) => {

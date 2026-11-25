@@ -1,10 +1,11 @@
 use super::{
     Content, ContentSource, Mode, Store, Uploaded, UploadedData, blob, blob_params,
     blobs::guard_write, check_memory_quota, container, db_error, internal, io_error, namespace,
-    open_extent, read_memory_slice, reclaim, remove_staged, row_uint, save_blob, sqlite_int,
-    staging_file,
+    open_extent, pages::block_length, read_memory_slice, reclaim, remove_staged, row_uint,
+    save_blob, sqlite_int, staging_file,
 };
 use crate::{
+    blob_page::require_block,
     conditions::Guard,
     domain::{
         BlobKey, BlobWrite, BlockId, BlockList, BlockListKind, BlockSelection, BlockSource,
@@ -45,9 +46,11 @@ impl Store {
                 namespace::validate_staged_path(&tx, &key)?;
             }
             match blob(&tx, &key, now)? {
-                Some(row) => row
-                    .lease
-                    .check(lease, LeaseNeed::Required, LeaseOwner::Blob, now)?,
+                Some(row) => {
+                    require_block(row.info.kind)?;
+                    row.lease
+                        .check(lease, LeaseNeed::Required, LeaseOwner::Blob, now)?;
+                }
                 None if lease.is_some() => return Err(Error::LeaseNotPresentBlob),
                 None => (),
             }
@@ -100,6 +103,9 @@ impl Store {
             }
             let old = blob(&tx, &key, now)?;
             guard_write(&options.guard, old.as_ref(), true, now)?;
+            if let Some(old) = &old {
+                require_block(old.info.kind)?;
+            }
             let staged: HashMap<_, _> = staged(&tx, &key)?.into_iter().collect();
             let committed: HashMap<_, _> = if let Some(old) = &old {
                 committed(&tx, &key, old.info.entity.id, old.info.length.0)?
@@ -126,7 +132,7 @@ impl Store {
                 resolved.push((id, offset, range));
             }
             let retired = staged.values().map(|block| block.length).sum::<u64>()
-                + old.as_ref().map_or(0, |row| row.info.length.0);
+                + old.as_ref().map_or(0, |row| block_length(&row.info));
             check_memory_quota(&tx, mode, retired, total)?;
             let mut assembled = match mode {
                 Mode::Disk { extents, .. } => {
@@ -197,6 +203,9 @@ impl Store {
                 return Err(Error::BlobMissing);
             }
             let blob = row.as_ref().map(|row| &row.info);
+            if let Some(blob) = blob {
+                require_block(blob.kind)?;
+            }
             if let Some(row) = &row {
                 row.lease
                     .check(guard.lease, LeaseNeed::Optional, LeaseOwner::Blob, now)?;

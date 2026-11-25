@@ -1,10 +1,11 @@
 use super::{
     BlobRow, Content, ContentSource, Download, Mode, PathRead, Payload, Store, Uploaded, blob,
     blob_params, check_memory_quota, container, db_error, internal, io_error, namespace,
-    new_entity, open_extent, read_memory_slice, reclaim, remove_staged, require_blob, save_blob,
-    sqlite_int, write_lease,
+    new_entity, open_extent, pages, read_memory_slice, reclaim, remove_staged, require_blob,
+    save_blob, sqlite_int, write_lease,
 };
 use crate::{
+    blob_page::PropertyChange,
     checksum::Hasher,
     conditions::{Conditions, Guard},
     domain::{
@@ -44,7 +45,24 @@ pub(super) fn guard_write(
         .check(old.map(|row| row.info.entity), false)
 }
 
-fn touch(db: &rusqlite::Connection, key: &BlobKey, now: i64) -> Result<Entity> {
+/// Creates the missing parent directories of a new blob inside the writer's
+/// transaction, before its content is published, and rejects names that would
+/// shadow a directory or sit under a file. Every writer of a new blob calls this
+/// where Put Blob checks its guard; flat namespaces have no parents.
+pub(super) fn ensure_parents(
+    tx: &rusqlite::Connection,
+    key: &BlobKey,
+    hierarchical: bool,
+    now: i64,
+) -> Result<()> {
+    if hierarchical {
+        namespace::prepare_file(tx, key, now)
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) fn touch(db: &rusqlite::Connection, key: &BlobKey, now: i64) -> Result<Entity> {
     let entity = new_entity(now)?;
     db.execute(
         "UPDATE blobs SET etag=?1, modified=?2 WHERE account=?3 AND container=?4 AND name=?5",
@@ -63,6 +81,7 @@ fn touch(db: &rusqlite::Connection, key: &BlobKey, now: i64) -> Result<Entity> {
 fn payload_bytes(payload: Payload, size: u64) -> Result<Vec<u8>> {
     match payload {
         Payload::Memory(bytes) => Ok(bytes),
+        Payload::Ranges(body) => body.into_vec(),
         Payload::Disk(file) => {
             let mut bytes = Vec::new();
             file.take(size).read_to_end(&mut bytes).map_err(io_error)?;
@@ -90,11 +109,14 @@ impl Store {
             }
             let old = blob(&tx, &key, now)?;
             guard_write(&options.guard, old.as_ref(), true, now)?;
-            let discard = remove_staged(&tx, &key)?;
+            let mut discard = remove_staged(&tx, &key)?;
+            if let Some(old) = &old {
+                discard.extend(pages::retire(&tx, mode, &key, old.info.kind)?);
+            }
             check_memory_quota(
                 &tx,
                 mode,
-                old.as_ref().map_or(0, |row| row.info.length.0),
+                old.as_ref().map_or(0, |row| pages::block_length(&row.info)),
                 upload.length.0,
             )?;
             let content = Content {
@@ -150,7 +172,16 @@ impl Store {
                 .map(|range| range.resolve(info.length))
                 .transpose()?;
             let mut payload = None;
-            if options.with_body {
+            if options.with_body && !info.kind.is_block() {
+                let window = range.clone().unwrap_or(0..info.length.0);
+                payload = Some(Payload::Ranges(pages::open_body(
+                    db,
+                    mode,
+                    &key,
+                    info.length.0,
+                    window,
+                )?));
+            } else if options.with_body {
                 let offset = range.as_ref().map_or(0, |range| range.start);
                 payload = Some(match mode {
                     Mode::Disk { extents, .. } => {
@@ -215,6 +246,7 @@ impl Store {
                 let old = require_blob(&tx, &key, now)?;
                 guard_write(&guard, Some(&old), false, now)?;
                 let mut discard = remove_staged(&tx, &key)?;
+                discard.extend(pages::retire(&tx, mode, &key, old.info.kind)?);
                 tx.execute("DELETE FROM blobs WHERE id=?1", [old.info.entity.id])
                     .map_err(db_error)?;
                 discard.push(old.info.entity.id);
@@ -230,7 +262,9 @@ impl Store {
     }
 
     /// Set Blob Properties. When `replace` is true every content property is
-    /// overwritten, so properties absent from the request are cleared.
+    /// overwritten, so properties absent from the request are cleared. A page
+    /// blob's `change` resizes it or updates its sequence number; the result is
+    /// the blob's sequence number when it is a page blob.
     pub(crate) async fn set_blob_properties(
         &self,
         key: BlobKey,
@@ -238,11 +272,13 @@ impl Store {
         md5: Option<[u8; 16]>,
         replace: bool,
         guard: Guard,
-    ) -> Result<Entity> {
-        self.run(move |db, _, now| {
+        change: PropertyChange,
+    ) -> Result<(Entity, Option<u64>)> {
+        self.run(move |db, mode, now| {
             let tx = db.transaction().map_err(db_error)?;
             let old = require_blob(&tx, &key, now)?;
             guard_write(&guard, Some(&old), false, now)?;
+            let (sequence, free) = pages::apply_change(&tx, mode, &key, &old.info, change)?;
             let entity = touch(&tx, &key, now)?;
             if replace {
                 let [account, container, name] = blob_params(&key);
@@ -267,7 +303,8 @@ impl Store {
                 .map_err(db_error)?;
             }
             tx.commit().map_err(db_error)?;
-            Ok(entity)
+            pages::discard(mode, &free);
+            Ok((entity, sequence))
         })
         .await
     }
@@ -307,6 +344,7 @@ impl Store {
     ) -> Result<bool> {
         self.run(move |db, _, now| {
             let old = require_blob(db, &key, now)?;
+            crate::blob_page::check_tier(old.info.kind, Some(tier))?;
             old.lease
                 .check(lease, LeaseNeed::Optional, LeaseOwner::Blob, now)?;
             let [account, container, name] = blob_params(&key);

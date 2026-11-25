@@ -1092,8 +1092,8 @@ fn rejected_requests_never_change_the_stored_blob() {
     }
     error(
         server.request(Method::PUT, BLOB, &[("x-ms-blob-type", "PageBlob")], b""),
-        501,
-        "NotImplemented",
+        400,
+        "MissingRequiredHeader",
     );
     error(
         server.request(Method::PUT, BLOB, &[], b"not a typed upload"),

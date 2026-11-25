@@ -1,4 +1,7 @@
-use super::{BLOB_COLUMNS, Store, blob_row, containers::require_container, db_error, entity_row};
+use super::{
+    BLOB_COLUMN_COUNT, BLOB_COLUMNS, Store, blob_row, containers::require_container, db_error,
+    entity_row,
+};
 use crate::{
     domain::{BlobListing, Include, ListEntry, ListRequest, Result},
     lease::{LeaseId, LeaseNeed, LeaseOwner},
@@ -28,8 +31,8 @@ fn query(
                 limit
             ],
             |row| {
-                let kind: i64 = row.get(22)?;
-                let name = row.get(21)?;
+                let kind: i64 = row.get(BLOB_COLUMN_COUNT + 1)?;
+                let name = row.get(BLOB_COLUMN_COUNT)?;
                 if kind == 2 {
                     Ok(ListEntry::Directory(name, entity_row(row)?))
                 } else {
@@ -53,7 +56,7 @@ fn listing_sql(uncommitted: bool, directories: bool) -> String {
     if directories {
         sql.push_str(
             " UNION ALL SELECT id, modified, etag, modified, 0, '', '', '', '', '', '', '{}', '',
-                       0, NULL, 0, 0, 0, '', '', 0, name, 2
+                       0, NULL, 0, 0, 0, '', '', 0, 0, 0, 0, 0, name, 2
               FROM directories WHERE account=?1 AND container=?2 AND name>?3 AND instr(name, ?4)=1",
         );
     }
@@ -61,7 +64,7 @@ fn listing_sql(uncommitted: bool, directories: bool) -> String {
         sql.push_str(
             " UNION ALL
          SELECT randomblob(16), 0, randomblob(16), 0, 0, 'application/octet-stream', '', '', '', '', '',
-                '{}', '', 0, NULL, 0, 0, 0, '', '', 0, name, 0
+                '{}', '', 0, NULL, 0, 0, 0, '', '', 0, 0, 0, 0, 0, name, 0
          FROM staged_blocks s
          WHERE account=?1 AND container=?2 AND name>?3 AND instr(name, ?4)=1
            AND NOT EXISTS (SELECT 1 FROM blobs b

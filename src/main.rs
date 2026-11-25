@@ -5,6 +5,7 @@ mod blob_auth;
 mod blob_copy;
 mod blob_cors;
 mod blob_exec;
+mod blob_page;
 mod blob_sas;
 mod checksum;
 mod clock;
@@ -17,8 +18,6 @@ mod files;
 mod lease;
 mod protocol;
 mod queue;
-// The range map awaits its Blob and DFS consumers (ADR-0015); drop this allow when used.
-#[allow(dead_code)]
 mod ranges;
 mod respond;
 mod sas;

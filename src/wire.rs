@@ -110,6 +110,7 @@ pub(crate) fn download_response(download: Download) -> Result<(Response, Metadat
             }))
         }
         Some(Payload::Memory(bytes)) => Body::from(bytes),
+        Some(Payload::Ranges(body)) => Body::from_stream(body.into_stream()),
         None => Body::empty(),
     };
     Ok((response, info.metadata))

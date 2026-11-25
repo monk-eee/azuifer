@@ -1,6 +1,7 @@
 //! Maps typed Blob outcomes to Azure responses: headers, XML bodies, and errors.
 
 use crate::{
+    blob_page::BlobKind,
     blob_sas::Overrides,
     domain::{
         BlobInfo, BlobListing, ContainerInfo, Entity, Error, Include, ListEntry, Metadata, Page,
@@ -139,7 +140,8 @@ fn blob_headers(
         &pick(over.cache_control.as_ref(), &info.headers.cache_control),
     )?;
     set(headers, "x-ms-creation-time", &http_date(info.created)?)?;
-    set(headers, "x-ms-blob-type", "BlockBlob")?;
+    set(headers, "x-ms-blob-type", info.kind.name())?;
+    kind_headers(headers, info.kind)?;
     set(headers, "x-ms-server-encrypted", "true")?;
     headers.insert("accept-ranges", HeaderValue::from_static("bytes"));
     lease_headers(headers, info.lease)?;
@@ -152,10 +154,11 @@ fn blob_headers(
                 &http_date(changed)?,
             )?;
         }
-        None => {
+        None if info.kind.is_block() => {
             set(headers, "x-ms-access-tier", "Hot")?;
             set(headers, "x-ms-access-tier-inferred", "true")?;
         }
+        None => (),
     }
     if let Some(copy) = &info.copy {
         set(headers, "x-ms-copy-id", &copy.id)?;
@@ -219,9 +222,31 @@ pub(crate) fn download_response(
             }))
         }
         Some(Payload::Memory(bytes)) => Body::from(bytes),
+        Some(Payload::Ranges(body)) => Body::from_stream(body.into_stream()),
         None => Body::empty(),
     };
     Ok(response)
+}
+
+/// The type-specific headers of page and append blobs.
+pub(crate) fn kind_headers(headers: &mut HeaderMap, kind: BlobKind) -> Result<()> {
+    match kind {
+        BlobKind::Block => (),
+        BlobKind::Page { sequence } => {
+            set(headers, "x-ms-blob-sequence-number", &sequence.to_string())?;
+        }
+        BlobKind::Append { committed, sealed } => {
+            set(
+                headers,
+                "x-ms-blob-committed-block-count",
+                &committed.to_string(),
+            )?;
+            if sealed {
+                set(headers, "x-ms-blob-sealed", "true")?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Get Blob Metadata: the ETag, lease state, and user metadata.
@@ -407,16 +432,25 @@ fn blob_properties(xml: &mut Xml, info: &BlobInfo, copy: bool, hierarchical: boo
     xml.element("Content-MD5", info.md5.as_deref().unwrap_or_default());
     xml.element("Cache-Control", &info.headers.cache_control);
     xml.element("Content-Disposition", &info.headers.disposition);
-    xml.element("BlobType", "BlockBlob");
+    xml.element("BlobType", info.kind.name());
+    match info.kind {
+        BlobKind::Block => (),
+        BlobKind::Page { sequence } => {
+            xml.element("x-ms-blob-sequence-number", &sequence.to_string());
+        }
+        BlobKind::Append { sealed: true, .. } => xml.element("Sealed", "true"),
+        BlobKind::Append { .. } => (),
+    }
     match info.tier {
         Some((tier, changed)) => {
             xml.element("AccessTier", tier.name());
             xml.element("AccessTierChangeTime", &http_date(changed)?);
         }
-        None => {
+        None if info.kind.is_block() => {
             xml.element("AccessTier", "Hot");
             xml.element("AccessTierInferred", "true");
         }
+        None => (),
     }
     lease_elements(xml, info.lease);
     if copy && let Some(copy) = &info.copy {
@@ -717,6 +751,7 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
             "CorsPreflightFailure",
             "CORS is not enabled or no matching rule was found for this request.",
         ),
+        Error::Page(error) => error.describe(),
     })
 }
 
