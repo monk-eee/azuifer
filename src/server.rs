@@ -1,21 +1,26 @@
 use crate::{
-    checksum::{Checksums, Hasher},
+    address,
+    blob_auth::{self, Authorization},
+    blob_cors,
+    blob_exec::{self, Context},
+    blob_sas::Connection,
+    clock::Clock,
     config::{Config, Service},
     dfs,
-    domain::{BlobInfo, BlockList, Entity, Error, Metadata, Page, Result},
+    domain::{AccountName, Error, Result},
     files,
-    protocol::{self, Operation, UploadOptions},
+    protocol::{self, Operation},
     queue,
-    store::{Download, Store, Upload, Uploaded},
+    respond::{self, error_response, set},
+    store::Store,
     table,
-    wire::{self, Xml, empty, entity_headers, entity_response, modified, set},
 };
 use anyhow::Context as _;
 use axum::{
     Router,
-    body::{Body, to_bytes},
-    extract::{Request, State},
-    http::{HeaderValue, Method, StatusCode},
+    body::Body,
+    extract::{ConnectInfo, Request, State},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, request::Parts},
     response::Response,
     routing::get,
 };
@@ -25,12 +30,13 @@ use tokio::{net::TcpListener, sync::Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-struct App {
-    config: Arc<Config>,
-    version: HeaderValue,
-    store: Store,
-    address: SocketAddr,
-    permits: Arc<Semaphore>,
+pub(crate) struct App {
+    pub(crate) config: Arc<Config>,
+    pub(crate) version: HeaderValue,
+    pub(crate) store: Store,
+    pub(crate) address: SocketAddr,
+    pub(crate) permits: Arc<Semaphore>,
+    pub(crate) clock: Clock,
 }
 
 pub(crate) async fn serve(config: Config, shutdown_on_stdin_eof: bool) -> anyhow::Result<()> {
@@ -39,14 +45,17 @@ pub(crate) async fn serve(config: Config, shutdown_on_stdin_eof: bool) -> anyhow
         .await
         .context("could not bind the admin listener")?;
     let admin_address = admin.local_addr()?;
+    let clock = Clock::new();
     let namespace =
         if config.services.contains(&Service::Blob) || config.services.contains(&Service::Dfs) {
             let location = config.location.clone();
             let memory_limit = config.memory_limit;
-            let store =
-                tokio::task::spawn_blocking(move || Store::open(location.as_deref(), memory_limit))
-                    .await
-                    .context("storage initialization did not complete")??;
+            let store_clock = clock.clone();
+            let store = tokio::task::spawn_blocking(move || {
+                Store::open(location.as_deref(), memory_limit, store_clock)
+            })
+            .await
+            .context("storage initialization did not complete")??;
             Some((store, Arc::new(Semaphore::new(16))))
         } else {
             None
@@ -73,7 +82,13 @@ pub(crate) async fn serve(config: Config, shutdown_on_stdin_eof: bool) -> anyhow
                     .as_ref()
                     .context("shared namespace store was not started")?;
                 if service == Service::Blob {
-                    blob_router(config.clone(), address, store.clone(), permits.clone())?
+                    blob_router(
+                        config.clone(),
+                        address,
+                        store.clone(),
+                        permits.clone(),
+                        clock.clone(),
+                    )?
                 } else {
                     dfs::router(config.clone(), store.clone(), permits.clone())?
                 }
@@ -116,6 +131,7 @@ fn blob_router(
     address: SocketAddr,
     store: Store,
     permits: Arc<Semaphore>,
+    clock: Clock,
 ) -> anyhow::Result<Router> {
     let version = HeaderValue::from_str(config.api_version.as_str())
         .context("invalid HTTP version in the protocol manifest")?;
@@ -125,6 +141,7 @@ fn blob_router(
         store,
         address,
         permits,
+        clock,
     });
     Ok(Router::new().fallback(dispatch).with_state(app))
 }
@@ -165,415 +182,186 @@ async fn dispatch(State(app): State<Arc<App>>, request: Request) -> Response {
     let request_id = Uuid::new_v4().simple().to_string();
     let (parts, body) = request.into_parts();
     let head = parts.method == Method::HEAD;
-    let mut response = match app.permits.clone().try_acquire_owned() {
-        Ok(permit) => match protocol::parse(&parts, &app.config) {
-            Ok(parsed) => {
-                if parsed.requested_version != app.config.api_version {
-                    tracing::info!(
-                        %request_id,
-                        requested_api_version = parsed.requested_version.as_str(),
-                        effective_api_version = app.config.api_version.as_str(),
-                        "using the configured Blob protocol baseline"
-                    );
-                }
-                match execute(&app, parsed.operation, body).await {
-                    Ok(mut response) => {
-                        if parts.method == Method::GET
-                            && response.headers().contains_key("x-ms-blob-type")
-                        {
-                            wire::retain_download_permit(&mut response, permit);
-                        }
-                        response
+    let client_request_id = parts.headers.get("x-ms-client-request-id").cloned();
+    let mut response = if app.config.test_clock && parts.uri.path().starts_with("/_azuifer/") {
+        clock_endpoint(&app, &parts)
+    } else if parts.method == Method::OPTIONS {
+        preflight(&app, &parts).await
+    } else {
+        let mut response = match app.permits.clone().try_acquire_owned() {
+            Ok(permit) => match handle(&app, &parts, body, &request_id).await {
+                Ok(mut response) => {
+                    if parts.method == Method::GET
+                        && response.headers().contains_key("x-ms-blob-type")
+                    {
+                        let body = std::mem::replace(response.body_mut(), Body::empty());
+                        *response.body_mut() =
+                            Body::from_stream(body.into_data_stream().map(move |item| {
+                                let _permit = &permit;
+                                item
+                            }));
                     }
-                    Err(error) => error_response(error),
+                    response
                 }
-            }
-            Err(error) => error_response(error),
-        },
-        Err(_) => error_response(Error::Busy),
+                Err(error) => error_response(error),
+            },
+            Err(_) => error_response(Error::Busy),
+        };
+        add_cors(&app, &parts, &mut response).await;
+        response
     };
-    if wire::stamp_response(&mut response, &app.version, &request_id, head).is_err() {
+    response
+        .headers_mut()
+        .insert("x-ms-version", app.version.clone());
+    if let Some(id) = client_request_id {
+        response.headers_mut().insert("x-ms-client-request-id", id);
+    }
+    if set(response.headers_mut(), "x-ms-request-id", &request_id)
+        .and_then(|_| {
+            set(
+                response.headers_mut(),
+                "date",
+                &httpdate::fmt_http_date(app.clock.now()),
+            )
+        })
+        .is_err()
+    {
         return error_response(Error::Internal);
+    }
+    if head {
+        *response.body_mut() = Body::empty();
     }
     tracing::info!(%request_id, status = response.status().as_u16(), "blob request");
     response
 }
 
-async fn execute(app: &App, op: Operation, body: Body) -> Result<Response> {
-    let store = &app.store;
-    match op {
-        Operation::CreateContainer(key) => {
-            entity_response(StatusCode::CREATED, store.create_container(key).await?)
-        }
-        Operation::ContainerProperties(key) => {
-            entity_response(StatusCode::OK, store.container(key).await?)
-        }
-        Operation::DeleteContainer(key) => {
-            store.delete_container(key).await?;
-            Ok(empty(StatusCode::ACCEPTED))
-        }
-        Operation::ListContainers(account, page) => {
-            let endpoint = storage_endpoint(app.address, account.as_str());
-            let limit = page.limit;
-            let page = store.list_containers(account, page).await?;
-            list_containers(&endpoint, limit, page)
-        }
-        Operation::ListBlobs(key, page, metadata) => {
-            let endpoint = storage_endpoint(app.address, key.account.as_str());
-            let name = key.name.as_str().to_owned();
-            let limit = page.limit;
-            let page = store.list_blobs(key, page).await?;
-            list_blobs(&endpoint, &name, limit, page, metadata)
-        }
-        Operation::PutBlob(key, body_options, options) => {
-            let upload = receive_upload(app, body, &body_options).await?;
-            let checksum = upload.checksums.response(body_options.checksum);
-            let entity = store.put_blob(key, options, upload).await?;
-            write_response(entity_response(StatusCode::CREATED, entity)?, checksum)
-        }
-        Operation::PutBlock(key, id, options) => {
-            let upload = receive_upload(app, body, &options).await?;
-            let checksum = upload.checksums.response(options.checksum);
-            store.put_block(key, id, upload).await?;
-            write_response(empty(StatusCode::CREATED), checksum)
-        }
-        Operation::PutBlockList(key, body_options, options, md5) => {
-            let (blocks, checksums) = read_block_list(app, body, &body_options).await?;
-            let entity = store
-                .commit_blocks(
-                    key,
-                    options,
-                    blocks,
-                    md5,
-                    app.config.max_assembled_blob_bytes,
-                )
-                .await?;
-            write_response(
-                entity_response(StatusCode::CREATED, entity)?,
-                checksums.response(body_options.checksum),
-            )
-        }
-        Operation::GetBlockList(key, kind, condition) => {
-            block_list_response(store.blocks(key, kind, condition).await?)
-        }
-        Operation::ReadBlob(key, options) => {
-            let download = store
-                .read_blob(key, options.condition, options.range, options.with_body)
-                .await?;
-            download_response(download)
-        }
-        Operation::DeleteBlob(key, condition) => {
-            store.delete_blob(key, condition).await?;
-            Ok(empty(StatusCode::ACCEPTED))
-        }
+/// Authenticates, authorizes, and runs one request.
+async fn handle(app: &App, parts: &Parts, body: Body, request_id: &str) -> Result<Response> {
+    let now = app.clock.now();
+    let parsed = protocol::parse(parts, &app.config, now)?;
+    if parsed.requested_version != app.config.api_version {
+        tracing::info!(
+            %request_id,
+            requested_api_version = parsed.requested_version.as_str(),
+            effective_api_version = app.config.api_version.as_str(),
+            "using the configured Blob protocol baseline"
+        );
     }
-}
-
-async fn receive_upload(app: &App, body: Body, options: &UploadOptions) -> Result<Uploaded> {
-    let mut upload = app.store.begin_upload(options.length).await?;
-    tokio::time::timeout(app.config.upload_timeout, receive(body, &mut upload))
-        .await
-        .map_err(|_| Error::Timeout)??;
-    upload.finish(options.checksum).await
-}
-
-async fn read_block_list(
-    app: &App,
-    body: Body,
-    options: &UploadOptions,
-) -> Result<(Vec<crate::domain::BlockSelection>, Checksums)> {
-    let bytes = tokio::time::timeout(
-        app.config.upload_timeout,
-        to_bytes(body, options.length.0 as usize),
-    )
-    .await
-    .map_err(|_| Error::Timeout)?
-    .map_err(|_| Error::InvalidLength)?;
-    if bytes.len() as u64 != options.length.0 {
-        return Err(Error::InvalidLength);
-    }
-    let mut hash = Hasher::new();
-    hash.update(&bytes);
-    let checksums = hash.finish(options.checksum)?;
-    Ok((protocol::parse_block_list(&bytes)?, checksums))
-}
-
-async fn receive(body: Body, upload: &mut Upload) -> Result<()> {
-    let mut data = body.into_data_stream();
-    while let Some(chunk) = data.next().await {
-        let chunk = chunk.map_err(|_| Error::InvalidLength)?;
-        upload.append(&chunk).await?;
-    }
-    Ok(())
-}
-
-fn storage_endpoint(address: SocketAddr, account: &str) -> String {
-    format!("http://{address}/{account}/")
-}
-
-fn write_response(
-    mut response: Response,
-    (name, value): (&'static str, String),
-) -> Result<Response> {
-    set(response.headers_mut(), name, &value)?;
-    response.headers_mut().insert(
-        "x-ms-request-server-encrypted",
-        HeaderValue::from_static("false"),
-    );
-    Ok(response)
-}
-
-fn download_response(download: Download) -> Result<Response> {
-    let (mut response, metadata) = wire::download_response(download)?;
-    let headers = response.headers_mut();
-    headers.insert("x-ms-blob-type", HeaderValue::from_static("BlockBlob"));
-    for (name, value) in metadata {
-        let name = axum::http::HeaderName::from_bytes(format!("x-ms-meta-{name}").as_bytes())
-            .map_err(|_| {
-                tracing::error!("invalid stored metadata header");
-                Error::Internal
-            })?;
-        let value = HeaderValue::from_str(&value).map_err(|_| {
-            tracing::error!("invalid stored metadata value");
-            Error::Internal
-        })?;
-        headers.insert(name, value);
-    }
-    Ok(response)
-}
-
-fn list_containers(endpoint: &str, limit: u32, page: Page<Entity>) -> Result<Response> {
-    let mut xml = Xml::root("EnumerationResults", &[("ServiceEndpoint", endpoint)]);
-    xml.element("MaxResults", &limit.to_string());
-    xml.open("Containers");
-    for (name, entity) in page.items {
-        xml.open("Container");
-        xml.element("Name", &name);
-        xml.open("Properties");
-        xml.entity(entity)?;
-        xml.close("Properties");
-        xml.close("Container");
-    }
-    xml.close("Containers");
-    xml.element("NextMarker", &page.next);
-    Ok(xml.finish("EnumerationResults", StatusCode::OK))
-}
-
-fn list_blobs(
-    endpoint: &str,
-    name: &str,
-    limit: u32,
-    page: Page<BlobInfo>,
-    metadata: bool,
-) -> Result<Response> {
-    let mut xml = Xml::root(
-        "EnumerationResults",
-        &[("ServiceEndpoint", endpoint), ("ContainerName", name)],
-    );
-    xml.element("MaxResults", &limit.to_string());
-    xml.open("Blobs");
-    for (name, properties) in page.items {
-        xml.open("Blob");
-        xml.element("Name", &name);
-        xml.open("Properties");
-        xml.entity(properties.entity)?;
-        xml.element("Content-Length", &properties.length.0.to_string());
-        xml.element("Content-Type", &properties.content_type);
-        if let Some(md5) = &properties.md5 {
-            xml.element("Content-MD5", md5);
-        }
-        xml.element("BlobType", "BlockBlob");
-        xml.close("Properties");
-        if metadata {
-            xml.metadata(properties.metadata);
-        }
-        xml.close("Blob");
-    }
-    xml.close("Blobs");
-    xml.element("NextMarker", &page.next);
-    Ok(xml.finish("EnumerationResults", StatusCode::OK))
-}
-
-fn block_list_response(list: BlockList) -> Result<Response> {
-    let mut xml = Xml::root("BlockList", &[]);
-    for (tag, blocks) in [
-        ("CommittedBlocks", list.committed),
-        ("UncommittedBlocks", list.uncommitted),
-    ] {
-        if let Some(blocks) = blocks {
-            xml.open(tag);
-            for (id, length) in blocks {
-                xml.open("Block");
-                xml.element("Name", &id);
-                xml.element("Size", &length.0.to_string());
-                xml.close("Block");
-            }
-            xml.close(tag);
-        }
-    }
-    let mut response = xml.finish("BlockList", StatusCode::OK);
-    set(
-        response.headers_mut(),
-        "x-ms-blob-content-length",
-        &list.length.0.to_string(),
-    )?;
-    if let Some(entity) = list.entity {
-        entity_headers(response.headers_mut(), entity)?;
-    }
-    Ok(response)
-}
-
-fn error_response(error: Error) -> Response {
-    use StatusCode as S;
-    let (status, code, message) = match error {
-        Error::AuthenticationFailed => (
-            S::FORBIDDEN,
-            "AuthenticationFailed",
-            "The request could not be authenticated.",
-        ),
-        Error::InvalidName => (
-            S::BAD_REQUEST,
-            "InvalidResourceName",
-            "The resource name is invalid.",
-        ),
-        Error::InvalidHeader => (
-            S::BAD_REQUEST,
-            "InvalidHeaderValue",
-            "A request header is invalid or missing.",
-        ),
-        Error::InvalidVersion => (
-            S::BAD_REQUEST,
-            "InvalidHeaderValue",
-            "The requested API version is not supported.",
-        ),
-        Error::InvalidQuery => (
-            S::BAD_REQUEST,
-            "InvalidQueryParameterValue",
-            "A query parameter is invalid.",
-        ),
-        Error::Unsupported => (
-            S::NOT_IMPLEMENTED,
-            "NotImplemented",
-            "This operation or option is not implemented.",
-        ),
-        Error::MissingLength => (
-            S::LENGTH_REQUIRED,
-            "MissingContentLengthHeader",
-            "A Content-Length header is required.",
-        ),
-        Error::InvalidLength => (
-            S::BAD_REQUEST,
-            "InvalidInput",
-            "The body does not match Content-Length.",
-        ),
-        Error::TooLarge => (
-            S::PAYLOAD_TOO_LARGE,
-            "RequestBodyTooLarge",
-            "The upload exceeds the configured limit.",
-        ),
-        Error::Md5Mismatch => (
-            S::BAD_REQUEST,
-            "Md5Mismatch",
-            "The body checksum does not match Content-MD5.",
-        ),
-        Error::Crc64Mismatch => (
-            S::BAD_REQUEST,
-            "Crc64Mismatch",
-            "The body checksum does not match x-ms-content-crc64.",
-        ),
-        Error::InvalidBlockId => (
-            S::BAD_REQUEST,
-            "InvalidBlockId",
-            "The block ID is malformed or has inconsistent length.",
-        ),
-        Error::InvalidBlockList => (
-            S::BAD_REQUEST,
-            "InvalidBlockList",
-            "The specified block list is invalid.",
-        ),
-        Error::InvalidXml => (
-            S::BAD_REQUEST,
-            "InvalidXmlDocument",
-            "The block list XML is invalid.",
-        ),
-        Error::BlockCountExceeded => (
-            S::CONFLICT,
-            "BlockCountExceedsLimit",
-            "The block count exceeds the limit.",
-        ),
-        Error::BlockListTooLong => (
-            S::BAD_REQUEST,
-            "BlockListTooLong",
-            "The block list exceeds 50,000 entries.",
-        ),
-        Error::ContainerExists => (
-            S::CONFLICT,
-            "ContainerAlreadyExists",
-            "The container already exists.",
-        ),
-        Error::ContainerMissing => (
-            S::NOT_FOUND,
-            "ContainerNotFound",
-            "The specified container does not exist.",
-        ),
-        Error::BlobMissing => (
-            S::NOT_FOUND,
-            "BlobNotFound",
-            "The specified blob does not exist.",
-        ),
-        Error::ConditionNotMet => (
-            S::PRECONDITION_FAILED,
-            "ConditionNotMet",
-            "The specified condition was not met.",
-        ),
-        Error::NotModified => return empty(S::NOT_MODIFIED),
-        Error::InvalidRange(_) => (
-            S::RANGE_NOT_SATISFIABLE,
-            "InvalidRange",
-            "The range is outside the blob.",
-        ),
-        Error::QuotaExceeded => (
-            S::INSUFFICIENT_STORAGE,
-            "InsufficientStorage",
-            "The in-memory content quota was exceeded.",
-        ),
-        Error::Busy => (
-            S::SERVICE_UNAVAILABLE,
-            "ServerBusy",
-            "Too many active requests.",
-        ),
-        Error::Timeout => (
-            S::REQUEST_TIMEOUT,
-            "OperationTimedOut",
-            "The upload did not finish in time.",
-        ),
-        Error::Internal => (
-            S::INTERNAL_SERVER_ERROR,
-            "InternalError",
-            "The local storage operation failed.",
-        ),
+    let connection = Connection {
+        now,
+        client_ip: parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0.ip()),
+        https: false,
     };
-    let mut response = wire::xml_error(status, code, message);
-    if let Error::InvalidRange(length) = error
-        && wire::unsatisfied_range(response.headers_mut(), length).is_err()
-    {
-        return error_response(Error::Internal);
-    }
-    response
+    blob_auth::authorize(
+        &app.store,
+        Authorization {
+            credentials: &parsed.credentials,
+            target: &parsed.target,
+            need: &parsed.need,
+            connection: &connection,
+        },
+    )
+    .await?;
+    let context = Context {
+        host: protocol::host(parts),
+        account: parsed.target.account(),
+        credentials: &parsed.credentials,
+        connection: &connection,
+    };
+    let operation: Operation = parsed.operation;
+    blob_exec::execute(app, operation, body, &context).await
 }
 
-impl Xml {
-    fn entity(&mut self, entity: Entity) -> Result<()> {
-        self.element("Last-Modified", &modified(entity)?);
-        self.element("Etag", entity.etag().as_str());
-        Ok(())
-    }
+/// The account a request addresses, for CORS lookups made before parsing succeeds.
+fn account_of(parts: &Parts) -> Option<AccountName> {
+    address::host_account(protocol::host(parts)).or_else(|| {
+        let segment = parts.uri.path().strip_prefix('/')?.split('/').next()?;
+        AccountName::parse(segment).ok()
+    })
+}
 
-    fn metadata(&mut self, metadata: Metadata) {
-        self.open("Metadata");
-        for (name, value) in metadata {
-            self.element(&name, &value);
+fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+async fn cors_rules(app: &App, parts: &Parts) -> Option<Vec<crate::service_props::CorsRule>> {
+    let account = account_of(parts)?;
+    let properties = app.store.service_properties(account).await.ok()?;
+    properties.cors
+}
+
+/// Answers a browser preflight from the account's stored CORS rules.
+async fn preflight(app: &App, parts: &Parts) -> Response {
+    let headers = &parts.headers;
+    let (Some(origin), Some(method)) = (
+        header_text(headers, "origin"),
+        header_text(headers, "access-control-request-method"),
+    ) else {
+        return error_response(Error::CorsPreflight);
+    };
+    let requested = header_text(headers, "access-control-request-headers");
+    let rules = cors_rules(app, parts).await.unwrap_or_default();
+    match blob_cors::find(&rules, origin, method, requested) {
+        Some(rule) => {
+            let mut response = respond::empty(StatusCode::OK);
+            response
+                .headers_mut()
+                .extend(blob_cors::preflight(rule, origin, method, requested));
+            response
         }
-        self.close("Metadata");
+        None => error_response(Error::CorsPreflight),
     }
+}
+
+/// Adds `Access-Control-*` headers when a rule allows the request's origin.
+async fn add_cors(app: &App, parts: &Parts, response: &mut Response) {
+    let Some(origin) = header_text(&parts.headers, "origin") else {
+        return;
+    };
+    let Some(rules) = cors_rules(app, parts).await else {
+        return;
+    };
+    if let Some(rule) = blob_cors::find(&rules, origin, parts.method.as_str(), None) {
+        blob_cors::apply(rule, origin, response.headers_mut());
+    }
+}
+
+/// `--test-clock`: read the clock with `GET /_azuifer/clock` and move it with
+/// `POST /_azuifer/clock/advance?seconds=N` (or `ms=N`), so lease and SAS
+/// expiry can be tested without sleeping (ADR-0012).
+fn clock_endpoint(app: &App, parts: &Parts) -> Response {
+    let path = parts.uri.path();
+    if parts.method == Method::POST && path == "/_azuifer/clock/advance" {
+        let amount = parts
+            .uri
+            .query()
+            .unwrap_or_default()
+            .split('&')
+            .find_map(|pair| {
+                let (name, value) = pair.split_once('=')?;
+                let value: u64 = value.parse().ok()?;
+                match name {
+                    "ms" => Some(std::time::Duration::from_millis(value)),
+                    "seconds" => Some(std::time::Duration::from_secs(value)),
+                    _ => None,
+                }
+            });
+        match amount {
+            Some(amount) => app.clock.advance(amount),
+            None => return error_response(Error::InvalidQuery),
+        }
+    } else if !(parts.method == Method::GET && path == "/_azuifer/clock") {
+        return error_response(Error::Unsupported);
+    }
+    let mut response = Response::new(Body::from(format!(
+        "{{\"unix_ms\":{}}}",
+        app.clock.now_millis()
+    )));
+    response
+        .headers_mut()
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    response
 }

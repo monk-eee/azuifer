@@ -35,8 +35,12 @@ pub(crate) struct Options {
     memory_limit: Option<u64>,
     #[arg(long, env = "AZUIFER_MAX_BLOB_BYTES", global = true)]
     max_blob_bytes: Option<u64>,
+    #[arg(long, env = "AZUIFER_MAX_BLOCK_BYTES", global = true)]
+    max_block_bytes: Option<u64>,
     #[arg(long, env = "AZUIFER_MAX_ASSEMBLED_BLOB_BYTES", global = true)]
     max_assembled_blob_bytes: Option<u64>,
+    #[arg(long, env = "AZUIFER_TEST_CLOCK", global = true, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    test_clock: Option<bool>,
     #[arg(long, env = "AZUIFER_UPLOAD_TIMEOUT_SECONDS", global = true)]
     upload_timeout_seconds: Option<u64>,
     #[arg(long, env = "AZUIFER_SKIP_API_VERSION_CHECK", global = true, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
@@ -111,7 +115,9 @@ struct FileConfig {
     in_memory: Option<bool>,
     memory_limit: Option<u64>,
     max_blob_bytes: Option<u64>,
+    max_block_bytes: Option<u64>,
     max_assembled_blob_bytes: Option<u64>,
+    test_clock: Option<bool>,
     upload_timeout_seconds: Option<u64>,
     skip_api_version_check: Option<bool>,
     services: Option<String>,
@@ -146,7 +152,9 @@ pub(crate) struct Config {
     pub(crate) location: Option<PathBuf>,
     pub(crate) memory_limit: u64,
     pub(crate) max_blob_bytes: u64,
+    pub(crate) max_block_bytes: u64,
     pub(crate) max_assembled_blob_bytes: u64,
+    pub(crate) test_clock: bool,
     pub(crate) upload_timeout: Duration,
     pub(crate) skip_api_version_check: bool,
     pub(crate) accounts: HashMap<AccountName, Vec<Vec<u8>>>,
@@ -240,14 +248,22 @@ impl Config {
         let max_blob_bytes = options
             .max_blob_bytes
             .or(file.max_blob_bytes)
-            .unwrap_or(16 * MIB);
+            .unwrap_or(256 * MIB);
+        let max_block_bytes = options
+            .max_block_bytes
+            .or(file.max_block_bytes)
+            .unwrap_or(5000 * MIB);
         let max_assembled_blob_bytes = options
             .max_assembled_blob_bytes
             .or(file.max_assembled_blob_bytes)
             .unwrap_or(512 * MIB);
         ensure!(
-            (1..=1024 * MIB).contains(&max_blob_bytes),
-            "max-blob-bytes must be between 1 and 1073741824"
+            (1..=5000 * MIB).contains(&max_blob_bytes),
+            "max-blob-bytes must be between 1 and 5242880000"
+        );
+        ensure!(
+            (1..=5000 * MIB).contains(&max_block_bytes),
+            "max-block-bytes must be between 1 and 5242880000"
         );
         ensure!(
             memory_limit > 0 && memory_limit <= 16 * 1024 * MIB,
@@ -284,6 +300,11 @@ impl Config {
                 );
             }
         }
+        let test_clock = options.test_clock.or(file.test_clock).unwrap_or(false);
+        ensure!(
+            !test_clock || binding.is_loopback(),
+            "--test-clock requires loopback binding"
+        );
         let manifest: Manifest =
             serde_json::from_str(CONFORMANCE).context("invalid embedded protocol manifest")?;
         let api_version = ApiVersion::parse(&manifest.api_version)
@@ -299,7 +320,9 @@ impl Config {
             location,
             memory_limit,
             max_blob_bytes,
+            max_block_bytes,
             max_assembled_blob_bytes,
+            test_clock,
             upload_timeout: Duration::from_secs(upload_timeout),
             skip_api_version_check: options
                 .skip_api_version_check

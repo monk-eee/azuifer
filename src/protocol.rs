@@ -1,12 +1,19 @@
 use crate::{
-    auth::{self, Query, header},
+    address,
+    auth::{Query, header},
+    blob_auth::{self, Credentials, Presented, Target},
+    blob_copy::CopySource,
+    blob_sas::{self, Need, Public},
     checksum::Checksum,
+    conditions::{self, Conditions, Guard, lease_id},
     config::Config,
     domain::{
-        AccountName, ApiVersion, BlobKey, BlobPath, BlobWrite, BlockId, BlockListKind,
-        BlockSelection, BlockSource, ByteRange, Condition, ContainerKey, ContainerName,
-        ContentLength, Error, Metadata, PageRequest, Result, xml_safe,
+        AccessTier, AccountName, ApiVersion, BlobKey, BlobPath, BlobRead, BlobWrite, BlockId,
+        BlockListKind, BlockSelection, BlockSource, ByteRange, ContainerCreate, ContainerKey,
+        ContainerName, ContentHeaders, ContentLength, Error, Include, ListRequest, Metadata,
+        PageRequest, PublicAccess, RangeChecksum, Result, xml_safe,
     },
+    lease::{LeaseAction, LeaseDuration, LeaseId},
 };
 use axum::http::{HeaderMap, Method, request::Parts};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -15,69 +22,119 @@ use quick_xml::{Reader, events::Event};
 use std::{collections::HashMap, time::SystemTime};
 
 const MAX_BLOCK_LIST_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_XML_BODY_BYTES: u64 = 1024 * 1024;
 const MAX_COMMITTED_BLOCKS: usize = 50_000;
 
-pub(crate) enum Resource {
-    Account(AccountName),
-    Container(ContainerKey),
-    Blob(BlobKey),
+const CONDITIONS: &[&str] = &[
+    "if-match",
+    "if-none-match",
+    "if-modified-since",
+    "if-unmodified-since",
+];
+const DATE_CONDITIONS: &[&str] = &["if-modified-since", "if-unmodified-since"];
+const LEASE: &[&str] = &["x-ms-lease-id"];
+const CHECKSUMS: &[&str] = &["content-md5", "x-ms-content-crc64"];
+const BLOB_PROPERTIES: &[&str] = &[
+    "x-ms-blob-content-type",
+    "x-ms-blob-content-encoding",
+    "x-ms-blob-content-language",
+    "x-ms-blob-content-disposition",
+    "x-ms-blob-cache-control",
+    "x-ms-blob-content-md5",
+];
+const PLAIN_PROPERTIES: &[&str] = &[
+    "content-encoding",
+    "content-language",
+    "content-disposition",
+    "cache-control",
+];
+const SOURCE: &[&str] = &[
+    "x-ms-copy-source",
+    "x-ms-source-if-match",
+    "x-ms-source-if-none-match",
+    "x-ms-source-if-modified-since",
+    "x-ms-source-if-unmodified-since",
+    "x-ms-source-lease-id",
+];
+const LEASE_HEADERS: &[&str] = &[
+    "x-ms-lease-action",
+    "x-ms-lease-id",
+    "x-ms-lease-duration",
+    "x-ms-proposed-lease-id",
+    "x-ms-lease-break-period",
+];
+
+const fn need(
+    service: Option<&'static str>,
+    account: Option<(char, &'static str)>,
+    public: Public,
+) -> Need {
+    Need {
+        service,
+        account,
+        public,
+    }
 }
 
-impl Resource {
-    pub(crate) fn account(&self) -> &AccountName {
-        match self {
-            Self::Account(account) => account,
-            Self::Container(key) => &key.account,
-            Self::Blob(key) => &key.container.account,
-        }
-    }
+const ANY_SAS: Need = need(Some("*"), Some(('*', "*")), Public::Never);
+const LIST_CONTAINERS: Need = need(None, Some(('s', "l")), Public::Never);
+const SERVICE_READ: Need = need(None, Some(('s', "r")), Public::Never);
+const SERVICE_WRITE: Need = need(None, Some(('s', "w")), Public::Never);
+const CREATE_CONTAINER: Need = need(None, Some(('c', "wc")), Public::Never);
+const DELETE_CONTAINER: Need = need(Some("d"), Some(('c', "d")), Public::Never);
+const READ_CONTAINER: Need = need(Some("r"), Some(('c', "r")), Public::Container);
+const READ_CONTAINER_PRIVATE: Need = need(Some("r"), Some(('c', "r")), Public::Never);
+const WRITE_CONTAINER: Need = need(Some("w"), Some(('c', "w")), Public::Never);
+const LIST_BLOBS: Need = need(Some("l"), Some(('c', "l")), Public::Container);
+const READ_BLOB: Need = need(Some("r"), Some(('o', "r")), Public::Blob);
+const CREATE_BLOB: Need = need(Some("wc"), Some(('o', "wc")), Public::Never);
+const WRITE_BLOB: Need = need(Some("w"), Some(('o', "w")), Public::Never);
+const DELETE_BLOB: Need = need(Some("d"), Some(('o', "d")), Public::Never);
 
-    fn parse(path: &str) -> Result<Self> {
-        let mut segments = path
-            .strip_prefix('/')
-            .ok_or(Error::InvalidName)?
-            .splitn(3, '/');
-        let account = AccountName::parse(segments.next().ok_or(Error::InvalidName)?)?;
-        let label = segments.next();
-        let blob = segments.next();
-        let resource = match (label, blob) {
-            (None | Some(""), None) => Self::Account(account),
-            (Some(label), blob) => {
-                let key = ContainerKey {
-                    account,
-                    name: ContainerName::parse(label)?,
-                };
-                if let Some(path) = blob {
-                    if path.is_empty() {
-                        return Err(Error::InvalidName);
-                    }
-                    let value = decode(path, false).ok_or(Error::InvalidName)?;
-                    Self::Blob(BlobKey {
-                        container: key,
-                        path: BlobPath::parse(value)?,
-                    })
-                } else {
-                    Self::Container(key)
-                }
-            }
-            (None, Some(_)) => return Err(Error::InvalidName),
-        };
-        Ok(resource)
-    }
+pub(crate) enum ContainerView {
+    Properties,
+    Metadata,
+}
+
+pub(crate) struct SourceRequest {
+    pub(crate) url: CopySource,
+    pub(crate) guard: Guard,
+    pub(crate) range: Option<ByteRange>,
+    /// Put Blob From URL: take content properties from the source (the default).
+    pub(crate) copy_properties: bool,
+    /// Copy Blob: any `x-ms-meta-*` header replaces the source metadata.
+    pub(crate) replace_metadata: bool,
 }
 
 pub(crate) enum Operation {
-    CreateContainer(ContainerKey),
-    ContainerProperties(ContainerKey),
-    DeleteContainer(ContainerKey),
-    ListContainers(AccountName, PageRequest),
-    ListBlobs(ContainerKey, PageRequest, bool),
+    ListContainers(AccountName, PageRequest, bool),
+    GetServiceProperties(AccountName),
+    SetServiceProperties(AccountName, UploadOptions),
+    ServiceStats,
+    AccountInfo,
+    CreateContainer(ContainerKey, ContainerCreate),
+    ContainerProperties(ContainerKey, Option<LeaseId>, ContainerView),
+    SetContainerMetadata(ContainerKey, Metadata, Guard),
+    GetContainerAcl(ContainerKey, Option<LeaseId>),
+    SetContainerAcl(ContainerKey, UploadOptions, PublicAccess, Guard),
+    LeaseContainer(ContainerKey, LeaseAction, Guard),
+    DeleteContainer(ContainerKey, Guard),
+    ListBlobs(ContainerKey, ListRequest, Option<LeaseId>),
     PutBlob(BlobKey, UploadOptions, BlobWrite),
-    PutBlock(BlobKey, BlockId, UploadOptions),
-    PutBlockList(BlobKey, UploadOptions, BlobWrite, Option<[u8; 16]>),
-    GetBlockList(BlobKey, BlockListKind, Condition),
-    ReadBlob(BlobKey, ReadOptions),
-    DeleteBlob(BlobKey, Condition),
+    PutBlobFromUrl(BlobKey, BlobWrite, SourceRequest),
+    PutBlock(BlobKey, BlockId, UploadOptions, Option<LeaseId>),
+    PutBlockFromUrl(BlobKey, BlockId, Option<LeaseId>, SourceRequest),
+    PutBlockList(BlobKey, UploadOptions, BlobWrite),
+    GetBlockList(BlobKey, BlockListKind, Guard),
+    ReadBlob(BlobKey, BlobRead),
+    BlobMetadata(BlobKey, Guard),
+    SetBlobProperties(BlobKey, ContentHeaders, Option<[u8; 16]>, bool, Guard),
+    SetBlobMetadata(BlobKey, Metadata, Guard),
+    SetBlobTier(BlobKey, AccessTier, Option<LeaseId>),
+    LeaseBlob(BlobKey, LeaseAction, Conditions),
+    CopyBlob(BlobKey, BlobWrite, SourceRequest),
+    AbortCopy(BlobKey, String, Option<LeaseId>),
+    DeleteBlob(BlobKey, Guard),
 }
 
 pub(crate) struct UploadOptions {
@@ -85,24 +142,68 @@ pub(crate) struct UploadOptions {
     pub(crate) checksum: Option<Checksum>,
 }
 
-pub(crate) struct ReadOptions {
-    pub(crate) condition: Condition,
-    pub(crate) range: Option<ByteRange>,
-    pub(crate) with_body: bool,
-}
-
 pub(crate) struct ParsedRequest {
     pub(crate) operation: Operation,
     pub(crate) requested_version: ApiVersion,
+    pub(crate) target: Target,
+    pub(crate) credentials: Credentials,
+    pub(crate) need: Need,
 }
 
-pub(crate) struct AuthenticatedRequest {
-    pub(crate) requested_version: ApiVersion,
-    pub(crate) resource: Resource,
-    pub(crate) query: Query,
+/// The authority a client addressed, from `Host` or an HTTP/2 `:authority`.
+pub(crate) fn host(parts: &Parts) -> Option<&str> {
+    parts
+        .uri
+        .authority()
+        .map(|authority| authority.as_str())
+        .or_else(|| {
+            parts
+                .headers
+                .get("host")
+                .and_then(|value| value.to_str().ok())
+        })
 }
 
-pub(crate) fn authenticate(parts: &Parts, config: &Config) -> Result<AuthenticatedRequest> {
+fn parse_target(path: &str) -> Result<Target> {
+    let mut segments = path
+        .strip_prefix('/')
+        .ok_or(Error::InvalidName)?
+        .splitn(3, '/');
+    let account = AccountName::parse(segments.next().ok_or(Error::InvalidName)?)?;
+    let label = segments.next();
+    let blob = segments.next();
+    Ok(match (label, blob) {
+        (None | Some(""), None) => Target::Account(account),
+        (Some(label), blob) => {
+            let key = ContainerKey {
+                account,
+                name: ContainerName::parse(label)?,
+            };
+            if let Some(path) = blob {
+                if path.is_empty() {
+                    return Err(Error::InvalidName);
+                }
+                let value = decode(path, false).ok_or(Error::InvalidName)?;
+                Target::Blob(BlobKey {
+                    container: key,
+                    path: BlobPath::parse(value)?,
+                })
+            } else {
+                Target::Container(key)
+            }
+        }
+        (None, Some(_)) => return Err(Error::InvalidName),
+    })
+}
+
+struct Request<'a> {
+    method: &'a Method,
+    query: &'a Query,
+    headers: &'a HeaderMap,
+    config: &'a Config,
+}
+
+pub(crate) fn parse(parts: &Parts, config: &Config, now: SystemTime) -> Result<ParsedRequest> {
     let headers = &parts.headers;
     if headers.len() > 100
         || headers
@@ -113,207 +214,577 @@ pub(crate) fn authenticate(parts: &Parts, config: &Config) -> Result<Authenticat
     {
         return Err(Error::InvalidHeader);
     }
-    let requested_version =
-        ApiVersion::parse(header(headers, "x-ms-version")?.ok_or(Error::InvalidVersion)?)?;
+    let requested_version = match header(headers, "x-ms-version")? {
+        Some(version) => ApiVersion::parse(version)?,
+        // SAS and anonymous requests may omit the version; signed requests may not.
+        None if !headers.contains_key("authorization") => {
+            ApiVersion::parse(config.api_version.as_str())?
+        }
+        None => return Err(Error::InvalidVersion),
+    };
     if requested_version != config.api_version
         && (!config.skip_api_version_check || requested_version < config.api_version)
     {
         return Err(Error::InvalidVersion);
     }
-    let query = parse_query(parts.uri.query())?;
-    if query.contains_key("sig") {
-        return Err(Error::Unsupported);
-    }
-    let resource = Resource::parse(parts.uri.path())?;
-    let account = resource.account();
+    let mut query = parse_query(parts.uri.query())?;
+    let host_account = address::host_account(host(parts));
+    let logical = address::logical_path(host_account.as_ref(), parts.uri.path());
+    let target = parse_target(&logical)?;
     let keys = config
         .accounts
-        .get(account)
+        .get(target.account())
         .ok_or(Error::AuthenticationFailed)?;
-    auth::verify(
-        account,
+    let credentials = blob_auth::credentials(&Presented {
         keys,
-        &parts.method,
-        parts.uri.path(),
-        &query,
+        method: &parts.method,
+        signing_path: parts.uri.path(),
+        query: &query,
         headers,
-        SystemTime::now(),
-    )?;
-    Ok(AuthenticatedRequest {
-        requested_version,
-        resource,
-        query,
-    })
-}
-
-pub(crate) fn parse(parts: &Parts, config: &Config) -> Result<ParsedRequest> {
-    let AuthenticatedRequest {
-        requested_version,
-        resource,
-        query,
-    } = authenticate(parts, config)?;
-    let headers = &parts.headers;
-    let param = |name| query.get(name).map(String::as_str);
-    let listing = || PageRequest::parse(param("prefix"), param("marker"), param("maxresults"));
-    let op = match (resource, &parts.method, param("restype"), param("comp")) {
-        (Resource::Account(account), &Method::GET, None, Some("list")) => {
-            check(
-                &query,
-                headers,
-                &["comp", "prefix", "marker", "maxresults", "include"],
-                &[],
-                false,
-            )?;
-            if param("include").is_some_and(|include| !include.is_empty()) {
-                return Err(Error::Unsupported);
-            }
-            Operation::ListContainers(account, listing()?)
+        target: &target,
+        now,
+    })?;
+    if matches!(credentials, Credentials::Sas(_)) {
+        query.retain(|name, _| !blob_sas::is_sas_param(name));
+    }
+    let request = Request {
+        method: &parts.method,
+        query: &query,
+        headers,
+        config,
+    };
+    let operation = match target.clone() {
+        Target::Account(account) => request.account_operation(account),
+        Target::Container(key) => request.container_operation(key),
+        Target::Blob(key) => request.blob_operation(key),
+    };
+    let operation = match operation {
+        // An anonymous caller learns nothing about which operations exist.
+        Err(Error::Unsupported) if matches!(credentials, Credentials::Anonymous) => {
+            return Err(Error::AuthenticationFailed);
         }
-        (Resource::Container(key), &Method::GET, Some("container"), Some("list")) => {
-            check(
-                &query,
-                headers,
-                &[
-                    "comp",
-                    "restype",
-                    "prefix",
-                    "marker",
-                    "maxresults",
-                    "include",
-                ],
-                &[],
-                false,
-            )?;
-            let metadata = match param("include") {
-                None => false,
-                Some("metadata") => true,
-                Some(_) => return Err(Error::Unsupported),
-            };
-            Operation::ListBlobs(key, listing()?, metadata)
-        }
-        (Resource::Container(key), method, Some("container"), None) => {
-            check(&query, headers, &["restype"], &[], false)?;
-            match *method {
-                Method::PUT => Operation::CreateContainer(key),
-                Method::GET | Method::HEAD => Operation::ContainerProperties(key),
-                Method::DELETE => Operation::DeleteContainer(key),
-                _ => return Err(Error::Unsupported),
-            }
-        }
-        (Resource::Blob(key), &Method::PUT, None, Some("block")) => {
-            check(
-                &query,
-                headers,
-                &["comp", "blockid"],
-                &["content-md5", "x-ms-content-crc64"],
-                false,
-            )?;
-            let id = BlockId::parse(param("blockid").ok_or(Error::InvalidQuery)?)?;
-            Operation::PutBlock(key, id, upload_options(headers, config.max_blob_bytes)?)
-        }
-        (Resource::Blob(key), &Method::PUT, None, Some("blocklist")) => {
-            check(
-                &query,
-                headers,
-                &["comp"],
-                &[
-                    "if-match",
-                    "if-none-match",
-                    "x-ms-blob-content-type",
-                    "x-ms-blob-content-md5",
-                    "content-md5",
-                    "x-ms-content-crc64",
-                ],
-                true,
-            )?;
-            Operation::PutBlockList(
-                key,
-                upload_options(headers, MAX_BLOCK_LIST_BYTES)?,
-                blob_write(headers, false)?,
-                decode_hash(header(headers, "x-ms-blob-content-md5")?)?,
-            )
-        }
-        (Resource::Blob(key), &Method::GET, None, Some("blocklist")) => {
-            check(
-                &query,
-                headers,
-                &["comp", "blocklisttype"],
-                &["if-match", "if-none-match"],
-                false,
-            )?;
-            let list = match param("blocklisttype") {
-                None | Some("committed") => BlockListKind::Committed,
-                Some("uncommitted") => BlockListKind::Uncommitted,
-                Some("all") => BlockListKind::All,
-                _ => return Err(Error::InvalidQuery),
-            };
-            Operation::GetBlockList(key, list, condition(headers)?)
-        }
-        (Resource::Blob(key), &Method::PUT, None, None) => {
-            check(
-                &query,
-                headers,
-                &[],
-                &[
-                    "if-match",
-                    "if-none-match",
-                    "x-ms-blob-type",
-                    "x-ms-blob-content-type",
-                    "content-md5",
-                    "x-ms-content-crc64",
-                ],
-                true,
-            )?;
-            match header(headers, "x-ms-blob-type")? {
-                Some("BlockBlob") => (),
-                Some("AppendBlob" | "PageBlob") => return Err(Error::Unsupported),
-                _ => return Err(Error::InvalidHeader),
-            }
-            Operation::PutBlob(
-                key,
-                upload_options(headers, config.max_blob_bytes)?,
-                blob_write(headers, true)?,
-            )
-        }
-        (Resource::Blob(key), method @ (&Method::GET | &Method::HEAD), None, None) => {
-            let with_body = method == Method::GET;
-            let fields: &[&str] = if with_body {
-                &["if-match", "if-none-match", "range", "x-ms-range"]
-            } else {
-                &["if-match", "if-none-match"]
-            };
-            check(&query, headers, &[], fields, false)?;
-            Operation::ReadBlob(key, read_options(headers, with_body)?)
-        }
-        (Resource::Blob(key), &Method::DELETE, None, None) => {
-            check(&query, headers, &[], &["if-match", "if-none-match"], false)?;
-            Operation::DeleteBlob(key, condition(headers)?)
-        }
-        _ => return Err(Error::Unsupported),
+        other => other?,
     };
     Ok(ParsedRequest {
-        operation: op,
+        need: operation.need(),
+        operation,
         requested_version,
+        target,
+        credentials,
     })
 }
 
-pub(crate) fn read_options(headers: &HeaderMap, with_body: bool) -> Result<ReadOptions> {
-    let range = header(headers, "x-ms-range")?
-        .or(header(headers, "range")?)
-        .map(ByteRange::parse)
-        .transpose()?;
-    Ok(ReadOptions {
-        condition: condition(headers)?,
-        range,
-        with_body,
-    })
+impl Operation {
+    fn need(&self) -> Need {
+        match self {
+            Self::ListContainers(..) => LIST_CONTAINERS,
+            Self::GetServiceProperties(_) | Self::ServiceStats => SERVICE_READ,
+            Self::SetServiceProperties(..) => SERVICE_WRITE,
+            Self::AccountInfo => ANY_SAS,
+            Self::CreateContainer(..) => CREATE_CONTAINER,
+            Self::ContainerProperties(..) => READ_CONTAINER,
+            Self::GetContainerAcl(..) => READ_CONTAINER_PRIVATE,
+            Self::SetContainerMetadata(..)
+            | Self::SetContainerAcl(..)
+            | Self::LeaseContainer(..) => WRITE_CONTAINER,
+            Self::DeleteContainer(..) => DELETE_CONTAINER,
+            Self::ListBlobs(..) => LIST_BLOBS,
+            Self::PutBlob(..)
+            | Self::PutBlobFromUrl(..)
+            | Self::PutBlock(..)
+            | Self::PutBlockFromUrl(..)
+            | Self::PutBlockList(..)
+            | Self::CopyBlob(..) => CREATE_BLOB,
+            Self::GetBlockList(..) | Self::ReadBlob(..) | Self::BlobMetadata(..) => READ_BLOB,
+            Self::SetBlobProperties(..)
+            | Self::SetBlobMetadata(..)
+            | Self::SetBlobTier(..)
+            | Self::LeaseBlob(..)
+            | Self::AbortCopy(..) => WRITE_BLOB,
+            Self::DeleteBlob(..) => DELETE_BLOB,
+        }
+    }
 }
 
-fn condition(headers: &HeaderMap) -> Result<Condition> {
-    Condition::parse(
-        header(headers, "if-match")?,
-        header(headers, "if-none-match")?,
-    )
+impl Request<'_> {
+    fn param(&self, name: &str) -> Option<&str> {
+        self.query.get(name).map(String::as_str)
+    }
+
+    fn check(&self, params: &[&str], headers: &[&[&str]], metadata: bool) -> Result<()> {
+        check(self.query, self.headers, params, headers, metadata)
+    }
+
+    fn listing(&self) -> Result<PageRequest> {
+        PageRequest::parse(
+            self.param("prefix"),
+            self.param("marker"),
+            self.param("maxresults"),
+        )
+    }
+
+    fn account_operation(&self, account: AccountName) -> Result<Operation> {
+        let (restype, comp) = (self.param("restype"), self.param("comp"));
+        Ok(match (self.method, restype, comp) {
+            (&Method::GET, None, Some("list")) => {
+                self.check(
+                    &["comp", "prefix", "marker", "maxresults", "include"],
+                    &[],
+                    false,
+                )?;
+                let metadata = match self.param("include") {
+                    None | Some("") => false,
+                    Some("metadata") => true,
+                    Some(_) => return Err(Error::Unsupported),
+                };
+                Operation::ListContainers(account, self.listing()?, metadata)
+            }
+            (&Method::GET, Some("service"), Some("properties")) => {
+                self.check(&["restype", "comp"], &[], false)?;
+                Operation::GetServiceProperties(account)
+            }
+            (&Method::PUT, Some("service"), Some("properties")) => {
+                self.check(&["restype", "comp"], &[CHECKSUMS], false)?;
+                Operation::SetServiceProperties(
+                    account,
+                    upload_options(self.headers, MAX_XML_BODY_BYTES)?,
+                )
+            }
+            (&Method::GET, Some("service"), Some("stats")) => {
+                self.check(&["restype", "comp"], &[], false)?;
+                Operation::ServiceStats
+            }
+            (&Method::GET | &Method::HEAD, Some("account"), Some("properties")) => {
+                self.check(&["restype", "comp"], &[], false)?;
+                Operation::AccountInfo
+            }
+            _ => return Err(Error::Unsupported),
+        })
+    }
+
+    fn container_operation(&self, key: ContainerKey) -> Result<Operation> {
+        let (restype, comp) = (self.param("restype"), self.param("comp"));
+        let reading = matches!(*self.method, Method::GET | Method::HEAD);
+        let lease = || lease_id(self.headers, "x-ms-lease-id");
+        Ok(match (restype, comp) {
+            (Some("container"), None) => {
+                self.check(
+                    &["restype"],
+                    &[&["x-ms-blob-public-access"], LEASE, DATE_CONDITIONS],
+                    true,
+                )?;
+                match *self.method {
+                    Method::PUT => Operation::CreateContainer(
+                        key,
+                        ContainerCreate {
+                            metadata: metadata(self.headers)?,
+                            public_access: public_access(self.headers)?,
+                        },
+                    ),
+                    Method::GET | Method::HEAD => {
+                        Operation::ContainerProperties(key, lease()?, ContainerView::Properties)
+                    }
+                    Method::DELETE => Operation::DeleteContainer(key, Guard::parse(self.headers)?),
+                    _ => return Err(Error::Unsupported),
+                }
+            }
+            (Some("container"), Some("metadata")) if reading => {
+                self.check(&["restype", "comp"], &[LEASE], false)?;
+                Operation::ContainerProperties(key, lease()?, ContainerView::Metadata)
+            }
+            (Some("container"), Some("metadata")) if *self.method == Method::PUT => {
+                self.check(&["restype", "comp"], &[LEASE, DATE_CONDITIONS], true)?;
+                Operation::SetContainerMetadata(
+                    key,
+                    metadata(self.headers)?,
+                    Guard::parse(self.headers)?,
+                )
+            }
+            (Some("container"), Some("acl")) if reading => {
+                self.check(&["restype", "comp"], &[LEASE], false)?;
+                Operation::GetContainerAcl(key, lease()?)
+            }
+            (Some("container"), Some("acl")) if *self.method == Method::PUT => {
+                self.check(
+                    &["restype", "comp"],
+                    &[
+                        &["x-ms-blob-public-access"],
+                        LEASE,
+                        DATE_CONDITIONS,
+                        CHECKSUMS,
+                    ],
+                    false,
+                )?;
+                Operation::SetContainerAcl(
+                    key,
+                    upload_options(self.headers, MAX_XML_BODY_BYTES)?,
+                    public_access(self.headers)?,
+                    Guard::parse(self.headers)?,
+                )
+            }
+            (Some("container"), Some("lease")) if *self.method == Method::PUT => {
+                self.check(
+                    &["restype", "comp"],
+                    &[LEASE_HEADERS, DATE_CONDITIONS],
+                    false,
+                )?;
+                Operation::LeaseContainer(
+                    key,
+                    lease_action(self.headers)?,
+                    Guard::parse(self.headers)?,
+                )
+            }
+            (Some("container"), Some("list")) if *self.method == Method::GET => {
+                self.check(
+                    &[
+                        "comp",
+                        "restype",
+                        "prefix",
+                        "marker",
+                        "maxresults",
+                        "include",
+                        "delimiter",
+                    ],
+                    &[LEASE],
+                    false,
+                )?;
+                Operation::ListBlobs(
+                    key,
+                    ListRequest {
+                        page: self.listing()?,
+                        delimiter: self
+                            .param("delimiter")
+                            .filter(|delimiter| !delimiter.is_empty())
+                            .map(str::to_owned),
+                        include: includes(self.param("include"))?,
+                    },
+                    lease()?,
+                )
+            }
+            (Some("account"), Some("properties")) if reading => {
+                self.check(&["restype", "comp"], &[], false)?;
+                Operation::AccountInfo
+            }
+            _ => return Err(Error::Unsupported),
+        })
+    }
+
+    fn blob_operation(&self, key: BlobKey) -> Result<Operation> {
+        let (restype, comp) = (self.param("restype"), self.param("comp"));
+        let reading = matches!(*self.method, Method::GET | Method::HEAD);
+        let lease = || lease_id(self.headers, "x-ms-lease-id");
+        let guard = || Guard::parse(self.headers);
+        if let (Some("account"), Some("properties"), true) = (restype, comp, reading) {
+            self.check(&["restype", "comp"], &[], false)?;
+            return Ok(Operation::AccountInfo);
+        }
+        if restype.is_some() {
+            return Err(Error::Unsupported);
+        }
+        Ok(match (self.method, comp) {
+            (&Method::PUT, None) if self.headers.contains_key("x-ms-copy-source") => {
+                if header(self.headers, "x-ms-blob-type")?.is_some() {
+                    self.check(
+                        &[],
+                        &[
+                            &[
+                                "x-ms-blob-type",
+                                "x-ms-copy-source-blob-properties",
+                                "x-ms-access-tier",
+                            ],
+                            SOURCE,
+                            CONDITIONS,
+                            LEASE,
+                            BLOB_PROPERTIES,
+                            PLAIN_PROPERTIES,
+                        ],
+                        true,
+                    )?;
+                    require_block_blob(self.headers)?;
+                    let copy_properties = header(self.headers, "x-ms-copy-source-blob-properties")?
+                        .is_none_or(|value| value != "false");
+                    Operation::PutBlobFromUrl(
+                        key,
+                        blob_write(self.headers, true)?,
+                        self.source(None, copy_properties)?,
+                    )
+                } else {
+                    self.check(
+                        &[],
+                        &[
+                            &[
+                                "x-ms-requires-sync",
+                                "x-ms-access-tier",
+                                "x-ms-rehydrate-priority",
+                            ],
+                            SOURCE,
+                            CONDITIONS,
+                            LEASE,
+                        ],
+                        true,
+                    )?;
+                    Operation::CopyBlob(
+                        key,
+                        blob_write(self.headers, false)?,
+                        self.source(None, true)?,
+                    )
+                }
+            }
+            (&Method::PUT, Some("copy")) => {
+                self.check(&["comp", "copyid"], &[&["x-ms-copy-action"], LEASE], false)?;
+                if header(self.headers, "x-ms-copy-action")? != Some("abort") {
+                    return Err(Error::InvalidHeader);
+                }
+                Operation::AbortCopy(
+                    key,
+                    self.param("copyid").ok_or(Error::InvalidQuery)?.to_owned(),
+                    lease()?,
+                )
+            }
+            (&Method::PUT, Some("block")) if self.headers.contains_key("x-ms-copy-source") => {
+                self.check(
+                    &["comp", "blockid"],
+                    &[
+                        SOURCE,
+                        LEASE,
+                        &["x-ms-source-range", "content-md5", "x-ms-content-crc64"],
+                    ],
+                    false,
+                )?;
+                let range = header(self.headers, "x-ms-source-range")?
+                    .map(ByteRange::parse)
+                    .transpose()?;
+                Operation::PutBlockFromUrl(
+                    key,
+                    BlockId::parse(self.param("blockid").ok_or(Error::InvalidQuery)?)?,
+                    lease()?,
+                    self.source(range, true)?,
+                )
+            }
+            (&Method::PUT, Some("block")) => {
+                self.check(&["comp", "blockid"], &[CHECKSUMS, LEASE], false)?;
+                let id = BlockId::parse(self.param("blockid").ok_or(Error::InvalidQuery)?)?;
+                Operation::PutBlock(
+                    key,
+                    id,
+                    upload_options(self.headers, self.config.max_block_bytes)?,
+                    lease()?,
+                )
+            }
+            (&Method::PUT, Some("blocklist")) => {
+                self.check(
+                    &["comp"],
+                    &[
+                        CONDITIONS,
+                        LEASE,
+                        BLOB_PROPERTIES,
+                        CHECKSUMS,
+                        &["x-ms-access-tier"],
+                    ],
+                    true,
+                )?;
+                Operation::PutBlockList(
+                    key,
+                    upload_options(self.headers, MAX_BLOCK_LIST_BYTES)?,
+                    blob_write(self.headers, false)?,
+                )
+            }
+            (&Method::GET, Some("blocklist")) => {
+                self.check(&["comp", "blocklisttype"], &[CONDITIONS, LEASE], false)?;
+                let list = match self.param("blocklisttype") {
+                    None | Some("committed") => BlockListKind::Committed,
+                    Some("uncommitted") => BlockListKind::Uncommitted,
+                    Some("all") => BlockListKind::All,
+                    _ => return Err(Error::InvalidQuery),
+                };
+                Operation::GetBlockList(key, list, guard()?)
+            }
+            (&Method::PUT, None) => {
+                self.check(
+                    &[],
+                    &[
+                        CONDITIONS,
+                        LEASE,
+                        BLOB_PROPERTIES,
+                        PLAIN_PROPERTIES,
+                        CHECKSUMS,
+                        &["x-ms-blob-type", "x-ms-access-tier"],
+                    ],
+                    true,
+                )?;
+                require_block_blob(self.headers)?;
+                Operation::PutBlob(
+                    key,
+                    upload_options(self.headers, self.config.max_blob_bytes)?,
+                    blob_write(self.headers, true)?,
+                )
+            }
+            (method @ (&Method::GET | &Method::HEAD), None | Some("metadata")) => {
+                let with_body = method == Method::GET && comp.is_none();
+                let ranged: &[&str] = if with_body {
+                    &[
+                        "range",
+                        "x-ms-range",
+                        "x-ms-range-get-content-md5",
+                        "x-ms-range-get-content-crc64",
+                    ]
+                } else {
+                    &[]
+                };
+                let params: &[&str] = if comp.is_some() { &["comp"] } else { &[] };
+                self.check(params, &[CONDITIONS, LEASE, ranged], false)?;
+                if comp.is_some() {
+                    return Ok(Operation::BlobMetadata(key, guard()?));
+                }
+                let range = header(self.headers, "x-ms-range")?
+                    .or(header(self.headers, "range")?)
+                    .map(ByteRange::parse)
+                    .transpose()?;
+                Operation::ReadBlob(
+                    key,
+                    BlobRead {
+                        guard: guard()?,
+                        range,
+                        with_body,
+                        range_checksum: range_checksum(self.headers)?,
+                    },
+                )
+            }
+            (&Method::DELETE, None) => {
+                self.check(&[], &[CONDITIONS, LEASE, &["x-ms-delete-snapshots"]], false)?;
+                match header(self.headers, "x-ms-delete-snapshots")? {
+                    None | Some("include") => (),
+                    Some("only") => return Err(Error::Unsupported),
+                    Some(_) => return Err(Error::InvalidHeader),
+                }
+                Operation::DeleteBlob(key, guard()?)
+            }
+            (&Method::PUT, Some("properties")) => {
+                self.check(&["comp"], &[CONDITIONS, LEASE, BLOB_PROPERTIES], false)?;
+                let (headers, replace) = content_headers(self.headers, false)?;
+                Operation::SetBlobProperties(
+                    key,
+                    headers,
+                    decode_hash(header(self.headers, "x-ms-blob-content-md5")?)?,
+                    replace,
+                    guard()?,
+                )
+            }
+            (&Method::PUT, Some("metadata")) => {
+                self.check(&["comp"], &[CONDITIONS, LEASE], true)?;
+                Operation::SetBlobMetadata(key, metadata(self.headers)?, guard()?)
+            }
+            (&Method::PUT, Some("tier")) => {
+                self.check(
+                    &["comp"],
+                    &[LEASE, &["x-ms-access-tier", "x-ms-rehydrate-priority"]],
+                    false,
+                )?;
+                if let Some(priority) = header(self.headers, "x-ms-rehydrate-priority")?
+                    && !matches!(priority, "High" | "Standard")
+                {
+                    return Err(Error::InvalidHeader);
+                }
+                let tier = header(self.headers, "x-ms-access-tier")?.ok_or(Error::MissingHeader)?;
+                Operation::SetBlobTier(key, AccessTier::parse(tier)?, lease()?)
+            }
+            (&Method::PUT, Some("lease")) => {
+                self.check(&["comp"], &[LEASE_HEADERS, CONDITIONS], false)?;
+                Operation::LeaseBlob(
+                    key,
+                    lease_action(self.headers)?,
+                    Conditions::parse(self.headers, &conditions::STANDARD)?,
+                )
+            }
+            _ => return Err(Error::Unsupported),
+        })
+    }
+
+    fn source(&self, range: Option<ByteRange>, copy_properties: bool) -> Result<SourceRequest> {
+        let url = header(self.headers, "x-ms-copy-source")?.ok_or(Error::MissingHeader)?;
+        Ok(SourceRequest {
+            url: CopySource::parse(url)?,
+            guard: Guard {
+                conditions: Conditions::parse(self.headers, &conditions::SOURCE)?,
+                lease: lease_id(self.headers, "x-ms-source-lease-id")?,
+            },
+            range,
+            copy_properties,
+            replace_metadata: self
+                .headers
+                .keys()
+                .any(|name| name.as_str().starts_with("x-ms-meta-")),
+        })
+    }
+}
+
+fn require_block_blob(headers: &HeaderMap) -> Result<()> {
+    match header(headers, "x-ms-blob-type")? {
+        Some("BlockBlob") => Ok(()),
+        Some("AppendBlob" | "PageBlob") => Err(Error::Unsupported),
+        _ => Err(Error::InvalidHeader),
+    }
+}
+
+fn public_access(headers: &HeaderMap) -> Result<PublicAccess> {
+    header(headers, "x-ms-blob-public-access")?
+        .map(PublicAccess::parse)
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+fn includes(value: Option<&str>) -> Result<Vec<Include>> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .filter(|item| !item.is_empty())
+        .map(|item| match item {
+            "metadata" => Ok(Include::Metadata),
+            "copy" => Ok(Include::Copy),
+            "uncommittedblobs" => Ok(Include::Uncommitted),
+            _ => Err(Error::Unsupported),
+        })
+        .collect()
+}
+
+fn range_checksum(headers: &HeaderMap) -> Result<Option<RangeChecksum>> {
+    let flag = |name| Ok(header(headers, name)? == Some("true"));
+    match (
+        flag("x-ms-range-get-content-md5")?,
+        flag("x-ms-range-get-content-crc64")?,
+    ) {
+        (true, true) => Err(Error::InvalidHeader),
+        (true, false) => Ok(Some(RangeChecksum::Md5)),
+        (false, true) => Ok(Some(RangeChecksum::Crc64)),
+        (false, false) => Ok(None),
+    }
+}
+
+fn lease_action(headers: &HeaderMap) -> Result<LeaseAction> {
+    let current = || lease_id(headers, "x-ms-lease-id")?.ok_or(Error::MissingHeader);
+    match header(headers, "x-ms-lease-action")?.ok_or(Error::MissingHeader)? {
+        "acquire" => Ok(LeaseAction::Acquire {
+            duration: LeaseDuration::parse(
+                header(headers, "x-ms-lease-duration")?.ok_or(Error::MissingHeader)?,
+            )?,
+            proposed: lease_id(headers, "x-ms-proposed-lease-id")?,
+        }),
+        "renew" => Ok(LeaseAction::Renew(current()?)),
+        "change" => Ok(LeaseAction::Change {
+            current: current()?,
+            proposed: lease_id(headers, "x-ms-proposed-lease-id")?.ok_or(Error::MissingHeader)?,
+        }),
+        "release" => Ok(LeaseAction::Release(current()?)),
+        "break" => Ok(LeaseAction::Break {
+            period: header(headers, "x-ms-lease-break-period")?
+                .map(|period| match period.parse::<u32>() {
+                    Ok(seconds @ 0..=60) => Ok(seconds),
+                    _ => Err(Error::InvalidHeader),
+                })
+                .transpose()?,
+        }),
+        _ => Err(Error::InvalidHeader),
+    }
 }
 
 fn upload_options(headers: &HeaderMap, limit: u64) -> Result<UploadOptions> {
@@ -350,18 +821,54 @@ fn decode_hash<const N: usize>(value: Option<&str>) -> Result<Option<[u8; N]>> {
         .transpose()
 }
 
-fn blob_write(headers: &HeaderMap, request_content_type: bool) -> Result<BlobWrite> {
-    let request_content_type = if request_content_type {
-        header(headers, "content-type")?
-    } else {
-        None
+/// Reads the content headers. The `x-ms-blob-*` form wins over the plain
+/// header; `plain` also accepts the plain `Content-Type` of a Put Blob request.
+/// The flag reports whether any content property was supplied.
+fn content_headers(headers: &HeaderMap, plain: bool) -> Result<(ContentHeaders, bool)> {
+    let pick = |blob: &str, standard: Option<&str>| -> Result<Option<String>> {
+        let value = match header(headers, blob)? {
+            Some(value) => Some(value),
+            None => match standard {
+                Some(name) => header(headers, name)?,
+                None => None,
+            },
+        };
+        match value {
+            Some(value) if value.len() > 1024 || !xml_safe(value) => Err(Error::InvalidHeader),
+            other => Ok(other.map(str::to_owned)),
+        }
     };
-    let content_type = header(headers, "x-ms-blob-content-type")?
-        .or(request_content_type)
-        .unwrap_or("application/octet-stream");
-    if content_type.is_empty() || content_type.len() > 512 || !xml_safe(content_type) {
+    let fallback = |name| plain.then_some(name);
+    let content_type = pick("x-ms-blob-content-type", fallback("content-type"))?;
+    if content_type
+        .as_deref()
+        .is_some_and(|value| value.is_empty() || value.len() > 512)
+    {
         return Err(Error::InvalidHeader);
     }
+    let encoding = pick("x-ms-blob-content-encoding", fallback("content-encoding"))?;
+    let language = pick("x-ms-blob-content-language", fallback("content-language"))?;
+    let disposition = pick(
+        "x-ms-blob-content-disposition",
+        fallback("content-disposition"),
+    )?;
+    let cache_control = pick("x-ms-blob-cache-control", fallback("cache-control"))?;
+    let supplied = BLOB_PROPERTIES
+        .iter()
+        .any(|name| headers.contains_key(*name));
+    Ok((
+        ContentHeaders {
+            content_type: content_type.unwrap_or_else(|| "application/octet-stream".into()),
+            encoding: encoding.unwrap_or_default(),
+            language: language.unwrap_or_default(),
+            disposition: disposition.unwrap_or_default(),
+            cache_control: cache_control.unwrap_or_default(),
+        },
+        supplied,
+    ))
+}
+
+fn metadata(headers: &HeaderMap) -> Result<Metadata> {
     let mut metadata = Metadata::new();
     for (name, value) in headers {
         if let Some(name) = name.as_str().strip_prefix("x-ms-meta-") {
@@ -388,10 +895,19 @@ fn blob_write(headers: &HeaderMap, request_content_type: bool) -> Result<BlobWri
     {
         return Err(Error::InvalidHeader);
     }
+    Ok(metadata)
+}
+
+fn blob_write(headers: &HeaderMap, plain: bool) -> Result<BlobWrite> {
     Ok(BlobWrite {
-        content_type: content_type.to_owned(),
-        metadata,
-        condition: condition(headers)?,
+        headers: content_headers(headers, plain)?.0,
+        metadata: metadata(headers)?,
+        guard: Guard::parse(headers)?,
+        tier: header(headers, "x-ms-access-tier")?
+            .map(AccessTier::parse)
+            .transpose()?,
+        copy: None,
+        md5: decode_hash(header(headers, "x-ms-blob-content-md5")?)?,
     })
 }
 
@@ -455,23 +971,31 @@ pub(crate) fn parse_block_list(body: &[u8]) -> Result<Vec<BlockSelection>> {
     Ok(selections)
 }
 
+/// Rejects query parameters and `x-ms-*` or conditional headers the operation
+/// does not implement, instead of silently ignoring them.
 pub(crate) fn check(
     query: &Query,
     headers: &HeaderMap,
     allowed_query: &[&str],
-    allowed_headers: &[&str],
+    allowed_headers: &[&[&str]],
     metadata: bool,
 ) -> Result<()> {
     if query
         .keys()
-        .any(|key| !allowed_query.contains(&key.as_str()))
+        .any(|key| key != "timeout" && !allowed_query.contains(&key.as_str()))
     {
         return Err(Error::Unsupported);
     }
     for key in headers.keys() {
         let key = key.as_str();
-        if allowed_headers.contains(&key)
-            || matches!(key, "x-ms-version" | "x-ms-date" | "x-ms-client-request-id")
+        if allowed_headers.iter().any(|list| list.contains(&key))
+            || matches!(
+                key,
+                "x-ms-version"
+                    | "x-ms-date"
+                    | "x-ms-client-request-id"
+                    | "x-ms-return-client-request-id"
+            )
             || metadata && key.starts_with("x-ms-meta-")
         {
             continue;
@@ -486,7 +1010,6 @@ pub(crate) fn check(
                     | "content-language"
                     | "cache-control"
                     | "content-disposition"
-                    | "origin"
             )
         {
             return Err(Error::Unsupported);
@@ -495,7 +1018,61 @@ pub(crate) fn check(
     Ok(())
 }
 
-fn parse_query(query: Option<&str>) -> Result<Query> {
+pub(crate) type Resource = Target;
+
+/// A request that passed Shared Key authentication, for services that are not
+/// Blob (DFS). Blob authenticates through `parse` and `blob_auth` instead.
+pub(crate) struct AuthenticatedRequest {
+    pub(crate) requested_version: ApiVersion,
+    pub(crate) resource: Resource,
+    pub(crate) query: Query,
+}
+
+pub(crate) fn authenticate(parts: &Parts, config: &Config) -> Result<AuthenticatedRequest> {
+    let headers = &parts.headers;
+    if headers.len() > 100
+        || headers
+            .iter()
+            .map(|(name, value)| name.as_str().len() + value.len())
+            .sum::<usize>()
+            > 32768
+    {
+        return Err(Error::InvalidHeader);
+    }
+    let requested_version =
+        ApiVersion::parse(header(headers, "x-ms-version")?.ok_or(Error::InvalidVersion)?)?;
+    if requested_version != config.api_version
+        && (!config.skip_api_version_check || requested_version < config.api_version)
+    {
+        return Err(Error::InvalidVersion);
+    }
+    let query = parse_query(parts.uri.query())?;
+    if query.contains_key("sig") {
+        return Err(Error::Unsupported);
+    }
+    let resource = parse_target(parts.uri.path())?;
+    let account = resource.account();
+    let keys = config
+        .accounts
+        .get(account)
+        .ok_or(Error::AuthenticationFailed)?;
+    crate::auth::verify(
+        account,
+        keys,
+        &parts.method,
+        parts.uri.path(),
+        &query,
+        headers,
+        SystemTime::now(),
+    )?;
+    Ok(AuthenticatedRequest {
+        requested_version,
+        resource,
+        query,
+    })
+}
+
+pub(crate) fn parse_query(query: Option<&str>) -> Result<Query> {
     let mut result = Query::new();
     if let Some(query) = query.filter(|query| !query.is_empty()) {
         if query.len() > 16 * 1024 {
@@ -541,6 +1118,15 @@ fn decode(value: &str, query: bool) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderValue;
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in pairs {
+            headers.insert(*name, HeaderValue::from_str(value).unwrap());
+        }
+        headers
+    }
 
     #[test]
     fn query_rejects_ambiguous_signature_and_literal_line_breaks() {
@@ -562,5 +1148,105 @@ mod tests {
             Some("a +/b")
         );
         assert_eq!(decode("a+%2Fb", false).as_deref(), Some("a+/b"));
+    }
+
+    #[test]
+    fn blob_headers_prefer_the_blob_specific_form_and_report_whether_any_were_sent() {
+        let sent = headers(&[
+            ("x-ms-blob-content-type", "text/plain"),
+            ("content-type", "ignored/for-properties"),
+            ("content-encoding", "gzip"),
+            ("x-ms-blob-cache-control", "no-store"),
+        ]);
+        let (props, supplied) = content_headers(&sent, true).unwrap();
+        assert!(supplied);
+        assert_eq!(props.content_type, "text/plain");
+        assert_eq!(
+            (props.encoding.as_str(), props.cache_control.as_str()),
+            ("gzip", "no-store")
+        );
+        let (props, supplied) = content_headers(&sent, false).unwrap();
+        assert_eq!((props.encoding.as_str(), supplied), ("", true));
+        let (props, supplied) = content_headers(&headers(&[]), true).unwrap();
+        assert_eq!(
+            (props.content_type.as_str(), supplied),
+            ("application/octet-stream", false)
+        );
+        assert!(content_headers(&headers(&[("x-ms-blob-content-type", "")]), true).is_err());
+    }
+
+    #[test]
+    fn lease_headers_map_to_actions_and_reject_invalid_values() {
+        let id = "00000000-0000-0000-0000-000000000001";
+        let other = "00000000-0000-0000-0000-000000000002";
+        let acquire = headers(&[
+            ("x-ms-lease-action", "acquire"),
+            ("x-ms-lease-duration", "-1"),
+        ]);
+        assert!(matches!(
+            lease_action(&acquire),
+            Ok(LeaseAction::Acquire {
+                duration: LeaseDuration::Infinite,
+                proposed: None
+            })
+        ));
+        let change = headers(&[
+            ("x-ms-lease-action", "change"),
+            ("x-ms-lease-id", id),
+            ("x-ms-proposed-lease-id", other),
+        ]);
+        assert!(matches!(
+            lease_action(&change),
+            Ok(LeaseAction::Change { .. })
+        ));
+        let brk = headers(&[
+            ("x-ms-lease-action", "break"),
+            ("x-ms-lease-break-period", "61"),
+        ]);
+        assert_eq!(lease_action(&brk).err(), Some(Error::InvalidHeader));
+        let renew = headers(&[("x-ms-lease-action", "renew")]);
+        assert_eq!(lease_action(&renew).err(), Some(Error::MissingHeader));
+        let short = headers(&[
+            ("x-ms-lease-action", "acquire"),
+            ("x-ms-lease-duration", "5"),
+        ]);
+        assert_eq!(lease_action(&short).err(), Some(Error::InvalidHeader));
+    }
+
+    #[test]
+    fn unimplemented_headers_and_parameters_are_refused() {
+        let query = Query::from([("snapshot".to_owned(), "x".to_owned())]);
+        assert_eq!(
+            check(&query, &headers(&[]), &[], &[], false),
+            Err(Error::Unsupported)
+        );
+        let tags = headers(&[("x-ms-tags", "a=b")]);
+        assert_eq!(
+            check(&Query::new(), &tags, &[], &[], false),
+            Err(Error::Unsupported)
+        );
+        let timeout = Query::from([("timeout".to_owned(), "30".to_owned())]);
+        assert_eq!(
+            check(
+                &timeout,
+                &headers(&[("origin", "https://a.test")]),
+                &[],
+                &[],
+                false
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn listing_includes_name_what_they_support() {
+        assert_eq!(
+            includes(Some("metadata,copy,uncommittedblobs"))
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(includes(Some("snapshots")).err(), Some(Error::Unsupported));
+        assert!(includes(None).unwrap().is_empty());
     }
 }

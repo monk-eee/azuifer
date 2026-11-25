@@ -1,8 +1,12 @@
 use crate::{
     auth::header,
+    conditions::Guard,
     config::Config,
-    domain::{AccountName, BlobKey, ContainerKey, Entity, Error, Page, PageRequest, Result},
-    protocol::{self, AuthenticatedRequest, ReadOptions, Resource},
+    domain::{
+        AccountName, BlobKey, BlobRead, ByteRange, ContainerCreate, ContainerKey, Entity, Error,
+        Metadata, Page, PageRequest, PublicAccess, Result,
+    },
+    protocol::{self, AuthenticatedRequest, Resource},
     store::Store,
     wire::{self, empty, entity_response, json_response, modified, set},
 };
@@ -30,9 +34,9 @@ struct App {
 enum Operation {
     CreateFilesystem(ContainerKey),
     FilesystemProperties(ContainerKey),
-    DeleteFilesystem(ContainerKey),
+    DeleteFilesystem(ContainerKey, Guard),
     ListFilesystems(AccountName, PageRequest),
-    ReadFile(BlobKey, ReadOptions),
+    ReadFile(BlobKey, BlobRead),
 }
 
 enum DfsError {
@@ -119,8 +123,9 @@ fn parse(
         return Err(Error::InvalidLength.into());
     }
     let param = |name| query.get(name).map(String::as_str);
-    let check =
-        |params: &[&str], fields: &[&str]| protocol::check(&query, headers, params, fields, false);
+    let check = |params: &[&str], fields: &[&str]| {
+        protocol::check(&query, headers, params, &[fields], false)
+    };
     let op = match (resource, &parts.method, param("resource")) {
         (Resource::Account(account), &Method::GET, Some("account")) => {
             check(&["resource", "prefix", "continuation", "maxresults"], &[])?;
@@ -133,7 +138,7 @@ fn parse(
             match *method {
                 Method::PUT => Operation::CreateFilesystem(key),
                 Method::HEAD => Operation::FilesystemProperties(key),
-                Method::DELETE => Operation::DeleteFilesystem(key),
+                Method::DELETE => Operation::DeleteFilesystem(key, Guard::parse(headers)?),
                 _ => return Err(Error::Unsupported.into()),
             }
         }
@@ -145,7 +150,19 @@ fn parse(
                 &["if-match", "if-none-match"]
             };
             check(&[], fields)?;
-            Operation::ReadFile(key, protocol::read_options(headers, with_body)?)
+            let range = header(headers, "x-ms-range")?
+                .or(header(headers, "range")?)
+                .map(ByteRange::parse)
+                .transpose()?;
+            Operation::ReadFile(
+                key,
+                BlobRead {
+                    guard: Guard::parse(headers)?,
+                    range,
+                    with_body,
+                    range_checksum: None,
+                },
+            )
         }
         _ => return Err(Error::Unsupported.into()),
     };
@@ -154,23 +171,38 @@ fn parse(
 
 async fn execute(store: &Store, op: Operation) -> Result<Response> {
     match op {
-        Operation::CreateFilesystem(key) => {
-            filesystem(StatusCode::CREATED, store.create_container(key).await?)
-        }
+        Operation::CreateFilesystem(key) => filesystem(
+            StatusCode::CREATED,
+            store
+                .create_container(
+                    key,
+                    ContainerCreate {
+                        metadata: Metadata::new(),
+                        public_access: PublicAccess::default(),
+                    },
+                )
+                .await?,
+        ),
         Operation::FilesystemProperties(key) => {
-            filesystem(StatusCode::OK, store.container(key).await?)
+            filesystem(StatusCode::OK, store.container(key, None).await?.entity)
         }
-        Operation::DeleteFilesystem(key) => {
-            store.delete_container(key).await?;
+        Operation::DeleteFilesystem(key, guard) => {
+            store.delete_container(key, guard).await?;
             Ok(empty(StatusCode::ACCEPTED))
         }
         Operation::ListFilesystems(account, page) => {
-            list_filesystems(store.list_containers(account, page).await?)
+            let page = store.list_containers(account, page).await?;
+            list_filesystems(Page {
+                items: page
+                    .items
+                    .into_iter()
+                    .map(|(name, info)| (name, info.entity))
+                    .collect(),
+                next: page.next,
+            })
         }
         Operation::ReadFile(key, options) => {
-            let download = store
-                .read_blob(key, options.condition, options.range, options.with_body)
-                .await?;
+            let download = store.read_blob(key, options).await?;
             let (mut response, metadata) = wire::download_response(download)?;
             let headers = response.headers_mut();
             headers.insert("x-ms-resource-type", HeaderValue::from_static("file"));

@@ -42,6 +42,9 @@ pub(crate) fn to_millis(time: SystemTime) -> i64 {
     }
 }
 
+/// The inverse of [`to_millis`]. Blob stores times as milliseconds and never
+/// needs the reverse; the Queue and Table services convert stored times back.
+#[allow(dead_code)]
 pub(crate) fn from_millis(millis: i64) -> Result<SystemTime> {
     let shift = Duration::from_millis(millis.unsigned_abs());
     if millis >= 0 {

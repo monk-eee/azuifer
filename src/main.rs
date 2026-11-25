@@ -1,21 +1,30 @@
+mod acl;
+mod address;
 mod auth;
+mod blob_auth;
+mod blob_copy;
+mod blob_cors;
+mod blob_exec;
+mod blob_sas;
 mod checksum;
-// Foundations awaiting their first service consumers (ADR-0011, ADR-0012); drop these allows when used.
-#[allow(dead_code)]
 mod clock;
+mod conditions;
 mod config;
 mod conformance;
 mod dfs;
 mod domain;
 mod files;
+mod lease;
 mod protocol;
 mod queue;
-#[allow(dead_code)]
+mod respond;
 mod sas;
 mod server;
+mod service_props;
 mod store;
 mod table;
 mod wire;
+mod xml_tree;
 
 use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};

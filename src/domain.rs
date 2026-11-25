@@ -1,7 +1,9 @@
+use crate::{conditions::Guard, lease::LeaseView};
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
@@ -35,6 +37,33 @@ pub(crate) enum Error {
     Busy,
     Timeout,
     Internal,
+    ResourceNotFound,
+    PermissionMismatch,
+    ResourceTypeMismatch,
+    ServiceMismatch,
+    SourceIpMismatch,
+    ProtocolMismatch,
+    BlobAlreadyExists,
+    BlobArchived,
+    MissingHeader,
+    LeaseIdMissing,
+    LeaseLost,
+    LeaseAlreadyPresent,
+    LeaseMismatchBlob,
+    LeaseMismatchContainer,
+    LeaseMismatchLease,
+    LeaseNotPresentBlob,
+    LeaseNotPresentContainer,
+    LeaseNotPresentLease,
+    LeaseBreakingNoAcquire,
+    LeaseBreakingNoChange,
+    LeaseBrokenNoRenew,
+    NoPendingCopy,
+    CopyIdMismatch,
+    CopySourceDenied,
+    CopySourceMissing,
+    CorsPreflight,
+    SourceConditionNotMet,
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -57,6 +86,7 @@ impl AccountName {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct ContainerName(String);
 
 impl ContainerName {
@@ -82,6 +112,7 @@ impl ContainerName {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct BlobPath(String);
 
 impl BlobPath {
@@ -103,11 +134,13 @@ pub(crate) fn xml_safe(value: &str) -> bool {
         .all(|c| !c.is_control() && !matches!(c, '\u{fffe}' | '\u{ffff}'))
 }
 
+#[derive(Clone)]
 pub(crate) struct ContainerKey {
     pub(crate) account: AccountName,
     pub(crate) name: ContainerName,
 }
 
+#[derive(Clone)]
 pub(crate) struct BlobKey {
     pub(crate) container: ContainerKey,
     pub(crate) path: BlobPath,
@@ -205,7 +238,7 @@ pub(crate) struct BlockList {
 pub(crate) struct ETag(String);
 
 impl ETag {
-    fn parse(value: &str) -> Result<Self> {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
         let valid = value.strip_prefix('"').and_then(|v| v.strip_suffix('"'));
         if !valid.is_some_and(|v| {
             !v.is_empty()
@@ -222,52 +255,22 @@ impl ETag {
     }
 }
 
-#[derive(Clone, Copy)]
+/// Identity and version of a stored object. `id` names the content extent;
+/// `tag` is the ETag, which also changes when only properties or metadata change.
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Entity {
     pub(crate) id: Uuid,
+    pub(crate) tag: Uuid,
     pub(crate) modified: u64,
 }
 
 impl Entity {
     pub(crate) fn etag(self) -> ETag {
-        ETag(format!("\"{}\"", self.id.simple()))
+        ETag(format!("\"{}\"", self.tag.simple()))
     }
 }
 
-pub(crate) enum Condition {
-    None,
-    Exists,
-    Absent,
-    Matches(ETag),
-    Differs(ETag),
-}
-
-impl Condition {
-    pub(crate) fn parse(if_match: Option<&str>, if_none_match: Option<&str>) -> Result<Self> {
-        match (if_match, if_none_match) {
-            (None, None) => Ok(Self::None),
-            (Some("*"), None) => Ok(Self::Exists),
-            (None, Some("*")) => Ok(Self::Absent),
-            (Some(value), None) => Ok(Self::Matches(ETag::parse(value)?)),
-            (None, Some(value)) => Ok(Self::Differs(ETag::parse(value)?)),
-            (Some(_), Some(_)) => Err(Error::Unsupported),
-        }
-    }
-
-    pub(crate) fn check(&self, current: Option<Entity>, reading: bool) -> Result<()> {
-        let matches = |tag: &ETag| current.is_some_and(|e| e.etag().as_str() == tag.as_str());
-        match self {
-            Self::None => Ok(()),
-            Self::Exists if current.is_some() => Ok(()),
-            Self::Matches(tag) if matches(tag) => Ok(()),
-            Self::Absent if current.is_none() => Ok(()),
-            Self::Differs(tag) if !matches(tag) => Ok(()),
-            Self::Absent | Self::Differs(_) if reading => Err(Error::NotModified),
-            _ => Err(Error::ConditionNotMet),
-        }
-    }
-}
-
+#[derive(Clone)]
 pub(crate) struct ByteRange {
     start: u64,
     end: Option<u64>,
@@ -320,7 +323,8 @@ impl PageRequest {
             .decode(marker)
             .map_err(|_| Error::InvalidQuery)?;
         let after = String::from_utf8(after).map_err(|_| Error::InvalidQuery)?;
-        if !xml_safe(&after) || after.chars().count() > 1024 {
+        // A marker after a collapsed BlobPrefix is the prefix plus one sentinel character.
+        if !xml_safe(&after) || after.chars().count() > 1026 {
             return Err(Error::InvalidQuery);
         }
         let limit = limit
@@ -358,48 +362,171 @@ impl<T> Page<T> {
 
 pub(crate) type Metadata = BTreeMap<String, String>;
 
-pub(crate) struct BlobWrite {
+/// The standard HTTP content headers of a blob. Empty strings mean "not set".
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ContentHeaders {
     pub(crate) content_type: String,
+    pub(crate) encoding: String,
+    pub(crate) language: String,
+    pub(crate) disposition: String,
+    pub(crate) cache_control: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AccessTier {
+    Hot,
+    Cool,
+    Cold,
+    Archive,
+}
+
+impl AccessTier {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
+        match value {
+            "Hot" => Ok(Self::Hot),
+            "Cool" => Ok(Self::Cool),
+            "Cold" => Ok(Self::Cold),
+            "Archive" => Ok(Self::Archive),
+            _ => Err(Error::InvalidHeader),
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Hot => "Hot",
+            Self::Cool => "Cool",
+            Self::Cold => "Cold",
+            Self::Archive => "Archive",
+        }
+    }
+}
+
+/// How a blob came to exist by copy. Copies complete synchronously.
+#[derive(Clone, Debug)]
+pub(crate) struct CopyRecord {
+    pub(crate) id: String,
+    pub(crate) source: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CopyInfo {
+    pub(crate) id: String,
+    pub(crate) source: String,
+    pub(crate) completed: u64,
+}
+
+pub(crate) struct BlobWrite {
+    pub(crate) headers: ContentHeaders,
     pub(crate) metadata: Metadata,
-    pub(crate) condition: Condition,
+    pub(crate) guard: Guard,
+    pub(crate) tier: Option<AccessTier>,
+    pub(crate) copy: Option<CopyRecord>,
+    /// The `x-ms-blob-content-md5` property, which replaces the computed digest.
+    pub(crate) md5: Option<[u8; 16]>,
 }
 
 pub(crate) struct BlobInfo {
     pub(crate) entity: Entity,
+    pub(crate) created: u64,
     pub(crate) length: ContentLength,
-    pub(crate) content_type: String,
+    pub(crate) headers: ContentHeaders,
     pub(crate) md5: Option<String>,
     pub(crate) metadata: Metadata,
+    /// The explicitly set tier; `None` means the inferred default, Hot.
+    pub(crate) tier: Option<(AccessTier, u64)>,
+    pub(crate) lease: LeaseView,
+    pub(crate) copy: Option<CopyInfo>,
+    /// True for a blob that exists only as uncommitted blocks (listings only).
+    pub(crate) uncommitted: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum PublicAccess {
+    #[default]
+    Private,
+    Blob,
+    Container,
+}
+
+impl PublicAccess {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
+        match value {
+            "blob" => Ok(Self::Blob),
+            "container" => Ok(Self::Container),
+            _ => Err(Error::InvalidHeader),
+        }
+    }
+
+    pub(crate) fn name(self) -> Option<&'static str> {
+        match self {
+            Self::Private => None,
+            Self::Blob => Some("blob"),
+            Self::Container => Some("container"),
+        }
+    }
+}
+
+/// A stored access policy of a container ACL; times are the ISO 8601 text as sent.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct SignedIdentifier {
+    pub(crate) id: String,
+    pub(crate) start: Option<String>,
+    pub(crate) expiry: Option<String>,
+    pub(crate) permission: Option<String>,
+}
+
+pub(crate) struct ContainerCreate {
+    pub(crate) metadata: Metadata,
+    pub(crate) public_access: PublicAccess,
+}
+
+pub(crate) struct ContainerInfo {
+    pub(crate) entity: Entity,
+    pub(crate) metadata: Metadata,
+    pub(crate) public_access: PublicAccess,
+    pub(crate) identifiers: Vec<SignedIdentifier>,
+    pub(crate) lease: LeaseView,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum RangeChecksum {
+    Md5,
+    Crc64,
+}
+
+pub(crate) struct BlobRead {
+    pub(crate) guard: Guard,
+    pub(crate) range: Option<ByteRange>,
+    pub(crate) with_body: bool,
+    pub(crate) range_checksum: Option<RangeChecksum>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum Include {
+    Metadata,
+    Copy,
+    Uncommitted,
+}
+
+pub(crate) struct ListRequest {
+    pub(crate) page: PageRequest,
+    pub(crate) delimiter: Option<String>,
+    pub(crate) include: Vec<Include>,
+}
+
+pub(crate) enum ListEntry {
+    Blob(String, Box<BlobInfo>),
+    Prefix(String),
+}
+
+pub(crate) struct BlobListing {
+    pub(crate) entries: Vec<ListEntry>,
+    pub(crate) next: String,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn conditional_writes_require_the_current_etag() {
-        let current = Entity {
-            id: Uuid::from_u128(17),
-            modified: 0,
-        };
-        let other = Entity {
-            id: Uuid::from_u128(19),
-            modified: 0,
-        };
-        let tag = current.etag();
-        let condition = Condition::parse(Some(tag.as_str()), None).unwrap();
-        assert_eq!(condition.check(Some(current), false), Ok(()));
-        assert_eq!(
-            condition.check(Some(other), false),
-            Err(Error::ConditionNotMet)
-        );
-        let none_match = Condition::parse(None, Some("*")).unwrap();
-        assert_eq!(
-            none_match.check(Some(current), true),
-            Err(Error::NotModified)
-        );
-        assert_eq!(none_match.check(None, false), Ok(()));
-    }
 
     #[test]
     fn ranges_clamp_and_reject_unsatisfiable_reads() {

@@ -11,23 +11,31 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub(crate) struct Sas {
     fields: Query,
     start: Option<SystemTime>,
-    expiry: SystemTime,
+    expiry: Option<SystemTime>,
 }
 
 impl Sas {
     /// Returns `None` when the query carries no `sig`, so the caller falls back
-    /// to header authentication.
+    /// to header authentication. A stored access policy may supply `se`, so its
+    /// absence is only an error when [`Sas::check_window`] needs it.
     pub(crate) fn from_query(query: &Query) -> Result<Option<Self>> {
         if !query.contains_key("sig") {
             return Ok(None);
         }
         let time = |name: &str| query.get(name).map(|value| parse_time(value)).transpose();
-        let expiry = time("se")?.ok_or(Error::AuthenticationFailed)?;
         Ok(Some(Self {
             start: time("st")?,
-            expiry,
+            expiry: time("se")?,
             fields: query.clone(),
         }))
+    }
+
+    pub(crate) fn start(&self) -> Option<SystemTime> {
+        self.start
+    }
+
+    pub(crate) fn expiry(&self) -> Option<SystemTime> {
+        self.expiry
     }
 
     /// The field exactly as sent, or an empty string. String-to-sign values must
@@ -36,27 +44,42 @@ impl Sas {
         self.fields.get(name).map_or("", String::as_str)
     }
 
-    pub(crate) fn signature(&self) -> &str {
-        self.field("sig")
+    pub(crate) fn has(&self, name: &str) -> bool {
+        self.fields.contains_key(name)
     }
 
+    /// Validity window of this token; used by the Queue and Table services.
     pub(crate) fn check_window(&self, now: SystemTime) -> Result<()> {
-        if self.start.is_some_and(|start| now < start) || now >= self.expiry {
-            return Err(Error::AuthenticationFailed);
-        }
-        Ok(())
+        check_window(self.start, self.expiry, now)
     }
 
-    /// True when `sp` (or `sp` on a service SAS) grants every letter in `required`.
+    /// True when `sp` grants every letter in `required`.
     pub(crate) fn allows(&self, required: &str) -> bool {
         let granted = self.field("sp");
         required.chars().all(|letter| granted.contains(letter))
+    }
+
+    pub(crate) fn signature(&self) -> &str {
+        self.field("sig")
     }
 
     /// Checks the signature against any configured key.
     pub(crate) fn verify(&self, keys: &[Vec<u8>], string_to_sign: &str) -> Result<()> {
         auth::verify_signature(keys, string_to_sign, self.signature())
     }
+}
+
+/// A token is valid from `start` (inclusive) until `expiry` (exclusive); an expiry is required.
+pub(crate) fn check_window(
+    start: Option<SystemTime>,
+    expiry: Option<SystemTime>,
+    now: SystemTime,
+) -> Result<()> {
+    let expiry = expiry.ok_or(Error::AuthenticationFailed)?;
+    if start.is_some_and(|start| now < start) || now >= expiry {
+        return Err(Error::AuthenticationFailed);
+    }
+    Ok(())
 }
 
 /// Parses the ISO 8601 UTC forms SAS tokens use: `YYYY-MM-DD`,
@@ -139,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn window_and_permissions_are_enforced() {
+    fn window_is_enforced_and_unsigned_queries_are_not_sas() {
         let query = Query::from([
             ("se".into(), "2030-01-01T00:00:00Z".into()),
             ("st".into(), "2029-01-01T00:00:00Z".into()),
@@ -147,13 +170,11 @@ mod tests {
             ("sig".into(), "x".into()),
         ]);
         let sas = Sas::from_query(&query).unwrap().unwrap();
-        let before = parse_time("2028-06-01").unwrap();
-        let inside = parse_time("2029-06-01").unwrap();
-        let after = parse_time("2030-06-01").unwrap();
-        assert!(sas.check_window(before).is_err());
-        assert!(sas.check_window(inside).is_ok());
-        assert!(sas.check_window(after).is_err());
-        assert!(sas.allows("r") && sas.allows("rw") && !sas.allows("d"));
+        let window = |now| check_window(sas.start(), sas.expiry(), parse_time(now).unwrap());
+        assert!(window("2028-06-01").is_err());
+        assert!(window("2029-06-01").is_ok());
+        assert!(window("2030-06-01").is_err());
+        assert!(check_window(None, None, parse_time("2029-06-01").unwrap()).is_err());
         assert!(Sas::from_query(&Query::new()).unwrap().is_none());
     }
 }

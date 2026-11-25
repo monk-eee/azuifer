@@ -69,6 +69,7 @@ pub(crate) fn download_response(download: Download) -> Result<(Response, Metadat
         info,
         range,
         payload,
+        ..
     } = download;
     let status = if range.is_some() {
         StatusCode::PARTIAL_CONTENT
@@ -91,7 +92,7 @@ pub(crate) fn download_response(download: Download) -> Result<(Response, Metadat
         info.length.0
     };
     set(headers, "content-length", &size.to_string())?;
-    set(headers, "content-type", &info.content_type)?;
+    set(headers, "content-type", &info.headers.content_type)?;
     headers.insert("accept-ranges", HeaderValue::from_static("bytes"));
     *response.body_mut() = match payload {
         Some(Payload::Disk(file)) => {

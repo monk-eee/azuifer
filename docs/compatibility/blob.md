@@ -1,31 +1,74 @@
 # Blob wire compatibility
 
-Use the [quick start](../../README.md#run-locally) with the Blob API version `2023-11-03`, path-style endpoints, and Shared Key. [The manifest](../../specs/conformance/blob.json) is the local operation inventory. No operation has been rated against Azure yet.
+Use the [quick start](../../README.md#run-locally) with the Blob API version `2023-11-03`. [The manifest](../../specs/conformance/blob.json) is the operation inventory: each operation is `implemented`, `known-difference`, or `unsupported`, with its authorization modes and notes. No operation has been rated `exact`, and none has been differentially verified against Azure Storage yet.
+
+This slice covers block blobs. Page blobs, append blobs, snapshots, versions, tags, batch, and DFS are separate work.
+
+## Operations
 
 | Target | Requests implemented |
 | --- | --- |
-| `/{account}` | `GET` with `comp=list` |
-| `/{account}/{container}` | `PUT`, `GET` or `HEAD`, and `DELETE` with `restype=container`; `GET` with `restype=container&comp=list` |
-| `/{account}/{container}/{blob}` | `PUT` with `x-ms-blob-type: BlockBlob`; `GET`, `HEAD`, and `DELETE` |
-| `/{account}/{container}/{blob}?comp=block` | `PUT` to stage a block by `blockid` |
-| `/{account}/{container}/{blob}?comp=blocklist` | `PUT` to commit ordered `Committed`, `Uncommitted`, or `Latest` blocks; `GET` for committed and/or uncommitted block lists |
+| `/{account}` | `GET comp=list` (List Containers, `include=metadata`); `GET` or `PUT restype=service&comp=properties` (service properties and CORS); `GET restype=service&comp=stats`; `GET` or `HEAD restype=account&comp=properties` |
+| `/{account}/{container}` | `PUT`, `GET`, `HEAD`, `DELETE` with `restype=container`; `comp=metadata` (`GET`, `HEAD`, `PUT`); `comp=acl` (`GET`, `PUT`); `PUT comp=lease`; `GET comp=list` (List Blobs); `GET` or `HEAD restype=account&comp=properties` |
+| `/{account}/{container}/{blob}` | `PUT` with `x-ms-blob-type: BlockBlob` (Put Blob, or Put Blob From URL with `x-ms-copy-source`); `PUT` with `x-ms-copy-source` and no blob type (Copy Blob); `GET`, `HEAD`, `DELETE` |
+| `…/{blob}?comp=…` | `block` (Put Block, or Put Block From URL), `blocklist` (`PUT`, `GET`), `properties` (`PUT`), `metadata` (`PUT`, `GET`, `HEAD`), `tier` (`PUT`), `lease` (`PUT`), `copy&copyid=…` (Abort Copy, `x-ms-copy-action: abort`) |
+| any path | `OPTIONS` preflight, answered from the account's CORS rules |
 
-Flat listings support `prefix`, `maxresults`, and opaque local markers. Blob listings also support `include=metadata`. Uploads require `Content-Length` and verify `Content-MD5` or `x-ms-content-crc64` when supplied. Blob operations support one `If-Match` or `If-None-Match` condition, and reads accept single byte ranges with a starting offset. Supported Blob properties include content type, length, MD5, ETag, last-modified time, and user metadata.
+Anything else, including unsupported query parameters and `x-ms-*` headers, answers an Azure-shaped `NotImplemented` error instead of being ignored.
 
-Staged blocks survive restart and remain separate from normal Blob reads until a commit succeeds. A failed commit leaves both the previous content and the staged blocks available. The wire differences still tracked for this operation include Azure's staging expiration, listing uncommitted blobs through `List Blobs`, and Azure's larger size limits.
+### Properties, metadata, conditions
 
-The [product specification](../specs/azuifer.md) covers the remaining operations and surfaces. Unsupported requests receive Azure-shaped errors.
+Put Blob and Put Block List store `x-ms-blob-content-type`, `-encoding`, `-language`, `-disposition`, `-cache-control`, and `-md5` (Put Blob also accepts the plain `Content-Type`, `Content-Encoding`, `Content-Language`, `Content-Disposition`, and `Cache-Control`), `x-ms-meta-*`, and `x-ms-access-tier`. Get and Head return them, with creation time, lease, copy, and tier headers. Set Blob Properties replaces all six content properties when any is sent. Metadata names are lowercase: the HTTP layer folds header case, so `x-ms-meta-Owner` reads back as `owner`.
+
+`If-Match`, `If-None-Match`, `If-Modified-Since`, and `If-Unmodified-Since` apply to every blob operation (both ETag conditions together too), and the date conditions to container operations. A failed condition answers 304 for reads where Azure does and 412 `ConditionNotMet` otherwise; copy source conditions answer `SourceConditionNotMet`. `If-None-Match: *` on an existing blob is 409 `BlobAlreadyExists` for Put Blob and Put Block List. Range reads take one `bytes=start-end` range, and `x-ms-range-get-content-md5` or `-crc64` returns the checksum of ranges up to 4 MiB.
+
+### Listings
+
+List Blobs supports `prefix`, `delimiter` (with `BlobPrefix` entries), `maxresults`, opaque `marker` tokens, and `include=metadata,copy,uncommittedblobs`. Pages count blobs and prefixes together, and a marker after a collapsed prefix skips everything under it. `include=snapshots`, `versions`, `deleted`, `tags`, and the other values answer `NotImplemented`.
+
+### Leases
+
+Blob and container leases follow [ADR-0017](../adr.d/0017-model-leases-as-a-clocked-state-machine.md): acquire (15 to 60 seconds or `-1`), renew, change, release, and break (period 0 to 60), with `x-ms-lease-state`, `-status`, and `-duration` on Get and Head, container properties, and listings. Every mutating blob operation, Delete Container, and Put Block require `x-ms-lease-id` while a lease is active. Reads, Set Blob Tier, and container metadata or ACL changes accept an optional id that must match. The responses use Azure's codes: `LeaseIdMissing`, `LeaseIdMismatchWithBlobOperation` and `…WithContainerOperation` and `…WithLeaseOperation`, `LeaseNotPresentWith…Operation`, `LeaseAlreadyPresent`, `LeaseLost`, `LeaseIsBreakingAndCannotBeAcquired`, `LeaseIsBreakingAndCannotBeChanged`, and `LeaseIsBrokenAndCannotBeRenewed`. Expiry is evaluated against the clock on each request, and the lease fields persist across restart.
+
+### Copy
+
+Copy Blob, Put Blob From URL, and Put Block From URL accept **same-instance sources only**: a path-style (`http://127.0.0.1:10000/{account}/…`) or host-style URL on this listener. A URL for any other host answers `NotImplemented`, which the manifest records as a known difference. Copies complete synchronously with `x-ms-copy-status: success` and an `x-ms-copy-id`, so Abort Copy always answers `NoPendingCopyOperation` (or `CopyIdMismatch`). The source is readable with the caller's Shared Key inside the same account, with a read SAS on the source URL, or through public access; otherwise the request answers 403 `CannotVerifyCopySource`. Copies duplicate the bytes for now; sharing extents arrives with snapshots ([ADR-0018](../adr.d/0018-model-snapshots-versions-and-copy-as-immutable-references.md)). Note that `az storage blob copy start --source-blob` builds a `core.windows.net` source URL, so use `--source-uri` with the local URL.
+
+## Authentication
+
+Requests authenticate with Shared Key, Shared Key Lite, an account SAS, a service SAS on a blob or container (`sr=b` or `sr=c`), or anonymously where public access allows ([ADR-0011](../adr.d/0011-compose-authentication-from-shared-primitives.md), [ADR-0019](../adr.d/0019-store-account-level-blob-features-separately.md)).
+
+- SAS strings-to-sign follow signed versions 2015-04-05 through 2023-11-03, including the 2018-11-09 resource fields and the 2020-12-06 encryption scope. Permissions `r a c w d x y l t f m e o p` are accepted; each operation names the letters it needs, and a `c`-only SAS can also overwrite on Put Blob. Stored access policies (`si`) supply permissions and times from the container ACL. `rscc`, `rscd`, `rsce`, `rscl`, and `rsct` override Get Blob headers. Account SAS checks `ss`, `srt`, and `sp`.
+- Errors use Azure's codes: `AuthenticationFailed` for signature, window, and resource mismatches, `AuthorizationPermissionMismatch`, `AuthorizationResourceTypeMismatch`, `AuthorizationServiceMismatch`, and `AuthorizationProtocolMismatch` (`spr=https` on this HTTP-only listener).
+- `sip` is parsed but not enforced: the listener does not expose the client address to the router. User-delegation SAS (`skoid`) needs Get User Delegation Key and answers `NotImplemented`.
+- A container's public access level (`x-ms-blob-public-access`, stored with its ACL) allows anonymous Get Blob, Get Blob Properties and Metadata, and Get Block List at `blob` level, and also List Blobs and Get Container Properties and Metadata at `container` level. A blocked anonymous blob read answers 404 `ResourceNotFound`; other blocked requests answer 403.
+- `x-ms-version` is required on Shared Key requests and optional with SAS or anonymous access. `--skip-api-version-check` still lets a client that sends a newer well-formed version use the baseline; the response reports the effective version. `x-ms-client-request-id` is echoed.
+
+## Service properties and CORS
+
+Service properties (logging, metrics, CORS rules, default service version, delete retention, static website) are stored per account and returned on request, with Azure's defaults for a new account; an update changes only the elements it contains. Only CORS is acted on: `OPTIONS` preflights and requests with an `Origin` header are matched against the rules at the HTTP edge. Get Blob Service Stats and Get Account Information return fixed, correctly shaped values.
+
+## Addressing
+
+Both addressing styles work: `http://127.0.0.1:10000/{account}/{container}/{blob}` and `http://{account}.blob.localhost:10000/{container}/{blob}` (any `{account}.blob.{domain}` host). Shared Key signs the path as sent. `UseDevelopmentStorage=true` resolves to the path-style endpoint of the built-in `devstoreaccount1` account. Python's SDK cannot infer the account from a `.blob.localhost` host, so pass `credential={"account_name": …, "account_key": …}`.
 
 ## Storage and configuration
 
-- `serve --location ./data` uses SQLite WAL for metadata and filesystem extents for payloads. Uploads are staged, checked, and synced before publishing the metadata reference. Startup reclaims unreferenced files from interrupted writes. Keep the directory private to one process and use a local filesystem.
-- `serve --in-memory` keeps storage off disk, discards it at shutdown, and defaults to 64 MiB of committed and staged payloads (`--memory-limit` in bytes). The default per-request data limit is 16 MiB (`--max-blob-bytes`). The default assembled block blob limit is 512 MiB (`--max-assembled-blob-bytes`). Both limits are in bytes and apply to either storage mode.
+- `serve --location ./data` uses SQLite WAL for metadata and filesystem extents for payloads. Uploads are staged, checked, and synced before publishing the metadata reference. Startup reclaims unreferenced files from interrupted writes. Keep the directory private to one process and use a local filesystem. Opening a directory created by an earlier release adds the new columns and tables with defaults (`PRAGMA user_version`); old blobs keep their ETags, and a container keeps its ETag until it changes.
+- `serve --in-memory` keeps storage off disk, discards it at shutdown, and defaults to 64 MiB of committed and staged payloads (`--memory-limit` in bytes).
+- Per-request limits, all in bytes: `--max-blob-bytes` for a single Put Blob request (default 256 MiB, up to 5000 MiB), `--max-block-bytes` for Put Block (default 5000 MiB), and `--max-assembled-blob-bytes` for a committed block blob (default 512 MiB).
 - `--port`, `--admin-port`, and `--bind` select the listeners. Use `--config` for a TOML file; flags override `AZUIFER_*` environment values, then file values, then defaults. Run `cargo run --locked -- config validate` with the same options to validate settings.
-- `--skip-api-version-check` lets clients that send a well-formed newer version use the pinned baseline. The server reports the effective version and still rejects unsupported operations and invalid authentication. Omit the flag for strict mode, or use `--skip-api-version-check=false` to override a setting from the environment or file.
+- `--skip-api-version-check` is described under Authentication. Omit it for strict mode, or use `--skip-api-version-check=false` to override a setting from the environment or file.
 - `--upload-timeout-seconds` bounds time spent receiving a single upload body (1 to 600 seconds; default 60). An incomplete timed-out upload does not replace an existing Blob. `serve --shutdown-on-stdin-eof` lets a process supervisor close a piped stdin to shut the listeners down gracefully.
+- `--test-clock` ([ADR-0012](../adr.d/0012-inject-time-through-one-clock.md)) is refused with a non-loopback bind. It adds `GET /_azuifer/clock` and `POST /_azuifer/clock/advance?seconds=N` (or `ms=N`) to the Blob listener, so tests can expire leases, SAS tokens, and policies without sleeping. Signed requests still carry the real date, so keep the total shift under the 15 minute skew window when using Shared Key. The endpoints are on the Blob listener rather than the admin listener.
 - A TOML file can use `[[accounts]]` entries with `name` and a `keys` array containing one or two Base64 Shared Keys. Keep such files out of version control. `AZUIFER_ACCOUNT_KEY` overrides the keys for `AZUIFER_ACCOUNT_NAME` (defaults to `devstoreaccount1` if omitted).
 
 Blob names are case-sensitive database keys, not filenames. The [HTTP suite](../../tests/blob_http.rs) checks case and Unicode distinctions across restart, including names reserved by Windows filesystems, and opens a data directory with spaces. Use a private local data path on each host rather than sharing a live SQLite directory across hosts.
+
+## Tests
+
+- The [HTTP suite](../../tests/blob_http.rs) drives the built binary for every operation above: status, headers, body, and resulting state, including lease and SAS tables run on the test clock, anonymous access, CORS, copy, host-style addressing, restart persistence, and opening a data directory from the previous schema.
+- The [Python SDK script](../../tests/blob_sdk.py) runs the official `azure-storage-blob` client against a running Azuifer: containers, properties, metadata, leases, SAS tokens the SDK generates, stored policies, anonymous access, delimiter listings, copy, and service properties. Start Azuifer with `--skip-api-version-check --test-clock`, then run `python tests/blob_sdk.py`.
 
 ## Azure CLI
 
@@ -42,10 +85,12 @@ python3 tests/azure_cli_matrix.py
 
 The report is written to `dist/azure-cli-compatibility.json`. When updating the CLI window, pin the new stable image and keep its three immediate predecessors. Verify all four without skipping failing cases.
 
-The matrix uses `--skip-api-version-check` because these clients request a newer API version than the Blob baseline. To exercise your installed CLI instead, start Azuifer with that flag, a disposable data directory, and a synthetic `AZUIFER_ACCOUNT_KEY`, then run `python3 tests/azure_cli.py` with the same key. `--blob-url` and `--admin-url` select non-default loopback ports. To allow single-request Azure CLI uploads between 16 and 256 MiB, use `--max-blob-bytes 268435456`.
+The matrix uses `--skip-api-version-check` because these clients request a newer API version than the Blob baseline. To exercise your installed CLI instead, start Azuifer with that flag, a disposable data directory, and a synthetic `AZUIFER_ACCOUNT_KEY`, then run `python3 tests/azure_cli.py` with the same key. `--blob-url` and `--admin-url` select non-default loopback ports. The default single-request limit of 256 MiB already covers the CLI's upload threshold. Beyond the matrix, lease, tier, metadata, `generate-sas`, container policy, service-properties, and `copy start --source-uri` commands were run by hand against this build.
 
 ## Container
 
 Follow the [Docker quickstart](../../README.md#run-locally) to build the [Azure Linux image](../../Dockerfile) and try it with Azure CLI. The explicit in-container bind allows port forwarding while the published host ports stay loopback-only. That bind requires a custom Shared Key: use 32 to 64 random bytes encoded in Base64, never a production credential.
 
 The binary runs as UID and GID `65532`. For persistence, mount a volume writable by that user at `/data` and start with `--location /data` in place of `--in-memory`.
+
+The [product specification](../specs/azuifer.md) covers the remaining operations and surfaces.
