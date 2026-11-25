@@ -15,6 +15,10 @@ use crate::{
     store::Store,
     table,
 };
+use crate::{
+    admin::{self, Admin, ServiceStatus},
+    telemetry::{self, Telemetry},
+};
 use anyhow::Context as _;
 use axum::{
     Router,
@@ -22,12 +26,12 @@ use axum::{
     extract::{ConnectInfo, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, request::Parts},
     response::Response,
-    routing::get,
 };
 use futures_util::StreamExt as _;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::{net::TcpListener, sync::Semaphore};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 pub(crate) struct App {
@@ -41,6 +45,7 @@ pub(crate) struct App {
 
 pub(crate) async fn serve(config: Config, shutdown_on_stdin_eof: bool) -> anyhow::Result<()> {
     let config = Arc::new(config);
+    let telemetry = Telemetry::start(&config)?;
     let admin = TcpListener::bind(config.admin)
         .await
         .context("could not bind the admin listener")?;
@@ -72,6 +77,7 @@ pub(crate) async fn serve(config: Config, shutdown_on_stdin_eof: bool) -> anyhow
             None
         };
     let mut services = Vec::new();
+    let mut bound = Vec::new();
     for service in Service::ALL {
         if !config.services.contains(&service) {
             continue;
@@ -108,13 +114,21 @@ pub(crate) async fn serve(config: Config, shutdown_on_stdin_eof: bool) -> anyhow
             Service::Table => table::router(config.clone(), address, clock.clone()).await?,
             Service::File => files::router(config.clone(), address, clock.clone()).await?,
         };
+        let router = telemetry::instrument(router, &telemetry, service);
         tracing::info!(service = service.name(), %address, "listening");
         println!("{}_url=http://{address}", service.name());
+        bound.push(ServiceStatus {
+            name: service.name().to_owned(),
+            url: format!("http://{address}"),
+        });
         services.push((listener, router));
     }
-    let mut admin_router = Router::new()
-        .route("/healthz", get(|| async { "ok\n" }))
-        .route("/readyz", get(|| async { "ready\n" }));
+    let mut admin_router = admin::router(Admin::new(
+        &config,
+        bound,
+        format!("http://{admin_address}"),
+        &telemetry,
+    ));
     if config.test_clock {
         admin_router = admin_router.merge(clock::router(clock.clone()));
     }
@@ -136,7 +150,9 @@ pub(crate) async fn serve(config: Config, shutdown_on_stdin_eof: bool) -> anyhow
         stop.cancel();
         Ok(())
     };
-    tokio::try_join!(tasks, signal).context("HTTP server exited unexpectedly")?;
+    let served = tokio::try_join!(tasks, signal);
+    telemetry.shutdown().await;
+    served.context("HTTP server exited unexpectedly")?;
     Ok(())
 }
 
@@ -278,6 +294,7 @@ async fn handle(app: &App, parts: &Parts, body: Body, request_id: &str) -> Resul
             connection: &connection,
         },
     )
+    .instrument(tracing::info_span!("authenticate"))
     .await?;
     let context = Context {
         host: protocol::host(parts),
@@ -286,7 +303,9 @@ async fn handle(app: &App, parts: &Parts, body: Body, request_id: &str) -> Resul
         connection: &connection,
     };
     let operation: Operation = parsed.operation;
-    blob_exec::execute(app, operation, body, &context).await
+    blob_exec::execute(app, operation, body, &context)
+        .instrument(tracing::info_span!("storage"))
+        .await
 }
 
 /// The account a request addresses, for CORS lookups made before parsing succeeds.

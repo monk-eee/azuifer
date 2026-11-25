@@ -1,4 +1,5 @@
 use crate::domain::{AccountName, ApiVersion};
+use crate::telemetry;
 use anyhow::{Context as _, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::Args;
@@ -61,6 +62,8 @@ pub(crate) struct Options {
     versioning_accounts: Option<String>,
     #[arg(long, env = "AZUIFER_FILE_PORT", global = true)]
     file_port: Option<u16>,
+    #[command(flatten)]
+    telemetry: telemetry::TelemetryOptions,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -130,6 +133,11 @@ struct FileConfig {
     hns_accounts: Option<String>,
     versioning_accounts: Option<String>,
     file_port: Option<u16>,
+    otlp_endpoint: Option<String>,
+    otlp_protocol: Option<telemetry::OtlpProtocol>,
+    prometheus: Option<bool>,
+    log_format: Option<telemetry::LogFormat>,
+    log_file: Option<PathBuf>,
     accounts: Vec<AccountConfig>,
 }
 
@@ -165,6 +173,7 @@ pub(crate) struct Config {
     pub(crate) hns_accounts: HashSet<AccountName>,
     pub(crate) versioning_accounts: HashSet<AccountName>,
     pub(crate) api_version: ApiVersion,
+    pub(crate) telemetry: telemetry::Settings,
 }
 
 impl Config {
@@ -342,6 +351,16 @@ impl Config {
             hns_accounts,
             versioning_accounts,
             api_version,
+            telemetry: telemetry::Settings::resolve(
+                options.telemetry,
+                telemetry::FileSettings {
+                    otlp_endpoint: file.otlp_endpoint,
+                    otlp_protocol: file.otlp_protocol,
+                    prometheus: file.prometheus,
+                    log_format: file.log_format,
+                    log_file: file.log_file,
+                },
+            )?,
         })
     }
 }

@@ -1,5 +1,6 @@
 mod acl;
 mod address;
+mod admin;
 mod auth;
 mod blob_auth;
 mod blob_batch;
@@ -12,6 +13,7 @@ mod blob_snapshot;
 mod blob_tags;
 mod checksum;
 mod clock;
+mod commands;
 mod conditions;
 mod config;
 mod conformance;
@@ -19,9 +21,11 @@ mod dfs;
 mod domain;
 mod files;
 mod lease;
+mod metrics;
 mod protocol;
 mod queue;
 mod ranges;
+mod redact;
 mod respond;
 mod sas;
 mod server;
@@ -29,10 +33,11 @@ mod service_props;
 mod stamp;
 mod store;
 mod table;
+mod telemetry;
 mod wire;
 mod xml_tree;
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use config::{Config, Options};
 
@@ -60,6 +65,29 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Show the status of a running instance.
+    Status {
+        #[arg(
+            long,
+            env = "AZUIFER_ADMIN_URL",
+            default_value = "http://127.0.0.1:10005"
+        )]
+        admin_url: String,
+        /// Print the raw JSON from the admin `/status` endpoint.
+        #[arg(long, conflicts_with = "ready")]
+        json: bool,
+        /// Exit successfully only when the readiness endpoint reports ready; prints nothing.
+        #[arg(long)]
+        ready: bool,
+    },
+    /// Diagnose configuration, ports, and the data directory.
+    Doctor,
+    /// Delete all emulator state under the storage location.
+    Reset {
+        /// Confirm the deletion.
+        #[arg(long)]
+        yes: bool,
+    },
     Conformance {
         #[command(subcommand)]
         command: ConformanceCommand,
@@ -85,15 +113,14 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Serve {
             shutdown_on_stdin_eof,
-        } => {
-            tracing_subscriber::fmt()
-                .json()
-                .with_writer(std::io::stderr)
-                .try_init()
-                .map_err(anyhow::Error::from_boxed)
-                .context("could not initialize local diagnostics")?;
-            server::serve(Config::load(cli.options)?, shutdown_on_stdin_eof).await
-        }
+        } => server::serve(Config::load(cli.options)?, shutdown_on_stdin_eof).await,
+        Command::Status {
+            admin_url,
+            json,
+            ready,
+        } => commands::status(&admin_url, json, ready),
+        Command::Doctor => commands::doctor(cli.options),
+        Command::Reset { yes } => commands::reset(&Config::load(cli.options)?, yes),
         Command::Config {
             command: ConfigCommand::Validate,
         } => {

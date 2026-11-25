@@ -13,6 +13,7 @@ COPY --from=linux-binary /azuifer /azuifer
 COPY --from=build --chown=65532:65532 /data /data
 COPY LICENSE-MIT LICENSE-APACHE /licenses/
 USER 65532:65532
-EXPOSE 10000 10005
+EXPOSE 10000-10005
+HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 CMD ["/azuifer", "status", "--ready"]
 ENTRYPOINT ["/azuifer"]
 CMD ["serve", "--location", "/data"]

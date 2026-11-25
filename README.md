@@ -33,7 +33,9 @@ docker run --detach --rm --name azuifer-quickstart --read-only \
 curl --noproxy 127.0.0.1 --fail --retry 5 --retry-connrefused http://127.0.0.1:10005/readyz
 ```
 
-The readiness endpoint returns `ready`. Blob listens on port `10000`; health and readiness are on `10005`. Both ports are published only on localhost.
+The readiness endpoint returns `ready`. Blob listens on port `10000`; health, readiness, and status are on `10005`. Both ports are published only on localhost. Check the running instance with `docker exec azuifer-quickstart /azuifer status`.
+
+Observability is opt-in and sends nothing unless you configure a destination: `--prometheus` serves `/metrics` on the admin port, `--otlp-endpoint http://collector:4317` (with `--otlp-protocol grpc|http`) exports traces and metrics, and `--log-format json|text` and `--log-file <path>` select the log output. `azuifer doctor` checks configuration, ports, and the data directory, and `azuifer reset --yes` deletes persisted state while the emulator is stopped. See the [Compose example](packaging/compose.yaml) and the [Testcontainers guide](docs/testcontainers.md).
 
 ### 2. Upload and download a blob
 
