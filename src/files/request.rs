@@ -925,7 +925,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "re-enable once the File manifest is reconciled with the conformance exporter schema"]
     fn manifest_lists_every_recognised_operation_with_a_matching_state() {
         let manifest: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(concat!(
@@ -935,7 +934,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let inventory = manifest["inventory"].as_array().unwrap();
+        let inventory = manifest["operations"].as_array().unwrap();
         let state_of = |name: &str| {
             let mut found = inventory.iter().filter(|entry| entry["name"] == name);
             let entry = found.next().unwrap_or_else(|| panic!("{name} missing"));

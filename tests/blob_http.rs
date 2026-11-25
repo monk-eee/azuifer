@@ -5103,7 +5103,6 @@ fn a_data_directory_from_the_previous_schema_opens_and_gains_the_new_features() 
 }
 
 #[test]
-#[ignore = "re-enable once the Blob manifest is reconciled with the conformance exporter schema"]
 fn the_conformance_manifest_inventory_is_well_formed_and_never_claims_exact() {
     let export = emulator_command()
         .args(["conformance", "export"])
@@ -5130,9 +5129,13 @@ fn the_conformance_manifest_inventory_is_well_formed_and_never_claims_exact() {
         "SharedKeyLite",
         "AccountSAS",
         "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer",
         "Anonymous",
     ];
-    let inventory = manifest["inventory"].as_array().unwrap();
+    let inventory = manifest["services"]["blob"]["operations"]
+        .as_array()
+        .unwrap();
     let local: Vec<&str> = manifest["implemented_locally"]
         .as_array()
         .unwrap()
@@ -5142,19 +5145,28 @@ fn the_conformance_manifest_inventory_is_well_formed_and_never_claims_exact() {
     let mut names = Vec::new();
     for entry in inventory {
         let object = entry.as_object().unwrap();
-        let mut keys: Vec<_> = object.keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        assert_eq!(keys, ["authorization", "name", "notes", "state"], "{entry}");
         let name = object["name"].as_str().unwrap();
         let state = object["state"].as_str().unwrap();
         assert!(
-            ["implemented", "known-difference", "unsupported"].contains(&state),
+            ["compatible", "known-difference", "unsupported"].contains(&state),
             "{name}: {state}"
         );
         let supported = state != "unsupported";
-        assert!(
-            !supported || !object["notes"].as_str().unwrap().trim().is_empty(),
-            "{name} needs notes"
+        let mut keys: Vec<_> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        let has_notes = object
+            .get("notes")
+            .and_then(|notes| notes.as_str())
+            .is_some_and(|notes| !notes.trim().is_empty());
+        assert!(!supported || has_notes, "{name} needs notes");
+        assert_eq!(
+            keys,
+            if object.contains_key("notes") {
+                vec!["authorization", "name", "notes", "state"]
+            } else {
+                vec!["authorization", "name", "state"]
+            },
+            "{entry}"
         );
         let authorization = object["authorization"].as_array().unwrap();
         assert!(!supported || !authorization.is_empty(), "{name}");
@@ -5178,6 +5190,11 @@ fn the_conformance_manifest_inventory_is_well_formed_and_never_claims_exact() {
         "Set Blob Properties",
         "Copy Blob",
         "Get Blob Service Properties",
+        "Snapshot Blob",
+        "Put Page",
+        "Append Block",
+        "Submit Batch",
+        "Find Blobs by Tags",
     ] {
         assert!(names.contains(&name), "{name} is inventoried");
     }

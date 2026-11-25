@@ -2,42 +2,611 @@
   "service": "blob",
   "api_version": "2023-11-03",
   "operations": [
-    {"name": "List Containers", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Lists active containers; deleted containers and container metadata options are unavailable."},
-    {"name": "Create Container", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Creates private containers without service-managed encryption or immutability options."},
-    {"name": "Get Container Properties", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Returns ETag and Last-Modified; does not report Azure retention or replication properties."},
-    {"name": "Delete Container", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Deletes local data without soft deletion."},
-    {"name": "List Blobs (flat)", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Supports prefix, marker, maxresults, and metadata. No delimiter or version listings."},
-    {"name": "Put Blob (BlockBlob)", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Supports block blobs with local upload limits and a subset of Azure write headers."},
-    {"name": "Put Block", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Staged blocks have local size limits and do not expire on Azure's schedule."},
-    {"name": "Put Block List", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Commits an ordered block list with local size limits and a subset of Azure write headers."},
-    {"name": "Get Block List", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Reports staged and committed blocks for the current blob, not snapshots or versions."},
-    {"name": "Get Blob", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Reads the current blob or a single byte range with ETag conditions."},
-    {"name": "Get Blob Properties", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Reports current content properties and metadata; no snapshot or version selection."},
-    {"name": "Delete Blob", "state": "known-difference", "authorization": ["SharedKey"], "notes": "Deletes the current blob without retention or snapshot handling."},
-    {"name": "Set Container Metadata", "state": "unsupported", "authorization": []},
-    {"name": "Get Container ACL", "state": "unsupported", "authorization": []},
-    {"name": "Set Container ACL", "state": "unsupported", "authorization": []},
-    {"name": "Get Blob Service Properties", "state": "unsupported", "authorization": []},
-    {"name": "Set Blob Service Properties", "state": "unsupported", "authorization": []},
-    {"name": "Get Account Information", "state": "unsupported", "authorization": []},
-    {"name": "Set Blob Tier", "state": "unsupported", "authorization": []},
-    {"name": "Set Blob Properties", "state": "unsupported", "authorization": []},
-    {"name": "Set Blob Metadata", "state": "unsupported", "authorization": []},
-    {"name": "Lease Container", "state": "unsupported", "authorization": []},
-    {"name": "Lease Blob", "state": "unsupported", "authorization": []},
-    {"name": "Copy Blob", "state": "unsupported", "authorization": []},
-    {"name": "Abort Copy Blob", "state": "unsupported", "authorization": []},
-    {"name": "Put Blob From URL", "state": "unsupported", "authorization": []},
-    {"name": "Put Block From URL", "state": "unsupported", "authorization": []},
-    {"name": "Snapshot Blob", "state": "unsupported", "authorization": []},
-    {"name": "Put Blob (PageBlob)", "state": "unsupported", "authorization": []},
-    {"name": "Put Page", "state": "unsupported", "authorization": []},
-    {"name": "Get Page Ranges", "state": "unsupported", "authorization": []},
-    {"name": "Put Blob (AppendBlob)", "state": "unsupported", "authorization": []},
-    {"name": "Append Block", "state": "unsupported", "authorization": []},
-    {"name": "Get Blob Tags", "state": "unsupported", "authorization": []},
-    {"name": "Set Blob Tags", "state": "unsupported", "authorization": []},
-    {"name": "Find Blobs by Tags", "state": "unsupported", "authorization": []},
-    {"name": "Submit Batch", "state": "unsupported", "authorization": []}
+    {
+      "name": "Abort Copy Blob",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Copies complete synchronously, so no copy is ever pending: the request answers NoPendingCopyOperation, or CopyIdMismatch for a different copy id."
+    },
+    {
+      "name": "Append Block",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Up to 4 MiB and 50,000 blocks, with Content-MD5 or crc64, x-ms-blob-condition-maxsize and -appendpos, leases, and the append offset and committed block count headers."
+    },
+    {
+      "name": "Append Block From URL",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Same-instance sources only; x-ms-source-content-md5 and crc64 are not accepted."
+    },
+    {
+      "name": "Copy Blob",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Same-instance sources only (path-style or host-style URLs on this listener); other hosts answer NotImplemented. Completes synchronously with x-ms-copy-status: success and a copy id. The source is read with the caller's own Shared Key in the same account, a read SAS on the source URL, or public access, and may name a snapshot or version of a block blob. Source and destination conditions and leases apply. Block blob bytes are copied rather than shared; page and append blob copies keep their type and share extents, and a copied append blob is not sealed. Incremental and sealed copies are unsupported."
+    },
+    {
+      "name": "Create Container",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Accepts x-ms-meta-* and x-ms-blob-public-access. $root, $web, and $logs are not supported. A service SAS cannot create containers."
+    },
+    {
+      "name": "Delete Blob",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Deletes the current blob, a snapshot, or a version; x-ms-delete-snapshots include or only, otherwise SnapshotsPresent (Azure's code is BlobHasSnapshots). Requires the lease id while leased and supports conditions. Honors the account delete retention (soft delete, evaluated lazily against the clock) and versioning. Page and append blobs are always deleted permanently. Deletes are synchronous."
+    },
+    {
+      "name": "Delete Container",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Deletes immediately and requires the lease id while a lease is active. Azure's asynchronous deletion window (ContainerBeingDeleted) and soft delete are not modeled."
+    },
+    {
+      "name": "Find Blobs by Tags",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Account and container scope with AND-joined comparisons (=, >, >=, <, <=) over quoted tag names and @container; results are immediately consistent and cover current blobs only."
+    },
+    {
+      "name": "Get Account Information",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "GET and HEAD at the service, container, and blob level return fixed values: Standard_LRS, StorageV2, and hierarchical namespace disabled. Any valid SAS is accepted."
+    },
+    {
+      "name": "Get Blob",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Anonymous",
+        "Bearer"
+      ],
+      "notes": "Reads the current blob, a snapshot (snapshot), or a version (versionid), with a single byte range (Range or x-ms-range), x-ms-range-get-content-md5 and -crc64 up to 4 MiB, all four conditions, x-ms-if-tags, lease id, and service SAS response-header overrides. Page blob holes read as zeros and append blobs return their concatenated blocks. Archived blobs answer BlobArchived. Reports x-ms-version-id, x-ms-is-current-version, and x-ms-tag-count. Metadata names are returned in lowercase. x-ms-content-crc64 uses CRC-64/NVME, which has not been differentially verified against Azure."
+    },
+    {
+      "name": "Get Blob Metadata",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Anonymous",
+        "Bearer"
+      ],
+      "notes": "GET and HEAD with comp=metadata, conditions, and an optional lease id. Metadata names are returned in lowercase."
+    },
+    {
+      "name": "Get Blob Properties",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Anonymous",
+        "Bearer"
+      ],
+      "notes": "Returns content headers, metadata, creation time, lease, copy, access tier, and tag count for the current blob, a snapshot, or a version. Reports the blob type and, for page and append blobs, the sequence number, committed block count, and sealed state. Metadata names are returned in lowercase."
+    },
+    {
+      "name": "Get Blob Service Properties",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Returns stored logging, metrics, CORS, default service version, delete retention, and static website settings, with Azure's defaults for a new account (ADR-0019). Only CORS is acted on."
+    },
+    {
+      "name": "Get Blob Service Stats",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Stub with Azure's response shape: GeoReplication is always live with the current time. Azure serves this only on the secondary endpoint."
+    },
+    {
+      "name": "Get Blob Tags",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Reads the tags of the current blob or a version; x-ms-if-tags and lease id are honored. Snapshots do not support tags."
+    },
+    {
+      "name": "Get Block List",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Anonymous",
+        "Bearer"
+      ],
+      "notes": "Committed, uncommitted, or all blocks of the current blob, or the committed blocks of a snapshot or version (snapshot and versionid parameters). Supports conditions and an optional lease id. Page and append blobs answer InvalidBlobType."
+    },
+    {
+      "name": "Get Container ACL",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Returns stored access policies and x-ms-blob-public-access. Never available anonymously."
+    },
+    {
+      "name": "Get Container Metadata",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Anonymous",
+        "Bearer"
+      ],
+      "notes": "GET and HEAD with comp=metadata; anonymous access requires container-level public access. Metadata names are returned in lowercase because the HTTP layer folds header case."
+    },
+    {
+      "name": "Get Container Properties",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Anonymous",
+        "Bearer"
+      ],
+      "notes": "Returns ETag, Last-Modified, metadata, lease headers, and public access. Anonymous access requires container-level public access. Encryption scope and immutability headers carry fixed values."
+    },
+    {
+      "name": "Get Page Ranges",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Lists allocated ranges with a byte window, marker, and maxresults; touching ranges merge, no clear ranges are reported, and snapshot and prevsnapshot diffs answer NotImplemented. The snapshot and prevsnapshot parameters answer NotImplemented."
+    },
+    {
+      "name": "Get User Delegation Key",
+      "state": "known-difference",
+      "authorization": [
+        "Bearer"
+      ],
+      "notes": "Requires a bearer token (--oauth basic or jwks) and returns a generated 32-byte key valid for at most seven days. Keys are held in memory, so a restart invalidates every user-delegation SAS."
+    },
+    {
+      "name": "Lease Blob",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Acquire, renew, change, release, and break per the state table in ADR-0017, with the Azure lease error codes. Every mutating blob operation checks x-ms-lease-id; reads and Set Blob Tier accept an optional id that must match. Supports ETag and date conditions. Leases on snapshots and versions are not modeled."
+    },
+    {
+      "name": "Lease Container",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Acquire, renew, change, release, and break with durations 15 to 60 seconds or infinite and break periods 0 to 60 (ADR-0017). Expiry is evaluated lazily against the injected clock. Only the date conditions apply."
+    },
+    {
+      "name": "List Blobs",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Anonymous",
+        "Bearer"
+      ],
+      "notes": "Flat and hierarchical (delimiter with BlobPrefix) listings with prefix, marker, maxresults, and include of metadata, copy, uncommittedblobs, snapshots, versions, deleted, and tags; snapshots, versions, deleted, and tags cannot be combined with uncommittedblobs. Within a name, snapshots and versions list oldest first and the current blob last. Reports BlobType and, for page and append blobs, the sequence number and sealed state. Uncommitted blobs list with minimal properties. The permissions include answers NotImplemented. Anonymous access requires container-level public access. Markers are opaque local tokens."
+    },
+    {
+      "name": "List Containers",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Supports prefix, marker, maxresults, and include=metadata; the listing carries lease state and public access. include=deleted and include=system answer NotImplemented. Markers are opaque local tokens."
+    },
+    {
+      "name": "Preflight Blob Request",
+      "state": "known-difference",
+      "authorization": [
+        "Anonymous",
+        "Bearer"
+      ],
+      "notes": "OPTIONS answered at the HTTP edge from the account's stored CORS rules; Access-Control-* headers are added to matching requests. A preflight that no rule allows answers 403 CorsPreflightFailure, an error code not yet verified against Azure."
+    },
+    {
+      "name": "Put Blob",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Block, page, and append blobs (x-ms-blob-type). Supports content headers, x-ms-blob-content-md5, metadata, access tier, lease, x-ms-tags, and all conditions; If-None-Match: * on an existing blob is BlobAlreadyExists. The single-request limit defaults to 256 MiB (--max-blob-bytes). Page blobs are sparse up to 8 TiB, are created with Content-Length 0, and carry a sequence number; append blobs start empty and refuse access tiers. An overwrite retires the old state as a version (accounts in --versioning-accounts) or a soft-deleted snapshot (delete retention enabled). Reports x-ms-request-server-encrypted: false. Encryption scopes and immutability headers are unsupported. A SAS with only the create permission may overwrite."
+    },
+    {
+      "name": "Put Blob From URL",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Same-instance sources only, authorized as for Copy Blob. x-ms-copy-source-blob-properties selects source or request properties. Source conditions apply. Tags, encryption, and source MD5 validation are unsupported."
+    },
+    {
+      "name": "Put Block",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Per-block limit defaults to 5000 MiB (--max-block-bytes). Staged blocks survive restart and require the lease id while the blob is leased. Azure's staging expiration is not modeled. Page and append blobs answer InvalidBlobType."
+    },
+    {
+      "name": "Put Block From URL",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Same-instance sources only, with an optional x-ms-source-range. Source MD5 and CRC64 validation headers are unsupported."
+    },
+    {
+      "name": "Put Block List",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Committed, Uncommitted, and Latest selections with content headers, metadata, tier, x-ms-tags, lease, and conditions. The assembled-blob limit is configurable (--max-assembled-blob-bytes, default 512 MiB), not Azure's 190.7 TiB. Versions and soft-deleted snapshots follow Put Blob. Page and append blobs answer InvalidBlobType."
+    },
+    {
+      "name": "Put Page",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Update and clear of 512-byte-aligned ranges, 4 MiB per update, Content-MD5 or crc64, sequence-number conditions, and leases. Each update stores a new extent, so partly overwritten extents stay until fully replaced."
+    },
+    {
+      "name": "Put Page From URL",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Same-instance sources only; x-ms-source-content-md5 and crc64 are not accepted."
+    },
+    {
+      "name": "Query Blob Contents",
+      "state": "unsupported",
+      "authorization": [],
+      "notes": "Not planned."
+    },
+    {
+      "name": "Rename Container",
+      "state": "unsupported",
+      "authorization": [],
+      "notes": "Not planned."
+    },
+    {
+      "name": "Resize Page Blob",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Set Blob Properties with x-ms-blob-content-length; shrinking discards trailing data and growing adds a hole."
+    },
+    {
+      "name": "Restore Container",
+      "state": "unsupported",
+      "authorization": [],
+      "notes": "Container soft delete is not modeled."
+    },
+    {
+      "name": "Seal Append Blob",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Makes the blob read-only (BlobIsSealed on further appends); x-ms-seal-blob on Copy Blob is not supported."
+    },
+    {
+      "name": "Set Blob Expiry",
+      "state": "unsupported",
+      "authorization": [],
+      "notes": "Not planned for the block blob slice."
+    },
+    {
+      "name": "Set Blob Metadata",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Replaces all metadata and changes the ETag. Requires the lease id while leased. Metadata names are validated and stored in lowercase."
+    },
+    {
+      "name": "Set Blob Properties",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Replaces all six content properties when any is supplied, clearing the rest; with none supplied only the ETag and Last-Modified change. Requires the lease id while leased. Page blob and sequence number headers are unsupported. For a page blob, x-ms-blob-content-length resizes it and the sequence-number headers update it."
+    },
+    {
+      "name": "Set Blob Service Properties",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Updates only the elements present in the request, validating CORS rules (at most five). Logging, metrics, retention, and static website settings are stored but not acted on."
+    },
+    {
+      "name": "Set Blob Tags",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Replaces the tags of the current blob or a version; enforces ten tags, 128 and 256 character limits, permitted characters, and x-ms-if-tags. Tag errors use the codes TagsTooLarge and InvalidTag."
+    },
+    {
+      "name": "Set Blob Tier",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Stores Hot, Cool, Cold, or Archive for block blobs and P4 to P80 for page blobs (stored and reported only). Changes take effect immediately: leaving Archive answers 202 but completes at once, with no rehydration priority or pending state. Archived blobs cannot be read (BlobArchived)."
+    },
+    {
+      "name": "Set Container ACL",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Stores up to five signed identifiers and the public access level (ADR-0019). Omitting x-ms-blob-public-access makes the container private. Policy times and permission letters are validated."
+    },
+    {
+      "name": "Set Container Metadata",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Replaces all metadata and changes the ETag. Supports x-ms-lease-id (optional, must match an active lease) and If-Modified-Since or If-Unmodified-Since."
+    },
+    {
+      "name": "Snapshot Blob",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Creates a snapshot that shares the blob's extent; metadata override, conditions, x-ms-if-tags, and lease id are honored. The in-memory backend copies the bytes. A snapshot does not receive its own version id."
+    },
+    {
+      "name": "Submit Batch",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Delete Blob or Set Blob Tier sub-requests, one kind per batch, at most 256, account or container scope; each sub-request is authenticated and authorized separately and reported with its own status."
+    },
+    {
+      "name": "Undelete Blob",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Restores a soft-deleted blob with its tags and soft-deleted snapshots and versions until the retention days elapse. Retention starts when the delete is received and is checked on each request."
+    },
+    {
+      "name": "Update Sequence Number",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Set Blob Properties with x-ms-sequence-number-action max, update, or increment; reported as x-ms-blob-sequence-number."
+    }
   ]
 }

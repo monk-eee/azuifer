@@ -2124,7 +2124,6 @@ fn memory_mode_fails_predictably_at_its_limit_and_writes_nothing_to_disk() {
 }
 
 #[test]
-#[ignore = "re-enable once the File manifest is reconciled with the conformance exporter schema"]
 fn every_handled_operation_is_in_the_conformance_manifest() {
     let manifest: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(concat!(
@@ -2136,19 +2135,14 @@ fn every_handled_operation_is_in_the_conformance_manifest() {
     .unwrap();
     assert_eq!(manifest["service"], "file");
     assert_eq!(manifest["api_version"], VERSION);
-    assert_eq!(manifest["azure_differential_verified"], false);
-    for entry in manifest["inventory"].as_array().unwrap() {
-        let keys: Vec<_> = entry.as_object().unwrap().keys().cloned().collect();
-        assert_eq!(keys.len(), 4, "{entry}");
+    for entry in manifest["operations"].as_array().unwrap() {
         let state = entry["state"].as_str().unwrap();
         assert!(
-            ["implemented", "known-difference", "unsupported"].contains(&state),
+            ["compatible", "known-difference", "unsupported"].contains(&state),
             "{entry}"
         );
-        assert!(
-            !entry["authorization"].as_array().unwrap().is_empty(),
-            "{entry}"
-        );
+        let authorization = entry["authorization"].as_array().unwrap();
+        assert_eq!(authorization.is_empty(), state == "unsupported", "{entry}");
         if state != "unsupported" {
             assert!(!entry["notes"].as_str().unwrap().is_empty(), "{entry}");
         }

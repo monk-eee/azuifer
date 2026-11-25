@@ -63,7 +63,11 @@ fn json_export_adds_all_services_without_breaking_blob_clients() {
 fn markdown_export_shows_the_same_verified_and_unsupported_operations() {
     let markdown = export(&["--format", "markdown"]);
     assert!(markdown.contains("## blob (`2023-11-03`)"));
-    assert!(markdown.contains("| Put Block List | known-difference | SharedKey |"));
+    assert!(markdown.contains("| Put Block List | known-difference | SharedKey, SharedKeyLite, AccountSAS, ServiceSAS, UserDelegationSAS, Bearer |"));
+    assert!(markdown.contains("## queue (`2023-11-03`)"));
+    assert!(markdown.contains(
+        "| Put Message | compatible | SharedKey, SharedKeyLite, AccountSAS, ServiceSAS, Bearer |"
+    ));
     assert!(markdown.contains("## dfs (`2023-11-03`)"));
     assert!(markdown.contains("| Rename Path | unsupported | - |"));
     assert!(!markdown.contains("| exact |"));

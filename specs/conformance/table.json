@@ -2,22 +2,207 @@
   "service": "table",
   "api_version": "2023-11-03",
   "operations": [
-    {"name": "Query Tables", "state": "unsupported", "authorization": []},
-    {"name": "Create Table", "state": "unsupported", "authorization": []},
-    {"name": "Delete Table", "state": "unsupported", "authorization": []},
-    {"name": "Get Table ACL", "state": "unsupported", "authorization": []},
-    {"name": "Set Table ACL", "state": "unsupported", "authorization": []},
-    {"name": "Get Table Service Properties", "state": "unsupported", "authorization": []},
-    {"name": "Set Table Service Properties", "state": "unsupported", "authorization": []},
-    {"name": "Get Table Service Stats", "state": "unsupported", "authorization": []},
-    {"name": "Query Entities", "state": "unsupported", "authorization": []},
-    {"name": "Get Entity", "state": "unsupported", "authorization": []},
-    {"name": "Insert Entity", "state": "unsupported", "authorization": []},
-    {"name": "Update Entity", "state": "unsupported", "authorization": []},
-    {"name": "Merge Entity", "state": "unsupported", "authorization": []},
-    {"name": "Delete Entity", "state": "unsupported", "authorization": []},
-    {"name": "Insert Or Replace Entity", "state": "unsupported", "authorization": []},
-    {"name": "Insert Or Merge Entity", "state": "unsupported", "authorization": []},
-    {"name": "Entity Group Batch", "state": "unsupported", "authorization": []}
+    {
+      "name": "Atom payloads",
+      "state": "unsupported",
+      "authorization": [],
+      "notes": "application/atom+xml requests and Accept headers return 415 AtomFormatNotSupported; only the JSON formats that versions 2015-12-11 and later require are served."
+    },
+    {
+      "name": "Bearer token authorization",
+      "state": "known-difference",
+      "authorization": [
+        "Bearer"
+      ],
+      "notes": "Accepted with --oauth basic (audience, issuer, and times are checked but the signature is not, loopback only) or --oauth jwks (RS256 against a JWKS, role claims honored); with --oauth off a bearer token answers 401 InvalidAuthenticationInfo."
+    },
+    {
+      "name": "Create Table",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "POST /Tables. Honors Prefer: return-content (201 with body, the default) and return-no-content (204 with Preference-Applied). Names are 3-63 alphanumerics starting with a letter, case-insensitive for uniqueness, 'tables' reserved (400 InvalidResourceName); an existing name returns 409 TableAlreadyExists."
+    },
+    {
+      "name": "Delete Entity",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "DELETE with If-Match (* for unconditional) returns 204. A request without If-Match returns 400 InvalidInput; a missing entity returns 404 ResourceNotFound and a stale ETag 412."
+    },
+    {
+      "name": "Delete Table",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "DELETE /Tables('name') returns 204 and removes the table and its entities immediately; there is no asynchronous TableBeingDeleted window. Missing tables return 404 TableNotFound."
+    },
+    {
+      "name": "Entity Group Transactions",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "POST /$batch with multipart/mixed: one change set of at most 100 insert, update, merge, upsert and delete operations on one table and partition, applied in a single SQLite transaction (all or nothing), or one lone query. A failing operation returns 202 with one failed part (actual status and an 'N:' message prefix naming the zero-based index; Content-ID echoed). Cross-partition and duplicate-row violations are reported the same way. Differences: all operations are parsed and validated before any executes, so a structural error at a later index can be reported ahead of an execution error at an earlier one; the 4 MiB payload bound is a 5 MiB request body bound; multiple change sets are rejected."
+    },
+    {
+      "name": "Get Table ACL",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "Bearer"
+      ],
+      "notes": "GET /{table}?comp=acl returns the stored access policies as XML. Policy times are returned normalized to YYYY-MM-DDThh:mm:ss.fffffffZ. SAS tokens cannot read ACLs."
+    },
+    {
+      "name": "Get Table Service Properties",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "GET /?restype=service&comp=properties returns the stored Logging, HourMetrics, MinuteMetrics and Cors sections (Azure defaults until set). The settings are stored and returned only: logging and metrics are not produced and CORS rules are not enforced."
+    },
+    {
+      "name": "Get Table Service Stats",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Answered on the primary endpoint and on the '<account>-secondary' path form with Status live and the current time as LastSyncTime. There is no geo-replication; the secondary form accepts GET only."
+    },
+    {
+      "name": "Insert Entity",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "POST /{table} with nometadata, minimalmetadata and fullmetadata JSON; Prefer return-content (201) or return-no-content (204) with ETag, Location and DataServiceId headers. Enforces key characters and 1024-character keys, 252 user properties, 64 KiB strings and binary values, a 1 MiB entity, and the 400 codes PropertiesNeedValue, InvalidInput, PropertyNameInvalid, PropertyNameTooLong, PropertyValueTooLarge, TooManyProperties, EntityTooLarge, DuplicatePropertiesSpecified and InvalidValueType. Null values are not stored. A client-sent Timestamp is ignored. Existing entities return 409 EntityAlreadyExists."
+    },
+    {
+      "name": "Insert Or Merge Entity",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "MERGE or PATCH without If-Match creates the entity or merges into it and returns 204. SAS tokens need both add and update permissions."
+    },
+    {
+      "name": "Insert Or Replace Entity",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "PUT without If-Match creates or replaces the entity and returns 204. SAS tokens need both add and update permissions."
+    },
+    {
+      "name": "Merge Entity",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "MERGE and PATCH (and POST with X-HTTP-Method) with If-Match merge the supplied properties into the stored entity and return 204. Null properties never remove stored ones. Missing entities return 404 and stale ETags 412."
+    },
+    {
+      "name": "Preflight Table Request",
+      "state": "unsupported",
+      "authorization": [],
+      "notes": "OPTIONS requests are not routed and CORS rules stored by Set Table Service Properties are never evaluated."
+    },
+    {
+      "name": "Query Entities",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "GET /{table}() and GET /{table}(PartitionKey='p',RowKey='r') with $filter (eq ne gt ge lt le and or not, parentheses, at most 15 comparisons, string/Int32/Int64/Double/Boolean/DateTime/Guid/Binary literals), $select (absent properties are null), $top (maximum 1000) and NextPartitionKey/NextRowKey continuation. Differences: comparisons require identical Edm types (an Int64 property never equals an Int32 literal), keys sort by UTF-8 bytes rather than UTF-16, a missing property matches only ne, there is no 5 second query timeout or partition-boundary short page, and $orderby, $skip, $expand, $count and filter functions return 501 or 400. A service SAS with spk/epk limits results to its range."
+    },
+    {
+      "name": "Query Tables",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "GET /Tables with $filter on TableName, $top (default and maximum 1000) and NextTableName continuation (x-ms-continuation-NextTableName). Results are ordered by case-folded table name. Also serves GET /Tables('name') for one table. A service SAS cannot list tables."
+    },
+    {
+      "name": "Set Table ACL",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "Bearer"
+      ],
+      "notes": "PUT /{table}?comp=acl stores up to five policies (permissions drawn from r, a, u, d; unique ids of at most 64 characters) and returns 204. An empty body clears all policies. Stored policies take effect for service SAS tokens that reference them with si."
+    },
+    {
+      "name": "Set Table Service Properties",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "PUT /?restype=service&comp=properties replaces the supplied top-level sections, keeps the others, and returns 202. Section contents are stored as sent after XML well-formedness checks; their values are not validated or applied."
+    },
+    {
+      "name": "Update Entity",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "PUT /{table}(PartitionKey,RowKey) with If-Match (* or an ETag) replaces all properties and returns 204 with the new ETag. A missing entity returns 404 ResourceNotFound and a stale ETag 412 UpdateConditionNotSatisfied; If-None-Match is rejected with 400 InvalidInput. Weak, strong and percent-encoded forms of the Timestamp ETag all match."
+    }
   ]
 }
