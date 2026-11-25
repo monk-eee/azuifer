@@ -1,14 +1,16 @@
+mod blocks;
+
+use crate::checksum::{Checksum, Checksums, Hasher};
 use crate::domain::{
-    AccountName, BlobInfo, BlobKey, ByteRange, Condition, ContainerKey, ContentLength, Entity,
-    Error, Metadata, Page, PageRequest, Result,
+    AccountName, BlobInfo, BlobKey, BlobWrite, ByteRange, Condition, ContainerKey, ContentLength,
+    Entity, Error, Page, PageRequest, Result,
 };
 use anyhow::Context as _;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use md5::{Digest as _, Md5};
 use rusqlite::{Connection, OptionalExtension as _, Row, params};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Seek as _, SeekFrom},
+    io::{Seek as _, SeekFrom, Write},
     ops::Range,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -29,6 +31,19 @@ CREATE TABLE IF NOT EXISTS blobs (
     content_type TEXT NOT NULL, md5 TEXT NOT NULL, metadata TEXT NOT NULL, bytes BLOB,
     PRIMARY KEY (account, container, name),
     FOREIGN KEY (account, container) REFERENCES containers (account, name) ON DELETE CASCADE
+) STRICT;
+CREATE TABLE IF NOT EXISTS staged_blocks (
+    account TEXT NOT NULL, container TEXT NOT NULL, name TEXT NOT NULL,
+    block_id TEXT NOT NULL, width INTEGER NOT NULL,
+    id BLOB NOT NULL UNIQUE, length INTEGER NOT NULL, bytes BLOB,
+    PRIMARY KEY (account, container, name, block_id),
+    FOREIGN KEY (account, container) REFERENCES containers (account, name) ON DELETE CASCADE
+) STRICT;
+CREATE TABLE IF NOT EXISTS committed_blocks (
+    account TEXT NOT NULL, container TEXT NOT NULL, name TEXT NOT NULL,
+    position INTEGER NOT NULL, block_id TEXT NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL,
+    PRIMARY KEY (account, container, name, position),
+    FOREIGN KEY (account, container, name) REFERENCES blobs (account, container, name) ON DELETE CASCADE
 ) STRICT;";
 
 #[derive(Clone)]
@@ -44,10 +59,16 @@ enum Mode {
     Memory { limit: u64 },
 }
 
+#[derive(Clone, Copy)]
+enum ContentSource {
+    Blob,
+    StagedBlock,
+}
+
 pub(crate) struct Upload {
     expected: ContentLength,
     received: u64,
-    hash: Md5,
+    hash: Hasher,
     sink: Sink,
 }
 
@@ -58,7 +79,7 @@ enum Sink {
 
 pub(crate) struct Uploaded {
     length: ContentLength,
-    md5: String,
+    pub(crate) checksums: Checksums,
     data: UploadedData,
 }
 
@@ -76,14 +97,6 @@ pub(crate) struct Download {
     pub(crate) info: BlobInfo,
     pub(crate) range: Option<Range<u64>>,
     pub(crate) payload: Option<Payload>,
-}
-
-pub(crate) struct Put {
-    pub(crate) key: BlobKey,
-    pub(crate) condition: Condition,
-    pub(crate) content_type: String,
-    pub(crate) metadata: Metadata,
-    pub(crate) upload: Uploaded,
 }
 
 impl Store {
@@ -169,9 +182,7 @@ impl Store {
             Mode::Disk { extents, .. } => {
                 let path = extents.clone();
                 let (temp, file) = tokio::task::spawn_blocking(move || {
-                    let temp = tempfile::Builder::new()
-                        .prefix("incoming-")
-                        .tempfile_in(path)?;
+                    let temp = staging_file(&path)?;
                     let file = temp.reopen()?;
                     Ok::<_, std::io::Error>((temp, file))
                 })
@@ -190,7 +201,7 @@ impl Store {
         Ok(Upload {
             expected: length,
             received: 0,
-            hash: Md5::new(),
+            hash: Hasher::new(),
             sink,
         })
     }
@@ -219,7 +230,8 @@ impl Store {
             let values = params![key.account.as_str(), key.name.as_str()];
             let ids = if matches!(mode, Mode::Disk { .. }) {
                 let mut statement = tx
-                    .prepare("SELECT id FROM blobs WHERE account=?1 AND container=?2")
+                    .prepare("SELECT id FROM blobs WHERE account=?1 AND container=?2
+                              UNION ALL SELECT id FROM staged_blocks WHERE account=?1 AND container=?2")
                     .map_err(db_error)?;
                 statement
                     .query_map(values, |row| row.get::<_, Uuid>(0))
@@ -292,48 +304,45 @@ impl Store {
         }).await
     }
 
-    pub(crate) async fn put_blob(&self, put: Put) -> Result<Entity> {
+    pub(crate) async fn put_blob(
+        &self,
+        key: BlobKey,
+        options: BlobWrite,
+        upload: Uploaded,
+    ) -> Result<Entity> {
         self.run(move |db, mode| {
             let tx = db.transaction().map_err(db_error)?;
-            container(&tx, &put.key.container)?;
-            let old = blob(&tx, &put.key)?;
-            put.condition.check(old.as_ref().map(|b| b.entity), false)?;
-            let entity = new_entity()?;
-            let metadata = serde_json::to_string(&put.metadata).map_err(|_| internal("could not encode metadata"))?;
-            let bytes = match (&put.upload.data, mode) {
-                (UploadedData::Memory(bytes), Mode::Memory { limit }) => {
-                    let stored = tx.query_row("SELECT COALESCE(SUM(length), 0) FROM blobs", [], |row| row_uint(row, 0)).map_err(db_error)?;
-                    let previous = old.as_ref().map_or(0, |blob| blob.length.0);
-                    let remaining = stored.checked_sub(previous).ok_or_else(|| internal("invalid memory quota accounting"))?;
-                    if remaining + put.upload.length.0 > *limit {
-                        return Err(Error::QuotaExceeded);
-                    }
-                    Some(bytes.as_slice())
-                }
-                (UploadedData::Disk(_), Mode::Disk { .. }) => None,
-                _ => return Err(internal("upload backend mismatch")),
-            };
-            tx.execute(
-                "INSERT INTO blobs VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
-                 ON CONFLICT(account,container,name) DO UPDATE SET
-                    id=excluded.id, modified=excluded.modified, length=excluded.length,
-                    content_type=excluded.content_type, md5=excluded.md5, metadata=excluded.metadata, bytes=excluded.bytes",
-                params![put.key.container.account.as_str(), put.key.container.name.as_str(), put.key.path.as_str(),
-                        entity.id, sqlite_int(entity.modified)?, sqlite_int(put.upload.length.0)?,
-                        put.content_type, put.upload.md5, metadata, bytes],
-            ).map_err(db_error)?;
-            if let (UploadedData::Disk(temp), Mode::Disk { extents, .. }) = (put.upload.data, mode) {
-                let committed = temp.persist_noclobber(extent(extents, entity.id)).map_err(|error| io_error(error.error))?;
-                committed.sync_all().map_err(io_error)?;
-                #[cfg(unix)]
-                File::open(extents).and_then(|directory| directory.sync_all()).map_err(io_error)?;
-            }
+            container(&tx, &key.container)?;
+            let old = blob(&tx, &key)?;
+            options
+                .condition
+                .check(old.as_ref().map(|b| b.entity), false)?;
+            let discard = remove_staged(&tx, &key)?;
+            check_memory_quota(
+                &tx,
+                mode,
+                old.as_ref().map_or(0, |blob| blob.length.0),
+                upload.length.0,
+            )?;
+            let entity = save_blob(
+                &tx,
+                mode,
+                &key,
+                &options,
+                upload.length,
+                upload.data,
+                Some(upload.checksums.md5),
+            )?;
             tx.commit().map_err(db_error)?;
             if let Some(old) = old {
                 reclaim(mode, old.entity.id);
             }
+            for id in discard {
+                reclaim(mode, id);
+            }
             Ok(entity)
-        }).await
+        })
+        .await
     }
 
     pub(crate) async fn read_blob(
@@ -350,33 +359,23 @@ impl Store {
             let payload = if with_body {
                 let offset = range.as_ref().map_or(0, |range| range.start);
                 match mode {
-                    Mode::Disk { extents, .. } => {
-                        let path = extent(extents, info.entity.id);
-                        require_file_if_present(&path).map_err(io_error)?;
-                        let mut file = File::open(path).map_err(io_error)?;
-                        if file.metadata().map_err(io_error)?.len() != info.length.0 {
-                            return Err(internal("extent length does not match metadata"));
-                        }
-                        file.seek(SeekFrom::Start(offset)).map_err(io_error)?;
-                        Some(Payload::Disk(file))
-                    }
+                    Mode::Disk { extents, .. } => Some(Payload::Disk(open_extent(
+                        extents,
+                        info.entity.id,
+                        info.length.0,
+                        offset,
+                    )?)),
                     Mode::Memory { .. } => {
                         let size = range
                             .as_ref()
                             .map_or(info.length.0, |range| range.end - range.start);
-                        let bytes = db
-                            .query_row(
-                                "SELECT substr(bytes, ?2, ?3) FROM blobs WHERE id=?1",
-                                params![info.entity.id, sqlite_int(offset + 1)?, sqlite_int(size)?],
-                                |row| row.get::<_, Vec<u8>>(0),
-                            )
-                            .map_err(db_error)?;
-                        if bytes.len() as u64 != size {
-                            return Err(internal(
-                                "in-memory content length does not match metadata",
-                            ));
-                        }
-                        Some(Payload::Memory(bytes))
+                        Some(Payload::Memory(read_memory_slice(
+                            db,
+                            ContentSource::Blob,
+                            info.entity.id,
+                            offset,
+                            size,
+                        )?))
                     }
                 }
             } else {
@@ -396,10 +395,14 @@ impl Store {
             let tx = db.transaction().map_err(db_error)?;
             let old = require_blob(&tx, &key)?;
             condition.check(Some(old.entity), false)?;
+            let discard = remove_staged(&tx, &key)?;
             tx.execute("DELETE FROM blobs WHERE id=?1", [old.entity.id])
                 .map_err(db_error)?;
             tx.commit().map_err(db_error)?;
             reclaim(mode, old.entity.id);
+            for id in discard {
+                reclaim(mode, id);
+            }
             Ok(())
         })
         .await
@@ -420,14 +423,11 @@ impl Upload {
         Ok(())
     }
 
-    pub(crate) async fn finish(self, expected_md5: Option<[u8; 16]>) -> Result<Uploaded> {
+    pub(crate) async fn finish(self, expected: Option<Checksum>) -> Result<Uploaded> {
         if self.received != self.expected.0 {
             return Err(Error::InvalidLength);
         }
-        let md5: [u8; 16] = self.hash.finalize().into();
-        if expected_md5.is_some_and(|expected| expected != md5) {
-            return Err(Error::Md5Mismatch);
-        }
+        let checksums = self.hash.finish(expected)?;
         let data = match self.sink {
             Sink::Disk(temp, mut file) => {
                 file.flush().await.map_err(io_error)?;
@@ -438,10 +438,157 @@ impl Upload {
         };
         Ok(Uploaded {
             length: self.expected,
-            md5: STANDARD.encode(md5),
+            checksums,
             data,
         })
     }
+}
+
+impl UploadedData {
+    fn bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Memory(bytes) => Some(bytes),
+            Self::Disk(_) => None,
+        }
+    }
+
+    fn writer(&mut self) -> &mut dyn Write {
+        match self {
+            Self::Memory(bytes) => bytes,
+            Self::Disk(file) => file.as_file_mut(),
+        }
+    }
+
+    fn persist(self, mode: &Mode, id: Uuid) -> Result<()> {
+        match (self, mode) {
+            (Self::Disk(temp), Mode::Disk { extents, .. }) => {
+                let committed = temp
+                    .persist_noclobber(extent(extents, id))
+                    .map_err(|error| io_error(error.error))?;
+                committed.sync_all().map_err(io_error)?;
+                #[cfg(unix)]
+                File::open(extents)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(io_error)?;
+                Ok(())
+            }
+            (Self::Memory(_), Mode::Memory { .. }) => Ok(()),
+            _ => Err(internal("upload backend mismatch")),
+        }
+    }
+}
+
+fn staging_file(dir: &Path) -> std::io::Result<NamedTempFile> {
+    tempfile::Builder::new()
+        .prefix("incoming-")
+        .tempfile_in(dir)
+}
+
+fn open_extent(dir: &Path, id: Uuid, length: u64, offset: u64) -> Result<File> {
+    let path = extent(dir, id);
+    require_file_if_present(&path).map_err(io_error)?;
+    let mut file = File::open(path).map_err(io_error)?;
+    if file.metadata().map_err(io_error)?.len() != length {
+        return Err(internal("extent length does not match metadata"));
+    }
+    file.seek(SeekFrom::Start(offset)).map_err(io_error)?;
+    Ok(file)
+}
+
+fn read_memory_slice(
+    db: &Connection,
+    source: ContentSource,
+    id: Uuid,
+    offset: u64,
+    length: u64,
+) -> Result<Vec<u8>> {
+    // SQLite's substr returns NULL for an empty BLOB; the stored value is still a BLOB.
+    let sql = match source {
+        ContentSource::Blob => {
+            "SELECT COALESCE(substr(bytes, ?2, ?3), bytes) FROM blobs WHERE id=?1"
+        }
+        ContentSource::StagedBlock => {
+            "SELECT COALESCE(substr(bytes, ?2, ?3), bytes) FROM staged_blocks WHERE id=?1"
+        }
+    };
+    let bytes: Vec<u8> = db
+        .query_row(
+            sql,
+            params![id, sqlite_int(offset + 1)?, sqlite_int(length)?],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    if bytes.len() as u64 != length {
+        return Err(internal("in-memory content length does not match metadata"));
+    }
+    Ok(bytes)
+}
+
+fn blob_params(key: &BlobKey) -> [&str; 3] {
+    [
+        key.container.account.as_str(),
+        key.container.name.as_str(),
+        key.path.as_str(),
+    ]
+}
+
+fn remove_staged(db: &Connection, key: &BlobKey) -> Result<Vec<Uuid>> {
+    let mut query = db
+        .prepare(
+            "DELETE FROM staged_blocks WHERE account=?1 AND container=?2 AND name=?3 RETURNING id",
+        )
+        .map_err(db_error)?;
+    query
+        .query_map(blob_params(key), |row| row.get(0))
+        .map_err(db_error)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(db_error)
+}
+
+fn check_memory_quota(db: &Connection, mode: &Mode, removed: u64, added: u64) -> Result<()> {
+    if let Mode::Memory { limit } = mode {
+        let stored = db.query_row(
+            "SELECT (SELECT COALESCE(SUM(length),0) FROM blobs) + (SELECT COALESCE(SUM(length),0) FROM staged_blocks)",
+            [], |row| row_uint(row, 0),
+        ).map_err(db_error)?;
+        let remaining = stored
+            .checked_sub(removed)
+            .ok_or_else(|| internal("invalid memory quota accounting"))?;
+        if remaining + added > *limit {
+            return Err(Error::QuotaExceeded);
+        }
+    }
+    Ok(())
+}
+
+fn save_blob(
+    db: &Connection,
+    mode: &Mode,
+    key: &BlobKey,
+    options: &BlobWrite,
+    length: ContentLength,
+    data: UploadedData,
+    md5: Option<[u8; 16]>,
+) -> Result<Entity> {
+    let entity = new_entity()?;
+    let metadata = serde_json::to_string(&options.metadata)
+        .map_err(|_| internal("could not encode metadata"))?;
+    let [account, container, name] = blob_params(key);
+    db.execute(
+        "INSERT INTO blobs VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+         ON CONFLICT(account,container,name) DO UPDATE SET
+           id=excluded.id, modified=excluded.modified, length=excluded.length,
+           content_type=excluded.content_type, md5=excluded.md5, metadata=excluded.metadata, bytes=excluded.bytes",
+        params![account, container, name, entity.id, sqlite_int(entity.modified)?, sqlite_int(length.0)?,
+                options.content_type, md5.map_or_else(String::new, |md5| STANDARD.encode(md5)), metadata, data.bytes()],
+    ).map_err(db_error)?;
+    db.execute(
+        "DELETE FROM committed_blocks WHERE account=?1 AND container=?2 AND name=?3",
+        blob_params(key),
+    )
+    .map_err(db_error)?;
+    data.persist(mode, entity.id)?;
+    Ok(entity)
 }
 
 fn container(db: &Connection, key: &ContainerKey) -> Result<Entity> {
@@ -495,11 +642,12 @@ fn blob_row(row: &Row<'_>) -> rusqlite::Result<BlobInfo> {
     let metadata = serde_json::from_str(&json).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(error))
     })?;
+    let md5: String = row.get(4)?;
     Ok(BlobInfo {
         entity: entity_row(row)?,
         length: ContentLength(row_uint(row, 2)?),
         content_type: row.get(3)?,
-        md5: row.get(4)?,
+        md5: (!md5.is_empty()).then_some(md5),
         metadata,
     })
 }
@@ -531,7 +679,7 @@ fn recover(db: &Connection, dir: &Path) -> anyhow::Result<()> {
             .and_then(|id| Uuid::parse_str(id).ok())
         {
             !db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM blobs WHERE id=?1)",
+                "SELECT EXISTS(SELECT 1 FROM blobs WHERE id=?1 UNION ALL SELECT 1 FROM staged_blocks WHERE id=?1)",
                 [id],
                 |row| row.get::<_, bool>(0),
             )?

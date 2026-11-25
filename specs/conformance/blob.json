@@ -11,6 +11,9 @@
     "Delete Container",
     "List Blobs (flat)",
     "Put Blob (BlockBlob)",
+    "Put Block",
+    "Put Block List",
+    "Get Block List",
     "Get Blob",
     "Get Blob Properties",
     "Delete Blob"

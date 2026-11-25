@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import shutil
@@ -52,9 +53,9 @@ def wait_ready(admin):
 
 
 def exercise(az, env, root, key):
-    def run(*args, expected_error=None):
+    def run(*args, expected_error=None, timeout=45):
         command = [az, "storage", *args, "--auth-mode", "key", "--output", "json", "--only-show-errors"]
-        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=45)
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=timeout)
         name = "az storage " + " ".join(args[:2])
         errors = result.stderr.replace(key, "[redacted]").strip()
         if expected_error is not None:
@@ -100,6 +101,26 @@ def exercise(az, env, root, key):
 
     run("blob", "delete", *scope, "--if-match", tag)
     require(not run("blob", "exists", *scope)["exists"], "blob remained visible after delete")
+
+    multipart = ["--container-name", container, "--name", "folder/multipart.bin"]
+    source = root / "multipart.bin"
+    size = 256 * 1024 * 1024 + 1
+    with source.open("wb") as file:
+        file.write(b"first block")
+        file.seek(8 * 1024 * 1024 - 3)
+        file.write(b"cross the block boundary")
+        file.seek(size - 4)
+        file.write(b"last")
+    # One byte beyond the pinned Azure CLI's 256 MiB single-PUT threshold.
+    run("blob", "upload", *multipart, "--file", str(source), "--overwrite", "false", timeout=180)
+    require(run("blob", "show", *multipart)["properties"]["contentLength"] == size,
+            "multipart commit reported the wrong size")
+    downloaded = root / "multipart-download.bin"
+    run("blob", "download", *multipart, "--file", str(downloaded), timeout=180)
+    with source.open("rb") as original, downloaded.open("rb") as actual:
+        require(hashlib.file_digest(actual, "sha256").digest() == hashlib.file_digest(original, "sha256").digest(),
+                "multipart download did not match the uploaded bytes")
+
     run("container", "delete", "--name", container)
     require(not run("container", "exists", "--name", container)["exists"], "container remained visible after delete")
 
@@ -135,7 +156,7 @@ def main():
         )
         wait_ready(args.admin_url)
         exercise(az, env, root, key)
-    print("Azure CLI: container and Blob lifecycle, guarded overwrite, ETag, range, and metadata passed.")
+    print("Azure CLI: Blob lifecycle, guarded overwrite, ETag, range, metadata, and 256 MiB + 1 multipart upload passed.")
 
 
 if __name__ == "__main__":

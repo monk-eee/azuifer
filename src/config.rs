@@ -35,6 +35,8 @@ pub(crate) struct Options {
     memory_limit: Option<u64>,
     #[arg(long, env = "AZUIFER_MAX_BLOB_BYTES", global = true)]
     max_blob_bytes: Option<u64>,
+    #[arg(long, env = "AZUIFER_MAX_ASSEMBLED_BLOB_BYTES", global = true)]
+    max_assembled_blob_bytes: Option<u64>,
     #[arg(long, env = "AZUIFER_UPLOAD_TIMEOUT_SECONDS", global = true)]
     upload_timeout_seconds: Option<u64>,
     #[arg(long, env = "AZUIFER_SKIP_API_VERSION_CHECK", global = true, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
@@ -53,6 +55,7 @@ struct FileConfig {
     in_memory: Option<bool>,
     memory_limit: Option<u64>,
     max_blob_bytes: Option<u64>,
+    max_assembled_blob_bytes: Option<u64>,
     upload_timeout_seconds: Option<u64>,
     skip_api_version_check: Option<bool>,
     services: Option<String>,
@@ -77,6 +80,7 @@ pub(crate) struct Config {
     pub(crate) location: Option<PathBuf>,
     pub(crate) memory_limit: u64,
     pub(crate) max_blob_bytes: u64,
+    pub(crate) max_assembled_blob_bytes: u64,
     pub(crate) upload_timeout: Duration,
     pub(crate) skip_api_version_check: bool,
     pub(crate) accounts: HashMap<AccountName, Vec<Vec<u8>>>,
@@ -133,6 +137,10 @@ impl Config {
             .max_blob_bytes
             .or(file.max_blob_bytes)
             .unwrap_or(16 * MIB);
+        let max_assembled_blob_bytes = options
+            .max_assembled_blob_bytes
+            .or(file.max_assembled_blob_bytes)
+            .unwrap_or(512 * MIB);
         ensure!(
             (1..=1024 * MIB).contains(&max_blob_bytes),
             "max-blob-bytes must be between 1 and 1073741824"
@@ -140,6 +148,10 @@ impl Config {
         ensure!(
             memory_limit > 0 && memory_limit <= 16 * 1024 * MIB,
             "memory-limit must be between 1 and 17179869184"
+        );
+        ensure!(
+            (1..=16 * 1024 * MIB).contains(&max_assembled_blob_bytes),
+            "max-assembled-blob-bytes must be between 1 and 17179869184"
         );
         let upload_timeout = options
             .upload_timeout_seconds
@@ -161,6 +173,7 @@ impl Config {
             location,
             memory_limit,
             max_blob_bytes,
+            max_assembled_blob_bytes,
             upload_timeout: Duration::from_secs(upload_timeout),
             skip_api_version_check: options
                 .skip_api_version_check

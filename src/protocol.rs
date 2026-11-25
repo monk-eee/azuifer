@@ -1,15 +1,21 @@
 use crate::{
     auth::{self, Query, header},
+    checksum::Checksum,
     config::Config,
     domain::{
-        AccountName, ApiVersion, BlobKey, BlobPath, ByteRange, Condition, ContainerKey,
-        ContainerName, ContentLength, Error, Metadata, PageRequest, Result, xml_safe,
+        AccountName, ApiVersion, BlobKey, BlobPath, BlobWrite, BlockId, BlockListKind,
+        BlockSelection, BlockSource, ByteRange, Condition, ContainerKey, ContainerName,
+        ContentLength, Error, Metadata, PageRequest, Result, xml_safe,
     },
 };
 use axum::http::{HeaderMap, Method, request::Parts};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use percent_encoding::percent_decode_str;
-use std::time::SystemTime;
+use quick_xml::{Reader, events::Event};
+use std::{collections::HashMap, time::SystemTime};
+
+const MAX_BLOCK_LIST_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_COMMITTED_BLOCKS: usize = 50_000;
 
 enum Resource {
     Account(AccountName),
@@ -66,17 +72,17 @@ pub(crate) enum Operation {
     DeleteContainer(ContainerKey),
     ListContainers(AccountName, PageRequest),
     ListBlobs(ContainerKey, PageRequest, bool),
-    PutBlob(BlobKey, UploadOptions),
+    PutBlob(BlobKey, UploadOptions, BlobWrite),
+    PutBlock(BlobKey, BlockId, UploadOptions),
+    PutBlockList(BlobKey, UploadOptions, BlobWrite, Option<[u8; 16]>),
+    GetBlockList(BlobKey, BlockListKind, Condition),
     ReadBlob(BlobKey, ReadOptions),
     DeleteBlob(BlobKey, Condition),
 }
 
 pub(crate) struct UploadOptions {
     pub(crate) length: ContentLength,
-    pub(crate) content_type: String,
-    pub(crate) checksum: Option<[u8; 16]>,
-    pub(crate) metadata: Metadata,
-    pub(crate) condition: Condition,
+    pub(crate) checksum: Option<Checksum>,
 }
 
 pub(crate) struct ReadOptions {
@@ -174,6 +180,55 @@ pub(crate) fn parse(parts: &Parts, config: &Config) -> Result<ParsedRequest> {
                 _ => return Err(Error::Unsupported),
             }
         }
+        (Resource::Blob(key), &Method::PUT, None, Some("block")) => {
+            check(
+                &query,
+                headers,
+                &["comp", "blockid"],
+                &["content-md5", "x-ms-content-crc64"],
+                false,
+            )?;
+            let id = BlockId::parse(param("blockid").ok_or(Error::InvalidQuery)?)?;
+            Operation::PutBlock(key, id, upload_options(headers, config.max_blob_bytes)?)
+        }
+        (Resource::Blob(key), &Method::PUT, None, Some("blocklist")) => {
+            check(
+                &query,
+                headers,
+                &["comp"],
+                &[
+                    "if-match",
+                    "if-none-match",
+                    "x-ms-blob-content-type",
+                    "x-ms-blob-content-md5",
+                    "content-md5",
+                    "x-ms-content-crc64",
+                ],
+                true,
+            )?;
+            Operation::PutBlockList(
+                key,
+                upload_options(headers, MAX_BLOCK_LIST_BYTES)?,
+                blob_write(headers, false)?,
+                decode_hash(header(headers, "x-ms-blob-content-md5")?)?,
+            )
+        }
+        (Resource::Blob(key), &Method::GET, None, Some("blocklist")) => {
+            check(
+                &query,
+                headers,
+                &["comp", "blocklisttype"],
+                &["if-match", "if-none-match"],
+                false,
+            )?;
+            let list = match param("blocklisttype") {
+                None | Some("committed") => BlockListKind::Committed,
+                Some("uncommitted") => BlockListKind::Uncommitted,
+                Some("all") => BlockListKind::All,
+                _ => return Err(Error::InvalidQuery),
+            };
+            Operation::GetBlockList(key, list, condition(headers)?)
+        }
         (Resource::Blob(key), &Method::PUT, None, None) => {
             check(
                 &query,
@@ -185,11 +240,20 @@ pub(crate) fn parse(parts: &Parts, config: &Config) -> Result<ParsedRequest> {
                     "x-ms-blob-type",
                     "x-ms-blob-content-type",
                     "content-md5",
+                    "x-ms-content-crc64",
                 ],
                 true,
             )?;
-            let options = upload_options(headers, config.max_blob_bytes)?;
-            Operation::PutBlob(key, options)
+            match header(headers, "x-ms-blob-type")? {
+                Some("BlockBlob") => (),
+                Some("AppendBlob" | "PageBlob") => return Err(Error::Unsupported),
+                _ => return Err(Error::InvalidHeader),
+            }
+            Operation::PutBlob(
+                key,
+                upload_options(headers, config.max_blob_bytes)?,
+                blob_write(headers, true)?,
+            )
         }
         (Resource::Blob(key), method @ (&Method::GET | &Method::HEAD), None, None) => {
             let with_body = method == Method::GET;
@@ -232,11 +296,6 @@ fn condition(headers: &HeaderMap) -> Result<Condition> {
 }
 
 fn upload_options(headers: &HeaderMap, limit: u64) -> Result<UploadOptions> {
-    match header(headers, "x-ms-blob-type")? {
-        Some("BlockBlob") => (),
-        Some("AppendBlob" | "PageBlob") => return Err(Error::Unsupported),
-        _ => return Err(Error::InvalidHeader),
-    }
     let length: u64 = header(headers, "content-length")?
         .ok_or(Error::MissingLength)?
         .parse()
@@ -244,7 +303,22 @@ fn upload_options(headers: &HeaderMap, limit: u64) -> Result<UploadOptions> {
     if length > limit {
         return Err(Error::TooLarge);
     }
-    let checksum = header(headers, "content-md5")?
+    let md5 = decode_hash(header(headers, "content-md5")?)?;
+    let crc64 = decode_hash(header(headers, "x-ms-content-crc64")?)?;
+    let checksum = match (md5, crc64) {
+        (Some(_), Some(_)) => return Err(Error::InvalidHeader),
+        (Some(md5), None) => Some(Checksum::Md5(md5)),
+        (None, Some(crc64)) => Some(Checksum::Crc64(u64::from_le_bytes(crc64))),
+        (None, None) => None,
+    };
+    Ok(UploadOptions {
+        length: ContentLength(length),
+        checksum,
+    })
+}
+
+fn decode_hash<const N: usize>(value: Option<&str>) -> Result<Option<[u8; N]>> {
+    value
         .map(|value| {
             STANDARD
                 .decode(value)
@@ -252,9 +326,17 @@ fn upload_options(headers: &HeaderMap, limit: u64) -> Result<UploadOptions> {
                 .try_into()
                 .map_err(|_| Error::InvalidHeader)
         })
-        .transpose()?;
+        .transpose()
+}
+
+fn blob_write(headers: &HeaderMap, request_content_type: bool) -> Result<BlobWrite> {
+    let request_content_type = if request_content_type {
+        header(headers, "content-type")?
+    } else {
+        None
+    };
     let content_type = header(headers, "x-ms-blob-content-type")?
-        .or(header(headers, "content-type")?)
+        .or(request_content_type)
         .unwrap_or("application/octet-stream");
     if content_type.is_empty() || content_type.len() > 512 || !xml_safe(content_type) {
         return Err(Error::InvalidHeader);
@@ -285,13 +367,71 @@ fn upload_options(headers: &HeaderMap, limit: u64) -> Result<UploadOptions> {
     {
         return Err(Error::InvalidHeader);
     }
-    Ok(UploadOptions {
-        length: ContentLength(length),
+    Ok(BlobWrite {
         content_type: content_type.to_owned(),
-        checksum,
         metadata,
         condition: condition(headers)?,
     })
+}
+
+pub(crate) fn parse_block_list(body: &[u8]) -> Result<Vec<BlockSelection>> {
+    let text = std::str::from_utf8(body).map_err(|_| Error::InvalidXml)?;
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(true);
+    let root = match reader.read_event().map_err(|_| Error::InvalidXml)? {
+        Event::Decl(_) => reader.read_event().map_err(|_| Error::InvalidXml)?,
+        event => event,
+    };
+    let mut selections = Vec::new();
+    let mut sources = HashMap::new();
+    match root {
+        Event::Empty(root)
+            if root.name().as_ref() == "BlockList" && root.attributes_raw().is_empty() => {}
+        Event::Start(root)
+            if root.name().as_ref() == "BlockList" && root.attributes_raw().is_empty() =>
+        {
+            loop {
+                match reader.read_event().map_err(|_| Error::InvalidXml)? {
+                    Event::End(end) if end.name().as_ref() == "BlockList" => break,
+                    Event::Start(tag) if tag.attributes_raw().is_empty() => {
+                        if selections.len() == MAX_COMMITTED_BLOCKS {
+                            return Err(Error::BlockListTooLong);
+                        }
+                        let source = match tag.name().as_ref() {
+                            "Committed" => BlockSource::Committed,
+                            "Uncommitted" => BlockSource::Uncommitted,
+                            "Latest" => BlockSource::Latest,
+                            _ => return Err(Error::InvalidXml),
+                        };
+                        let value = reader
+                            .read_text(tag.name())
+                            .map_err(|_| Error::InvalidXml)?;
+                        let id =
+                            BlockId::parse(value.trim()).map_err(|_| Error::InvalidBlockList)?;
+                        if selections
+                            .first()
+                            .is_some_and(|first: &BlockSelection| first.id.width != id.width)
+                        {
+                            return Err(Error::InvalidBlockList);
+                        }
+                        if sources
+                            .insert(id.as_str().to_owned(), source)
+                            .is_some_and(|prior| prior != source)
+                        {
+                            return Err(Error::InvalidBlockList);
+                        }
+                        selections.push(BlockSelection { id, source });
+                    }
+                    _ => return Err(Error::InvalidXml),
+                }
+            }
+        }
+        _ => return Err(Error::InvalidXml),
+    }
+    if !matches!(reader.read_event(), Ok(Event::Eof)) {
+        return Err(Error::InvalidXml);
+    }
+    Ok(selections)
 }
 
 fn check(

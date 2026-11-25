@@ -1,4 +1,5 @@
 mod auth;
+mod checksum;
 mod config;
 mod domain;
 mod protocol;

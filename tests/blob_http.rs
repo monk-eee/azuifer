@@ -923,6 +923,263 @@ fn persistent_blob_names_do_not_inherit_host_filesystem_rules() {
 }
 
 #[test]
+fn staged_blocks_survive_restart_and_commit_in_selection_order() {
+    let location = tempfile::tempdir().unwrap();
+    let server = Emulator::start(Some(location.path()), &[]);
+    server.create_container();
+    let put = server.put(BLOB, &[], b"preceding");
+    assert_eq!(put.status(), 201);
+    let preceding = etag(&put);
+    let block_list = format!("{BLOB}?comp=blocklist");
+    let all = format!("{block_list}&blocklisttype=all");
+
+    for (id, bytes) in [
+        ("Qg==", &b"first"[..]),
+        ("QQ==", &b"one"[..]),
+        ("Qg==", &b"last"[..]),
+    ] {
+        let response = server.request(
+            Method::PUT,
+            &format!("{BLOB}?comp=block&blockid={id}"),
+            &[],
+            bytes,
+        );
+        assert_eq!(response.status(), 201);
+    }
+    let unchanged = server.request(Method::GET, BLOB, &[], b"");
+    assert_eq!(etag(&unchanged), preceding);
+    assert_eq!(unchanged.bytes().unwrap().as_ref(), b"preceding");
+
+    drop(server);
+    let server = Emulator::start(Some(location.path()), &[]);
+    let staged = server.request(Method::GET, &all, &[], b"");
+    assert_eq!(staged.status(), 200);
+    let staged = staged.text().unwrap();
+    assert!(staged.contains("<UncommittedBlocks><Block><Name>QQ==</Name><Size>3</Size></Block><Block><Name>Qg==</Name><Size>4</Size></Block></UncommittedBlocks>"));
+
+    error(
+        server.request(
+            Method::PUT,
+            &block_list,
+            &[],
+            b"<BlockList><Latest>Wg==</Latest></BlockList>",
+        ),
+        400,
+        "InvalidBlockList",
+    );
+    let after_rejection = server.request(Method::GET, &all, &[], b"");
+    assert_eq!(after_rejection.text().unwrap(), staged);
+    let xml = b"<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList><Latest>Qg==</Latest><Uncommitted>QQ==</Uncommitted><Latest>Qg==</Latest></BlockList>";
+    let commit = server.request(
+        Method::PUT,
+        &block_list,
+        &[
+            ("if-match", &preceding),
+            ("x-ms-blob-content-type", "text/plain"),
+        ],
+        xml,
+    );
+    assert_eq!(commit.status(), 201);
+    let committed_tag = etag(&commit);
+    assert_ne!(committed_tag, preceding);
+    let updated = server.request(Method::GET, BLOB, &[], b"");
+    assert_eq!(etag(&updated), committed_tag);
+    assert_eq!(updated.headers()["content-type"], "text/plain");
+    assert!(!updated.headers().contains_key("content-md5"));
+    assert_eq!(updated.bytes().unwrap().as_ref(), b"lastonelast");
+    let listing = server.request(Method::GET, &all, &[], b"");
+    assert_eq!(listing.headers()["x-ms-blob-content-length"], "11");
+    let listing = listing.text().unwrap();
+    assert!(listing.contains("<CommittedBlocks><Block><Name>Qg==</Name><Size>4</Size></Block><Block><Name>QQ==</Name><Size>3</Size></Block><Block><Name>Qg==</Name><Size>4</Size></Block></CommittedBlocks>"));
+    assert!(listing.contains("<UncommittedBlocks></UncommittedBlocks>"));
+
+    assert_eq!(
+        server
+            .request(
+                Method::PUT,
+                &format!("{BLOB}?comp=block&blockid=Qg=="),
+                &[],
+                b"new"
+            )
+            .status(),
+        201
+    );
+    let xml = b"<BlockList><Committed>Qg==</Committed><Latest>QQ==</Latest></BlockList>";
+    error(
+        server.request(Method::PUT, &block_list, &[("if-match", &preceding)], xml),
+        412,
+        "ConditionNotMet",
+    );
+    assert_eq!(
+        server
+            .request(
+                Method::PUT,
+                &block_list,
+                &[("if-match", &committed_tag)],
+                xml
+            )
+            .status(),
+        201
+    );
+    assert_eq!(
+        server
+            .request(Method::GET, BLOB, &[], b"")
+            .bytes()
+            .unwrap()
+            .as_ref(),
+        b"lastone"
+    );
+}
+
+#[test]
+fn rejected_block_requests_leave_staged_bytes_and_quota_intact() {
+    let server = Emulator::start(
+        None,
+        &[
+            "--memory-limit",
+            "6",
+            "--max-blob-bytes",
+            "8",
+            "--max-assembled-blob-bytes",
+            "8",
+        ],
+    );
+    server.create_container();
+    let block = |id| format!("{BLOB}?comp=block&blockid={id}");
+    let list = format!("{BLOB}?comp=blocklist");
+    let all = format!("{list}&blocklisttype=all");
+    let crc = [("x-ms-content-crc64", "0GFnV7RfVNI=")];
+    let first = server.request(Method::PUT, &block("QQ=="), &crc, b"\x11");
+    assert_eq!(first.status(), 201);
+    assert_eq!(first.headers()["x-ms-content-crc64"], crc[0].1);
+    error(
+        server.request(Method::PUT, &block("QQ=="), &crc, b"wrong"),
+        400,
+        "Crc64Mismatch",
+    );
+    error(
+        server.request(Method::PUT, &block("QUM="), &[], b"wrong width"),
+        413,
+        "RequestBodyTooLarge",
+    );
+    error(
+        server.request(Method::PUT, &block("QUM="), &[], b"wide"),
+        400,
+        "InvalidBlockId",
+    );
+    assert_eq!(
+        server
+            .request(Method::PUT, &block("Qg=="), &[], b"bcdef")
+            .status(),
+        201
+    );
+    error(
+        server.request(Method::PUT, &block("Qw=="), &[], b"extra"),
+        507,
+        "InsufficientStorage",
+    );
+    error(
+        server.request(Method::GET, BLOB, &[], b""),
+        404,
+        "BlobNotFound",
+    );
+
+    let staged = server.request(Method::GET, &all, &[], b"");
+    assert_eq!(staged.status(), 200);
+    assert_eq!(staged.headers()["x-ms-blob-content-length"], "0");
+    let staged = staged.text().unwrap();
+    assert!(staged.contains("<CommittedBlocks></CommittedBlocks>"));
+    error(
+        server.request(
+            Method::PUT,
+            &list,
+            &[],
+            b"<BlockList><Latest>QQ==</Latest></Wrong>",
+        ),
+        400,
+        "InvalidXmlDocument",
+    );
+    error(
+        server.request(
+            Method::PUT,
+            &list,
+            &[],
+            b"<BlockList><Committed>QQ==</Committed><Latest>QQ==</Latest></BlockList>",
+        ),
+        400,
+        "InvalidBlockList",
+    );
+    error(
+        server.request(
+            Method::PUT,
+            &list,
+            &[],
+            b"<BlockList><Latest>Qg==</Latest><Latest>Qg==</Latest></BlockList>",
+        ),
+        413,
+        "RequestBodyTooLarge",
+    );
+    error(server.request(Method::PUT, &list, &[], b"<BlockList><Latest>Qg==</Latest><Latest>QQ==</Latest><Latest>QQ==</Latest></BlockList>"), 507, "InsufficientStorage");
+    let oversized_list = format!(
+        "<BlockList>{}</BlockList>",
+        "<Latest>QQ==</Latest>".repeat(50_001)
+    );
+    error(
+        server.request(Method::PUT, &list, &[], oversized_list.as_bytes()),
+        400,
+        "BlockListTooLong",
+    );
+    assert_eq!(
+        server.request(Method::GET, &all, &[], b"").text().unwrap(),
+        staged
+    );
+    let ordered = b"<BlockList><Uncommitted>QQ==</Uncommitted><Latest>Qg==</Latest></BlockList>";
+    assert_eq!(
+        server.request(Method::PUT, &list, &[], ordered).status(),
+        201
+    );
+    assert_eq!(
+        server
+            .request(Method::GET, BLOB, &[], b"")
+            .bytes()
+            .unwrap()
+            .as_ref(),
+        b"\x11bcdef"
+    );
+}
+
+#[test]
+fn zero_length_blocks_commit_and_read_in_memory() {
+    let server = Emulator::start(None, &[]);
+    server.create_container();
+    let block = format!("{BLOB}?comp=block&blockid=QQ==");
+    let list = format!("{BLOB}?comp=blocklist");
+    assert_eq!(server.request(Method::PUT, &block, &[], b"").status(), 201);
+    let response = server.request(
+        Method::PUT,
+        &list,
+        &[],
+        b"<BlockList><Latest>QQ==</Latest></BlockList>",
+    );
+    assert_eq!(response.status(), 201);
+    let tag = etag(&response);
+    let read = server.request(Method::GET, BLOB, &[], b"");
+    assert_eq!(read.status(), 200);
+    assert_eq!(etag(&read), tag);
+    assert_eq!(read.headers()["content-length"], "0");
+    assert!(read.bytes().unwrap().is_empty());
+
+    let committed = server.request(Method::GET, &list, &[], b"");
+    assert_eq!(committed.status(), 200);
+    assert!(
+        committed
+            .text()
+            .unwrap()
+            .contains("<Name>QQ==</Name><Size>0</Size>")
+    );
+}
+
+#[test]
 fn restart_preserves_acknowledged_data_and_recovers_an_interrupted_upload() {
     let root = tempfile::tempdir().unwrap();
     let location = root.path().join("store with spaces");

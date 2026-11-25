@@ -1,6 +1,6 @@
 # Azuifer product and technical specification
 
-**Status:** Proposed baseline. Service support, command behavior, layouts, and release criteria below describe targets. The [local Blob guide](../compatibility/blob.md) lists what the current build implements; consult the [ADR index](../adr.d/README.md) for the design rationale and verification criteria.
+**Goal: 100% Azure Storage data-plane wire compatibility.** This specification defines that contract. The [compatibility guide](../compatibility/blob.md) tracks implementation and verification; the [ADR index](../adr.d/README.md) records architecture decisions.
 
 ## 1. Product definition
 
@@ -12,11 +12,9 @@ Applications keep their storage client and change endpoint configuration. Azuife
 
 Azurite is an established option for projects whose Blob, Queue, and Table workflows it covers. Azuifer's intended differentiation is first-class DFS and FileREST, shared Blob/DFS hierarchical behavior, a native Rust runtime without a Node.js sidecar, OpenTelemetry, and measured operation-level conformance. The language choice alone is not a claim about performance or compatibility.
 
-## 3. Goals and non-goals
+## 3. Engineering goals
 
-**Goals.** Implement all five data-plane surfaces without delegation, preserve Blob/DFS interoperability, and support common SDK, CLI, AzCopy, and REST workflows. Match Azure wire and state behavior where practical and publish material differences. Support persistent and in-memory operation, bounded resource usage, local testing on Windows, Linux, and macOS, and a small non-root container usable with Compose and Testcontainers.
-
-**Non-goals.** Azuifer is not a production replacement for Azure Storage, an Azure Resource Manager emulator, a cloud-scale distributed store, or a proxy that forwards unsupported operations to Azure. It does not promise Azure-equivalent latency, throughput, durability, availability, geo-replication, RA-GRS, undocumented internals, or support for every historical API version. SMB and NFS are not part of v1.
+Implement all five data-plane surfaces without delegation and preserve Blob/DFS interoperability. Match Azure's request handling, responses, errors, and state transitions, and track every gap until it is closed. Support persistent and in-memory operation, bounded resource usage, local testing on Windows, Linux, and macOS, and a small non-root container usable with Compose and Testcontainers. Scale and durability are measured separately from wire conformance.
 
 ## 4. Compatibility contract
 
@@ -34,7 +32,7 @@ Classify each operation, API version, authentication mode, and relevant feature:
 
 Keep the canonical matrix in version-controlled YAML or JSON. Project it into generated documentation, release notes, CLI output, and test results. Never claim parity beyond the evidence.
 
-Pin a per-service API baseline in a versioned support manifest. Known `x-ms-version` values select the corresponding behavior. Strict mode rejects newer unknown versions; support older versions only when listed. The proposed `--skip-api-version-check` escape hatch may select the nearest supported behavior for an unknown version. Report the effective version where the protocol permits. Keep version policy in data, not in unrelated handler constants.
+Pin a per-service API baseline in a versioned support manifest. Known `x-ms-version` values select the corresponding behavior. Strict mode rejects newer unknown versions; support older versions only when listed. `--skip-api-version-check` can select the nearest supported behavior for a newer unknown version. Report the effective version where the protocol permits. Keep version policy in data, not in unrelated handler constants.
 
 ## 5. Functional scope
 

@@ -1,4 +1,4 @@
-# First Blob slice
+# Blob wire compatibility
 
 Use the [quick start](../../README.md#run-locally) with the Blob API version `2023-11-03`, path-style endpoints, and Shared Key. [The manifest](../../specs/conformance/blob.json) is the local operation inventory. No operation has been rated against Azure yet.
 
@@ -7,15 +7,19 @@ Use the [quick start](../../README.md#run-locally) with the Blob API version `20
 | `/{account}` | `GET` with `comp=list` |
 | `/{account}/{container}` | `PUT`, `GET` or `HEAD`, and `DELETE` with `restype=container`; `GET` with `restype=container&comp=list` |
 | `/{account}/{container}/{blob}` | `PUT` with `x-ms-blob-type: BlockBlob`; `GET`, `HEAD`, and `DELETE` |
+| `/{account}/{container}/{blob}?comp=block` | `PUT` to stage a block by `blockid` |
+| `/{account}/{container}/{blob}?comp=blocklist` | `PUT` to commit ordered `Committed`, `Uncommitted`, or `Latest` blocks; `GET` for committed and/or uncommitted block lists |
 
-Flat listings support `prefix`, `maxresults`, and opaque local markers. Blob listings also support `include=metadata`. Single-request Blob uploads require `Content-Length` and can validate `Content-MD5`. Blob operations support one `If-Match` or `If-None-Match` condition, and reads accept single byte ranges with a starting offset. Supported Blob properties include content type, length, MD5, ETag, last-modified time, and user metadata.
+Flat listings support `prefix`, `maxresults`, and opaque local markers. Blob listings also support `include=metadata`. Uploads require `Content-Length` and verify `Content-MD5` or `x-ms-content-crc64` when supplied. Blob operations support one `If-Match` or `If-None-Match` condition, and reads accept single byte ranges with a starting offset. Supported Blob properties include content type, length, MD5, ETag, last-modified time, and user metadata.
 
-Other operations and options, including multipart uploads, leases, snapshots, versioning, delimiter listings, SAS, bearer tokens, TLS, host-style addressing, and every non-Blob surface, are not implemented. Unsupported Blob requests receive Azure-shaped errors instead of being forwarded or treated as successful. The emulator writes structured logs locally and does not yet include OpenTelemetry export.
+Staged blocks survive restart and remain separate from normal Blob reads until a commit succeeds. A failed commit leaves both the previous content and the staged blocks available. The wire differences still tracked for this operation include Azure's staging expiration, listing uncommitted blobs through `List Blobs`, and Azure's larger size limits.
+
+The [product specification](../specs/azuifer.md) covers the remaining operations and surfaces. Unsupported requests receive Azure-shaped errors.
 
 ## Storage and configuration
 
 - `serve --location ./data` uses SQLite WAL for metadata and filesystem extents for payloads. Uploads are staged, checked, and synced before publishing the metadata reference. Startup reclaims unreferenced files from interrupted writes. Keep the directory private to one process and use a local filesystem.
-- `serve --in-memory` keeps storage off disk, discards it at shutdown, and defaults to 64 MiB of stored payloads (`--memory-limit` in bytes). The default single-upload limit is 16 MiB (`--max-blob-bytes` in bytes) in either mode.
+- `serve --in-memory` keeps storage off disk, discards it at shutdown, and defaults to 64 MiB of committed and staged payloads (`--memory-limit` in bytes). The default per-request data limit is 16 MiB (`--max-blob-bytes`). The default assembled block blob limit is 512 MiB (`--max-assembled-blob-bytes`). Both limits are in bytes and apply to either storage mode.
 - `--port`, `--admin-port`, and `--bind` select the listeners. Use `--config` for a TOML file; flags override `AZUIFER_*` environment values, then file values, then defaults. Run `cargo run --locked -- config validate` with the same options to validate settings.
 - `--skip-api-version-check` lets clients that send a well-formed newer version use the pinned baseline. The server reports the effective version and still rejects unsupported operations and invalid authentication. Omit the flag for strict mode, or use `--skip-api-version-check=false` to override a setting from the environment or file.
 - `--upload-timeout-seconds` bounds time spent receiving a single upload body (1 to 600 seconds; default 60). An incomplete timed-out upload does not replace an existing Blob. `serve --shutdown-on-stdin-eof` lets a process supervisor close a piped stdin to shut the listeners down gracefully.
@@ -25,9 +29,9 @@ Blob names are case-sensitive database keys, not filenames. The [HTTP suite](../
 
 ## Azure CLI
 
-The [Azure CLI suite](../../tests/azure_cli.py) uses a scratch CLI configuration and a synthetic Shared Key to exercise create/list, upload, rejected overwrite, ETag reads, ranged download, and delete. Azure CLI 2.93.0 requests a newer API version, so start Azuifer with `--skip-api-version-check` for this client. The [CI workflow](../../.github/workflows/rust.yml) runs the pinned CLI in the emulator's isolated network namespace, without a cloud account or published ports.
+The [Azure CLI suite](../../tests/azure_cli.py) uses a scratch CLI configuration and a synthetic Shared Key to exercise create/list, upload, rejected overwrite, ETag reads, ranged download, delete, and a multipart transfer one byte beyond the CLI's 256 MiB single-request threshold. Azure CLI 2.93.0 requests a newer API version, so start Azuifer with `--skip-api-version-check` for this client. To allow single-request Azure CLI uploads between 16 and 256 MiB, use `--max-blob-bytes 268435456`. The [CI workflow](../../.github/workflows/rust.yml) runs the pinned CLI in the emulator's isolated network namespace, without a cloud account or published ports.
 
-To run it locally, start a disposable in-memory Azuifer instance with `--skip-api-version-check` and a synthetic `AZUIFER_ACCOUNT_KEY`. Run `python tests/azure_cli.py` with the same key and Azure CLI on `PATH`. Use `--blob-url` and `--admin-url` if you changed the listener ports.
+To run it locally, start Azuifer with a disposable data directory, `--skip-api-version-check`, and a synthetic `AZUIFER_ACCOUNT_KEY`. Run `python tests/azure_cli.py` with the same key and Azure CLI on `PATH`. Use `--blob-url` and `--admin-url` if you changed the listener ports.
 
 ## Container
 

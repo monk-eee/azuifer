@@ -1,13 +1,14 @@
 use crate::{
+    checksum::{Checksums, Hasher},
     config::Config,
-    domain::{BlobInfo, Entity, Error, Metadata, Page, Result},
-    protocol::{self, Operation},
-    store::{self, Download, Payload, Store, Upload},
+    domain::{BlobInfo, BlockList, Entity, Error, Metadata, Page, Result},
+    protocol::{self, Operation, UploadOptions},
+    store::{Download, Payload, Store, Upload, Uploaded},
 };
 use anyhow::Context as _;
 use axum::{
     Router,
-    body::Body,
+    body::{Body, to_bytes},
     extract::{Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::Response,
@@ -197,22 +198,36 @@ async fn execute(app: &App, op: Operation, body: Body) -> Result<Response> {
             let page = store.list_blobs(key, page).await?;
             list_blobs(&endpoint, &name, limit, page, metadata)
         }
-        Operation::PutBlob(key, options) => {
-            let mut upload = store.begin_upload(options.length).await?;
-            tokio::time::timeout(app.config.upload_timeout, receive(body, &mut upload))
-                .await
-                .map_err(|_| Error::Timeout)??;
-            let upload = upload.finish(options.checksum).await?;
+        Operation::PutBlob(key, body_options, options) => {
+            let upload = receive_upload(app, body, &body_options).await?;
+            let checksum = upload.checksums.response(body_options.checksum);
+            let entity = store.put_blob(key, options, upload).await?;
+            write_response(entity_response(StatusCode::CREATED, entity)?, checksum)
+        }
+        Operation::PutBlock(key, id, options) => {
+            let upload = receive_upload(app, body, &options).await?;
+            let checksum = upload.checksums.response(options.checksum);
+            store.put_block(key, id, upload).await?;
+            write_response(empty(StatusCode::CREATED), checksum)
+        }
+        Operation::PutBlockList(key, body_options, options, md5) => {
+            let (blocks, checksums) = read_block_list(app, body, &body_options).await?;
             let entity = store
-                .put_blob(store::Put {
+                .commit_blocks(
                     key,
-                    condition: options.condition,
-                    content_type: options.content_type,
-                    metadata: options.metadata,
-                    upload,
-                })
+                    options,
+                    blocks,
+                    md5,
+                    app.config.max_assembled_blob_bytes,
+                )
                 .await?;
-            entity_response(StatusCode::CREATED, entity)
+            write_response(
+                entity_response(StatusCode::CREATED, entity)?,
+                checksums.response(body_options.checksum),
+            )
+        }
+        Operation::GetBlockList(key, kind, condition) => {
+            block_list_response(store.blocks(key, kind, condition).await?)
         }
         Operation::ReadBlob(key, options) => {
             let download = store
@@ -225,6 +240,35 @@ async fn execute(app: &App, op: Operation, body: Body) -> Result<Response> {
             Ok(empty(StatusCode::ACCEPTED))
         }
     }
+}
+
+async fn receive_upload(app: &App, body: Body, options: &UploadOptions) -> Result<Uploaded> {
+    let mut upload = app.store.begin_upload(options.length).await?;
+    tokio::time::timeout(app.config.upload_timeout, receive(body, &mut upload))
+        .await
+        .map_err(|_| Error::Timeout)??;
+    upload.finish(options.checksum).await
+}
+
+async fn read_block_list(
+    app: &App,
+    body: Body,
+    options: &UploadOptions,
+) -> Result<(Vec<crate::domain::BlockSelection>, Checksums)> {
+    let bytes = tokio::time::timeout(
+        app.config.upload_timeout,
+        to_bytes(body, options.length.0 as usize),
+    )
+    .await
+    .map_err(|_| Error::Timeout)?
+    .map_err(|_| Error::InvalidLength)?;
+    if bytes.len() as u64 != options.length.0 {
+        return Err(Error::InvalidLength);
+    }
+    let mut hash = Hasher::new();
+    hash.update(&bytes);
+    let checksums = hash.finish(options.checksum)?;
+    Ok((protocol::parse_block_list(&bytes)?, checksums))
 }
 
 async fn receive(body: Body, upload: &mut Upload) -> Result<()> {
@@ -258,8 +302,24 @@ fn modified(entity: Entity) -> Result<String> {
 
 fn entity_response(status: StatusCode, entity: Entity) -> Result<Response> {
     let mut response = empty(status);
-    set(response.headers_mut(), "etag", entity.etag().as_str())?;
-    set(response.headers_mut(), "last-modified", &modified(entity)?)?;
+    entity_headers(response.headers_mut(), entity)?;
+    Ok(response)
+}
+
+fn entity_headers(headers: &mut HeaderMap, entity: Entity) -> Result<()> {
+    set(headers, "etag", entity.etag().as_str())?;
+    set(headers, "last-modified", &modified(entity)?)
+}
+
+fn write_response(
+    mut response: Response,
+    (name, value): (&'static str, String),
+) -> Result<Response> {
+    set(response.headers_mut(), name, &value)?;
+    response.headers_mut().insert(
+        "x-ms-request-server-encrypted",
+        HeaderValue::from_static("false"),
+    );
     Ok(response)
 }
 
@@ -293,7 +353,9 @@ fn download_response(download: Download) -> Result<Response> {
         )?;
         range.end - range.start
     } else {
-        set(headers, "content-md5", &info.md5)?;
+        if let Some(md5) = &info.md5 {
+            set(headers, "content-md5", md5)?;
+        }
         info.length.0
     };
     set(headers, "content-length", &size.to_string())?;
@@ -362,7 +424,9 @@ fn list_blobs(
         xml.entity(properties.entity)?;
         xml.element("Content-Length", &properties.length.0.to_string());
         xml.element("Content-Type", &properties.content_type);
-        xml.element("Content-MD5", &properties.md5);
+        if let Some(md5) = &properties.md5 {
+            xml.element("Content-MD5", md5);
+        }
         xml.element("BlobType", "BlockBlob");
         xml.close("Properties");
         if metadata {
@@ -373,6 +437,35 @@ fn list_blobs(
     xml.close("Blobs");
     xml.element("NextMarker", &page.next);
     Ok(xml.finish("EnumerationResults", StatusCode::OK))
+}
+
+fn block_list_response(list: BlockList) -> Result<Response> {
+    let mut xml = Xml::root("BlockList", &[]);
+    for (tag, blocks) in [
+        ("CommittedBlocks", list.committed),
+        ("UncommittedBlocks", list.uncommitted),
+    ] {
+        if let Some(blocks) = blocks {
+            xml.open(tag);
+            for (id, length) in blocks {
+                xml.open("Block");
+                xml.element("Name", &id);
+                xml.element("Size", &length.0.to_string());
+                xml.close("Block");
+            }
+            xml.close(tag);
+        }
+    }
+    let mut response = xml.finish("BlockList", StatusCode::OK);
+    set(
+        response.headers_mut(),
+        "x-ms-blob-content-length",
+        &list.length.0.to_string(),
+    )?;
+    if let Some(entity) = list.entity {
+        entity_headers(response.headers_mut(), entity)?;
+    }
+    Ok(response)
 }
 
 fn error_response(error: Error) -> Response {
@@ -427,6 +520,36 @@ fn error_response(error: Error) -> Response {
             S::BAD_REQUEST,
             "Md5Mismatch",
             "The body checksum does not match Content-MD5.",
+        ),
+        Error::Crc64Mismatch => (
+            S::BAD_REQUEST,
+            "Crc64Mismatch",
+            "The body checksum does not match x-ms-content-crc64.",
+        ),
+        Error::InvalidBlockId => (
+            S::BAD_REQUEST,
+            "InvalidBlockId",
+            "The block ID is malformed or has inconsistent length.",
+        ),
+        Error::InvalidBlockList => (
+            S::BAD_REQUEST,
+            "InvalidBlockList",
+            "The specified block list is invalid.",
+        ),
+        Error::InvalidXml => (
+            S::BAD_REQUEST,
+            "InvalidXmlDocument",
+            "The block list XML is invalid.",
+        ),
+        Error::BlockCountExceeded => (
+            S::CONFLICT,
+            "BlockCountExceedsLimit",
+            "The block count exceeds the limit.",
+        ),
+        Error::BlockListTooLong => (
+            S::BAD_REQUEST,
+            "BlockListTooLong",
+            "The block list exceeds 50,000 entries.",
         ),
         Error::ContainerExists => (
             S::CONFLICT,

@@ -4,9 +4,9 @@
   <img src="assets/azuifer_logo.jpg" alt="Azuifer fish mascot holding a storage cube" width="500">
 </p>
 
-Azuifer is an independent Rust project for emulating the Azure Storage data plane locally. The first runnable slice serves a subset of Blob Storage. Data Lake Storage Gen2 (DFS), Azure Files FileREST, Queue, and Table remain targets; the proposed Blob and DFS implementations will share a namespace for HNS accounts.
+Azuifer is a Rust emulator for Azure Storage. The goal is **100% wire compatibility** across Blob, Data Lake Storage Gen2 (DFS), Azure Files FileREST, Queue, and Table.
 
-**Status: early development.** The supported routes work locally and are tested over HTTP. This build has not been differential-tested against Azure and does not claim parity. It is not a production storage service or an Azure management-plane emulator.
+Point existing SDKs, Azure CLI, AzCopy, and REST clients at Azuifer. The same requests should produce the same responses, errors, and storage state as Azure. That includes one namespace for Blob and DFS on hierarchical namespace (HNS) accounts. The [compatibility guide](docs/compatibility/blob.md) tracks what works and what has been verified.
 
 The [Azure Linux container](docs/compatibility/blob.md#container) is the primary way to run Azuifer. The same Rust workspace targets native macOS, Linux, and Windows for local development and testing.
 
@@ -26,7 +26,7 @@ The [local Blob guide](docs/compatibility/blob.md) lists the implemented operati
 
 | Start here | What you'll find |
 | --- | --- |
-| [Product and technical specification](docs/specs/azuifer.md) | The proposed behavior, compatibility contract, and release criteria |
+| [Product and technical specification](docs/specs/azuifer.md) | The wire contract, architecture, and functional scope |
 | [Onboarding](ONBOARDING.md) | How the pieces fit together and where to make a first contribution |
 | [Architecture decision records](docs/adr.d/README.md) | Design choices, alternatives, and the evidence each choice will need |
 | [Contributing](CONTRIBUTING.md) | How to propose, validate, and review changes |

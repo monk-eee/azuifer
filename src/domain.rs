@@ -1,4 +1,7 @@
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
@@ -16,6 +19,12 @@ pub(crate) enum Error {
     InvalidLength,
     TooLarge,
     Md5Mismatch,
+    Crc64Mismatch,
+    InvalidBlockId,
+    InvalidBlockList,
+    InvalidXml,
+    BlockCountExceeded,
+    BlockListTooLong,
     ContainerExists,
     ContainerMissing,
     BlobMissing,
@@ -141,6 +150,57 @@ impl ApiVersion {
 
 #[derive(Clone, Copy)]
 pub(crate) struct ContentLength(pub(crate) u64);
+
+pub(crate) struct BlockId {
+    encoded: String,
+    pub(crate) width: usize,
+}
+
+impl BlockId {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
+        if value.len() > 88 {
+            return Err(Error::InvalidBlockId);
+        }
+        let bytes = STANDARD.decode(value).map_err(|_| Error::InvalidBlockId)?;
+        if !(1..=64).contains(&bytes.len()) {
+            return Err(Error::InvalidBlockId);
+        }
+        Ok(Self {
+            encoded: value.to_owned(),
+            width: bytes.len(),
+        })
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.encoded
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum BlockSource {
+    Committed,
+    Uncommitted,
+    Latest,
+}
+
+pub(crate) struct BlockSelection {
+    pub(crate) id: BlockId,
+    pub(crate) source: BlockSource,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum BlockListKind {
+    Committed,
+    Uncommitted,
+    All,
+}
+
+pub(crate) struct BlockList {
+    pub(crate) entity: Option<Entity>,
+    pub(crate) length: ContentLength,
+    pub(crate) committed: Option<Vec<(String, ContentLength)>>,
+    pub(crate) uncommitted: Option<Vec<(String, ContentLength)>>,
+}
 
 pub(crate) struct ETag(String);
 
@@ -298,11 +358,17 @@ impl<T> Page<T> {
 
 pub(crate) type Metadata = BTreeMap<String, String>;
 
+pub(crate) struct BlobWrite {
+    pub(crate) content_type: String,
+    pub(crate) metadata: Metadata,
+    pub(crate) condition: Condition,
+}
+
 pub(crate) struct BlobInfo {
     pub(crate) entity: Entity,
     pub(crate) length: ContentLength,
     pub(crate) content_type: String,
-    pub(crate) md5: String,
+    pub(crate) md5: Option<String>,
     pub(crate) metadata: Metadata,
 }
 
