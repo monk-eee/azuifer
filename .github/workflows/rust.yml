@@ -48,22 +48,16 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
       - run: docker build --tag azuifer:ci .
-      - name: Run real Azure CLI storage workflows against the container
-        shell: bash
-        run: |
-          set -euo pipefail
-          export AZUIFER_ACCOUNT_KEY="$(openssl rand -base64 32)"
-          id=$(docker run --detach --rm --network none --read-only \
-            --tmpfs /data:rw,mode=0770,uid=65532,gid=65532 \
-            --env AZUIFER_ACCOUNT_KEY \
-            azuifer:ci serve --location /data --skip-api-version-check)
-          trap 'docker stop --time 5 "$id" >/dev/null' EXIT
-          test "$(docker inspect --format '{{.Config.User}}' "$id")" = '65532:65532'
-          docker run --rm --network "container:$id" --env AZUIFER_ACCOUNT_KEY \
-            --mount "type=bind,source=$PWD/tests/azure_cli.py,target=/tmp/azure_cli.py,readonly" \
-            --entrypoint python3 \
-            mcr.microsoft.com/azure-cli:2.93.0@sha256:cf40cc2f8895161698cfb16aec989c60250e66c105b57752b30a20d87d515963 \
-            /tmp/azure_cli.py
+      - name: Verify the last four Azure CLI releases against the container
+        id: azure-cli
+        run: python3 tests/azure_cli_matrix.py
+      - name: Upload Azure CLI compatibility evidence
+        if: always() && steps.azure-cli.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: azure-cli-compatibility
+          path: dist/azure-cli-compatibility.json
+          if-no-files-found: error
   dependencies:
     runs-on: ubuntu-latest
     steps:

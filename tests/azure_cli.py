@@ -118,17 +118,36 @@ def exercise(az, env, root, key):
     downloaded = root / "multipart-download.bin"
     run("blob", "download", *multipart, "--file", str(downloaded), timeout=180)
     with source.open("rb") as original, downloaded.open("rb") as actual:
-        require(hashlib.file_digest(actual, "sha256").digest() == hashlib.file_digest(original, "sha256").digest(),
-                "multipart download did not match the uploaded bytes")
+        uploaded_sha256 = hashlib.file_digest(original, "sha256").hexdigest()
+        downloaded_sha256 = hashlib.file_digest(actual, "sha256").hexdigest()
+    require(downloaded_sha256 == uploaded_sha256, "multipart download did not match the uploaded bytes")
 
     run("container", "delete", "--name", container)
     require(not run("container", "exists", "--name", container)["exists"], "container remained visible after delete")
+    return {
+        "checks": [
+            "container lifecycle",
+            "blob properties and metadata",
+            "rejected overwrite and unchanged bytes",
+            "ETag-conditioned read and delete",
+            "exact byte-range download",
+            "prefixed listing with metadata",
+            "multipart upload and download",
+        ],
+        "multipart": {
+            "bytes": size,
+            "uploaded_sha256": uploaded_sha256,
+            "downloaded_sha256": downloaded_sha256,
+        },
+    }
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--blob-url", default="http://127.0.0.1:10000", type=loopback_url)
     parser.add_argument("--admin-url", default="http://127.0.0.1:10005", type=loopback_url)
+    parser.add_argument("--expected-version")
+    parser.add_argument("--json", action="store_true", help="print machine-readable evidence")
     args = parser.parse_args()
     az = shutil.which("az")
     if az is None:
@@ -154,9 +173,17 @@ def main():
                 f"BlobEndpoint={args.blob_url}/{ACCOUNT};"
             ),
         )
+        version = subprocess.run([az, "version", "--output", "json"], env=env, capture_output=True, text=True, timeout=30)
+        require(version.returncode == 0, f"az version: {version.stderr.replace(key, '[redacted]').strip()}")
+        version = json.loads(version.stdout)["azure-cli"]
+        require(args.expected_version is None or version == args.expected_version,
+                f"expected Azure CLI {args.expected_version}, found {version}")
         wait_ready(args.admin_url)
-        exercise(az, env, root, key)
-    print("Azure CLI: Blob lifecycle, guarded overwrite, ETag, range, metadata, and 256 MiB + 1 multipart upload passed.")
+        evidence = exercise(az, env, root, key)
+    if args.json:
+        print(json.dumps({"cli_version": version, **evidence}))
+    else:
+        print(f"Azure CLI {version}: Blob lifecycle, guarded overwrite, ETag, range, metadata, and 256 MiB + 1 multipart upload passed.")
 
 
 if __name__ == "__main__":

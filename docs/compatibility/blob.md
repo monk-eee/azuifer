@@ -29,9 +29,20 @@ Blob names are case-sensitive database keys, not filenames. The [HTTP suite](../
 
 ## Azure CLI
 
-The [Azure CLI suite](../../tests/azure_cli.py) uses a scratch CLI configuration and a synthetic Shared Key to exercise create/list, upload, rejected overwrite, ETag reads, ranged download, delete, and a multipart transfer one byte beyond the CLI's 256 MiB single-request threshold. Azure CLI 2.93.0 requests a newer API version, so start Azuifer with `--skip-api-version-check` for this client. To allow single-request Azure CLI uploads between 16 and 256 MiB, use `--max-blob-bytes 268435456`. The [CI workflow](../../.github/workflows/rust.yml) runs the pinned CLI in the emulator's isolated network namespace, without a cloud account or published ports.
+The [Azure CLI matrix](../../tests/azure_cli_matrix.py) tests the newest pinned stable release and the three before it. Each official CLI image is [pinned by digest](../../tests/azure_cli_versions.json), and the suite checks the installed version before running the same [storage workflows](../../tests/azure_cli.py): create/list, upload, rejected overwrite, ETag-conditioned read and delete, exact byte ranges, metadata, and a SHA-256-verified multipart transfer of 256 MiB plus one byte.
 
-To run it locally, start Azuifer with a disposable data directory, `--skip-api-version-check`, and a synthetic `AZUIFER_ACCOUNT_KEY`. Run `python tests/azure_cli.py` with the same key and Azure CLI on `PATH`. Use `--blob-url` and `--admin-url` if you changed the listener ports.
+Each CLI gets a fresh non-root Azuifer container with a read-only root, isolated loopback, and a synthetic Shared Key. The [CI workflow](../../.github/workflows/rust.yml) fails if any version fails and uploads `azure-cli-compatibility`, a JSON report identifying the tested images, Blob API baseline, and results. This proves these CLI workflows against the container; tests against real Azure are separate.
+
+Run the same gate locally with Docker and Python:
+
+```sh
+docker build -t azuifer:ci .
+python3 tests/azure_cli_matrix.py
+```
+
+The report is written to `dist/azure-cli-compatibility.json`. When updating the CLI window, pin the new stable image and keep its three immediate predecessors. Verify all four without skipping failing cases.
+
+The matrix uses `--skip-api-version-check` because these clients request a newer API version than the Blob baseline. To exercise your installed CLI instead, start Azuifer with that flag, a disposable data directory, and a synthetic `AZUIFER_ACCOUNT_KEY`, then run `python3 tests/azure_cli.py` with the same key. `--blob-url` and `--admin-url` select non-default loopback ports. To allow single-request Azure CLI uploads between 16 and 256 MiB, use `--max-blob-bytes 268435456`.
 
 ## Container
 

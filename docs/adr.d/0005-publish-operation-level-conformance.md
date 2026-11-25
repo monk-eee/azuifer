@@ -22,5 +22,5 @@ A manually edited support table is quicker to start but drifts across releases a
 
 - Schema and coverage checks detect unclassified recognized operations. The outputs agree with the manifest, including explicit unsupported cases and known differences.
 - Version and protocol tests cover version rejection, negotiated behavior where applicable, status, headers, response bodies (including Azure error codes), and post-request state.
-- The pinned Azure CLI runs real Blob operations against the release image build in CI. Passing that workflow is client interoperability evidence, not Azure differential evidence.
+- The current pinned Azure CLI release and its three predecessors each run real Blob operations against the release image build in CI. Report per-version outcomes and the tested image IDs. Passing that workflow is client interoperability evidence, not Azure differential evidence.
 - Each compatibility claim links to evidence from a protected differential run for the claimed operation, API version, authentication mode, and feature. No credentials or customer data appear in the evidence.
