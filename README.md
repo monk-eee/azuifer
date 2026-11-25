@@ -10,7 +10,7 @@
 
 **Wire compatibility is the contract:** supported operations are expected to produce the same observable HTTP behavior and storage state as Azure Storage. Compatibility is published by service, operation, and API version in the [conformance manifests](specs/conformance/), and an operation is only marked as matching Azure once it has been compared against a real Azure account.
 
-Blob is available now: create containers, upload and download block blobs, read byte ranges, and keep data across restarts. Queue, Table, DFS, and Azure Files are landing next. The primary runtime is a non-root Azure Linux container.
+All five services run from one binary: Blob on port `10000`, Queue `10001`, Table `10002`, DFS `10003`, and Azure Files `10004`, with health, readiness, and metrics on `10005`. Use `--services` to run a subset. The primary runtime is a non-root Azure Linux container.
 
 [Docker quickstart](#run-locally) | [Connect an SDK](#connect-an-sdk) | [Supported operations](#what-works) | [Compatibility evidence](#verify-compatibility)
 
@@ -33,7 +33,7 @@ docker run --detach --rm --name azuifer-quickstart --read-only \
 curl --noproxy 127.0.0.1 --fail --retry 5 --retry-connrefused http://127.0.0.1:10005/readyz
 ```
 
-The readiness endpoint returns `ready`. Blob listens on port `10000`; health, readiness, and status are on `10005`. Both ports are published only on localhost. Check the running instance with `docker exec azuifer-quickstart /azuifer status`.
+The readiness endpoint returns `ready`. Blob listens on port `10000`; health, readiness, and status are on `10005`. Both ports are published only on localhost. To reach Queue, Table, DFS, or Azure Files from the host, publish `10001` through `10004` the same way. Check the running instance with `docker exec azuifer-quickstart /azuifer status`.
 
 Observability is opt-in and sends nothing unless you configure a destination: `--prometheus` serves `/metrics` on the admin port, `--otlp-endpoint http://collector:4317` (with `--otlp-protocol grpc|http`) exports traces and metrics, and `--log-format json|text` and `--log-file <path>` select the log output. `azuifer doctor` checks configuration, ports, and the data directory, and `azuifer reset --yes` deletes persisted state while the emulator is stopped. See the [Compose example](packaging/compose.yaml) and the [Testcontainers guide](docs/testcontainers.md).
 
@@ -86,16 +86,18 @@ Stop the container with `docker stop azuifer-quickstart` when you're done.
 
 ## What works
 
-| Workflow | Available on Azuifer |
+| Service | Available on Azuifer |
 | --- | --- |
-| Authentication | Shared Key at a path-style endpoint |
-| Blob containers | Create, list, read properties, and delete |
-| Block blobs | Upload, read, list, delete, stage blocks, and get or commit block lists |
-| Reads and writes | Byte ranges, ETag conditions, upload checksums, and metadata on writes |
-| Data Lake (DFS) | Manage filesystems, create and list directories, read Blob-written files, and delete files or empty directories on HNS-enabled accounts |
-| Storage | In-memory or SQLite metadata with persistent payloads |
+| Blob | Containers, block, page, and append blobs, snapshots, versions and soft delete, blob index tags, Submit Batch, leases, copy within the instance, CORS, ACLs and public access, and service properties |
+| Queue | Queues, metadata, ACLs, service properties, and messages with visibility timeouts, pop receipts, and TTL |
+| Table | Tables, ACLs, every entity operation, OData `$filter` and `$select`, paging, ETag concurrency, and atomic entity-group batches |
+| Azure Files | Shares, snapshots, directories, files, ranges, rename, copy, leases, and permissions |
+| Data Lake (DFS) | Filesystems, directories, path listing, reading Blob-written files, and deleting files or empty directories on HNS-enabled accounts |
+| Authentication | Shared Key, Shared Key Lite, account and service SAS, user-delegation SAS for Blob, and bearer tokens (`--oauth`), over HTTP or HTTPS (`--tls-generate`, PEM, or PFX), at path-style or host-style endpoints. DFS currently accepts Shared Key only |
+| Storage | In-memory or SQLite metadata with persistent payloads, per service |
+| Operations | `status`, `doctor`, and `reset` commands, Prometheus metrics, opt-in OpenTelemetry export, and a Compose example |
 
-Use the [Blob guide](docs/compatibility/blob.md) and [Data Lake guide](docs/compatibility/dfs.md) for supported operations, flags, and limits. Blob and DFS see the same data and ETags on hierarchical namespace (HNS) accounts. The [product specification](docs/specs/azuifer.md) tracks the full set of operations.
+Each service guide lists the supported operations, limits, and known differences: [Blob](docs/compatibility/blob.md), [Queue](docs/compatibility/queue.md), [Table](docs/compatibility/table.md), [Azure Files](docs/compatibility/files.md), and [Data Lake](docs/compatibility/dfs.md). Blob and DFS see the same data and ETags on hierarchical namespace (HNS) accounts. The [product specification](docs/specs/azuifer.md) tracks the full set of operations, and DFS append, flush, rename, and ACLs are still to come.
 
 ## Verify compatibility
 
@@ -115,7 +117,7 @@ Use Rustup and a C compiler for bundled SQLite: Command Line Tools on macOS, GCC
 cargo run --locked -- serve --in-memory
 ```
 
-Native runs use the same Blob and admin ports. Use `--location ./data` for persistence or `--skip-api-version-check` for newer CLI clients. SDKs that accept `UseDevelopmentStorage=true` can use it with the loopback Blob endpoint and the pinned API version.
+Native runs use the same ports. Use `--location ./data` for persistence or `--skip-api-version-check` for clients that send a newer API version than the `2023-11-03` baseline; older versions are served with baseline behavior. SDKs that accept `UseDevelopmentStorage=true` can use it with the loopback endpoints.
 
 ## Project docs
 
