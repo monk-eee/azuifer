@@ -3,6 +3,7 @@
 mod auth;
 mod batch;
 mod codec;
+mod cors;
 mod datetime;
 mod edm;
 mod error;
@@ -77,6 +78,9 @@ async fn dispatch(State(app): State<Arc<App>>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
     let version = effective_version(&parts, &app.config);
     let outcome = match &version {
+        Ok(_) if parts.method == axum::http::Method::OPTIONS => {
+            Ok(cors::preflight(&app, &parts, &request_id, now).await)
+        }
         Ok(_) => handle(&app, &parts, body, &request_id, now).await,
         Err(error) => Err(error.clone()),
     };
@@ -101,6 +105,10 @@ async fn dispatch(State(app): State<Arc<App>>, request: Request) -> Response {
         if let Ok(value) = HeaderValue::from_str(value) {
             headers.insert(name, value);
         }
+    }
+    // After the standard headers, so exposed headers such as x-ms-request-id are present.
+    if parts.method != axum::http::Method::OPTIONS {
+        cors::decorate(&app, &parts, &mut response).await;
     }
     tracing::info!(%request_id, status = response.status().as_u16(), "table request");
     response

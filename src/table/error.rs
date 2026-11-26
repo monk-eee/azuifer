@@ -37,6 +37,8 @@ pub(super) enum Kind {
     MethodNotAllowed,
     NotImplemented,
     RequestBodyTooLarge,
+    MissingRequiredHeader,
+    CorsPreflightFailure,
     Internal,
 }
 
@@ -44,7 +46,9 @@ impl Kind {
     fn status(self) -> StatusCode {
         use StatusCode as S;
         match self {
-            Self::AuthenticationFailed | Self::AuthorizationFailure => S::FORBIDDEN,
+            Self::AuthenticationFailed
+            | Self::AuthorizationFailure
+            | Self::CorsPreflightFailure => S::FORBIDDEN,
             Self::InvalidBearer => S::UNAUTHORIZED,
             Self::TableNotFound | Self::ResourceNotFound => S::NOT_FOUND,
             Self::TableAlreadyExists | Self::EntityAlreadyExists => S::CONFLICT,
@@ -93,6 +97,8 @@ impl Kind {
             Self::MethodNotAllowed => "MethodNotAllowed",
             Self::NotImplemented => "NotImplemented",
             Self::RequestBodyTooLarge => "RequestBodyTooLarge",
+            Self::MissingRequiredHeader => "MissingRequiredHeader",
+            Self::CorsPreflightFailure => "CorsPreflightFailure",
             Self::Internal => "InternalError",
         }
     }
@@ -151,6 +157,12 @@ impl Kind {
             }
             Self::RequestBodyTooLarge => {
                 "The request body is too large and exceeds the maximum permissible limit."
+            }
+            Self::MissingRequiredHeader => {
+                "An HTTP header that's mandatory for this request is not specified."
+            }
+            Self::CorsPreflightFailure => {
+                "CORS not enabled or no matching rule found for this request."
             }
             Self::Internal => "The server encountered an internal error. Please retry the request.",
         }

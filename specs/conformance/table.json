@@ -81,7 +81,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "GET /?restype=service&comp=properties returns the stored Logging, HourMetrics, MinuteMetrics and Cors sections (Azure defaults until set). The settings are stored and returned only: logging and metrics are not produced and CORS rules are not enforced."
+      "notes": "GET /?restype=service&comp=properties returns the stored Logging, HourMetrics, MinuteMetrics and Cors sections (Azure defaults until set). Logging and metrics are stored and returned but not produced; CORS rules are enforced for preflights and normal requests."
     },
     {
       "name": "Get Table Service Stats",
@@ -144,9 +144,11 @@
     },
     {
       "name": "Preflight Table Request",
-      "state": "unsupported",
-      "authorization": [],
-      "notes": "OPTIONS requests are not routed and CORS rules stored by Set Table Service Properties are never evaluated."
+      "state": "known-difference",
+      "authorization": [
+        "Anonymous"
+      ],
+      "notes": "OPTIONS on any table URL is answered from the account's stored CORS rules, matched with the Blob service's code: a missing Origin or Access-Control-Request-Method is 400 MissingRequiredHeader, no matching rule is 403 CorsPreflightFailure. Responses to requests with an Origin that a rule allows carry Access-Control-Allow-Origin and the exposed headers. Error bodies are the Table JSON form and have not been compared with Azure."
     },
     {
       "name": "Query Entities",
@@ -190,7 +192,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "PUT /?restype=service&comp=properties replaces the supplied top-level sections, keeps the others, and returns 202. Section contents are stored as sent after XML well-formedness checks; their values are not validated or applied."
+      "notes": "PUT /?restype=service&comp=properties replaces the supplied top-level sections, keeps the others, and returns 202. Sections are stored as sent after XML well-formedness checks; only the Cors element is validated (valid methods, at most five rules, else 400 InvalidXmlDocument), and only CORS is acted on."
     },
     {
       "name": "Update Entity",

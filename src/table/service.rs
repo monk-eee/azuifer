@@ -215,6 +215,9 @@ fn insert_element(
         return Err(xml_error());
     }
     let raw = raw.ok_or_else(xml_error)?;
+    if name == "Cors" && super::cors::parse_rules(raw.trim()).is_none() {
+        return Err(xml_error());
+    }
     if elements
         .insert(name.to_owned(), raw.trim().to_owned())
         .is_some()
