@@ -69,6 +69,7 @@ fn markdown_export_shows_the_same_verified_and_unsupported_operations() {
         "| Put Message | compatible | SharedKey, SharedKeyLite, AccountSAS, ServiceSAS, Bearer |"
     ));
     assert!(markdown.contains("## dfs (`2023-11-03`)"));
-    assert!(markdown.contains("| Rename Path | unsupported | - |"));
+    assert!(markdown.contains("| Rename Path | known-difference |"));
+    assert!(markdown.contains("| Query Blob Contents | unsupported | - |"));
     assert!(!markdown.contains("| exact |"));
 }
