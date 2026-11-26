@@ -1325,6 +1325,73 @@ fn acl_and_service_properties_round_trip() {
     server.stop();
 }
 
+#[test]
+fn cors_rules_answer_preflights_and_decorate_responses() {
+    let server = Server::start(None);
+    let rules = "<StorageServiceProperties><Cors><CorsRule>\
+        <AllowedOrigins>http://app.example</AllowedOrigins>\
+        <AllowedMethods>GET,OPTIONS</AllowedMethods><MaxAgeInSeconds>120</MaxAgeInSeconds>\
+        <ExposedHeaders>x-ms-request-id</ExposedHeaders><AllowedHeaders>x-ms-*,accept</AllowedHeaders>\
+        </CorsRule></Cors></StorageServiceProperties>";
+    let mut set = Call::new("PUT", "/?restype=service&comp=properties")
+        .header("content-type", "application/xml");
+    set.body = rules.as_bytes().to_vec();
+    assert_eq!(server.send(set).status, 202);
+    let mut bad = Call::new("PUT", "/?restype=service&comp=properties")
+        .header("content-type", "application/xml");
+    bad.body = b"<StorageServiceProperties><Cors><CorsRule><AllowedOrigins>*</AllowedOrigins>\
+        <AllowedMethods>FETCH</AllowedMethods><MaxAgeInSeconds>1</MaxAgeInSeconds></CorsRule>\
+        </Cors></StorageServiceProperties>"
+        .to_vec();
+    assert_eq!(server.send(bad).status, 400);
+
+    let preflight = |origin: &'static str, method: &'static str, headers: &'static str| {
+        let mut call = Call::new("OPTIONS", "/Tables")
+            .header("origin", origin)
+            .header("access-control-request-method", method)
+            .auth(Auth::None);
+        if !headers.is_empty() {
+            call = call.header("access-control-request-headers", headers);
+        }
+        server.send(call)
+    };
+    let allowed = preflight("http://app.example", "GET", "x-ms-date");
+    assert_eq!(allowed.status, 200);
+    assert_eq!(
+        allowed.header("access-control-allow-origin"),
+        Some("http://app.example")
+    );
+    assert_eq!(allowed.header("access-control-max-age"), Some("120"));
+    assert_eq!(
+        preflight("http://other.example", "GET", "").error_code(),
+        "CorsPreflightFailure"
+    );
+    assert_eq!(preflight("http://app.example", "DELETE", "").status, 403);
+    assert_eq!(
+        preflight("http://app.example", "GET", "x-secret").status,
+        403
+    );
+    let missing = server.send(Call::new("OPTIONS", "/Tables").auth(Auth::None));
+    assert_eq!(missing.status, 400);
+    assert_eq!(missing.error_code(), "MissingRequiredHeader");
+
+    let with_origin =
+        server.send(Call::new("GET", "/Tables").header("origin", "http://app.example"));
+    assert_eq!(with_origin.status, 200);
+    assert_eq!(
+        with_origin.header("access-control-allow-origin"),
+        Some("http://app.example")
+    );
+    assert!(
+        with_origin
+            .header("access-control-expose-headers")
+            .is_some()
+    );
+    let stranger =
+        server.send(Call::new("GET", "/Tables").header("origin", "http://other.example"));
+    assert!(stranger.header("access-control-allow-origin").is_none());
+    server.stop();
+}
 fn account_sas(
     permissions: &str,
     resource_types: &str,

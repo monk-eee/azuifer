@@ -50,7 +50,7 @@ All Edm types round-trip: `String`, `Boolean`, `Int32`, `Int64` (JSON string), `
 
 - Comparisons in `$filter` need identical Edm types. An unsuffixed integer outside the Int32 range is an `Int64` literal. A missing property satisfies only `ne`. Key ordering uses UTF-8 bytes, not UTF-16.
 - No 5 second query timeout, no short pages at partition boundaries, and no `$orderby`, `$skip`, `$expand`, `$count` or filter functions (these return 501 or 400).
-- Service properties, metrics, logging and CORS are stored and returned but never applied or enforced; service stats are always `live`.
+- Service properties, metrics and logging are stored and returned but never applied. CORS rules are validated when set and enforced: `OPTIONS` preflights are answered from them (400 `MissingRequiredHeader` without `Origin` and `Access-Control-Request-Method`, 403 `CorsPreflightFailure` without a matching rule), and responses to requests with an allowed `Origin` carry the `Access-Control-*` headers. The error bodies are Table's JSON form and have not been compared with Azure. Service stats are always `live`.
 - Batches parse and validate every operation before executing, so error index precedence can differ from Azure when several operations are invalid.
 - Atom payloads are rejected with 415 `AtomFormatNotSupported`.
 - `x-ms-version` values at or below the baseline are accepted and echoed; newer values are accepted (and the baseline reported) only with `--skip-api-version-check`.
