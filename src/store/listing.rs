@@ -147,10 +147,17 @@ impl Store {
             } else {
                 String::new()
             };
-            Ok(BlobListing {
-                entries: entries.into_iter().map(|(entry, _)| entry).collect(),
-                next,
-            })
+            let lifecycle =
+                super::expiry::load_container(db, key.account.as_str(), key.name.as_str())?;
+            let mut entries: Vec<ListEntry> = entries.into_iter().map(|(entry, _)| entry).collect();
+            for entry in &mut entries {
+                if let ListEntry::Blob(name, info) = entry
+                    && let Some(found) = lifecycle.get(name.as_str())
+                {
+                    info.lifecycle = *found;
+                }
+            }
+            Ok(BlobListing { entries, next })
         })
         .await
     }

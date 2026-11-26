@@ -52,7 +52,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Same-instance sources only (path-style or host-style URLs on this listener); other hosts answer NotImplemented. Completes synchronously with x-ms-copy-status: success and a copy id. The source is read with the caller's own Shared Key in the same account, a read SAS on the source URL, or public access, and may name a snapshot or version of a block blob. Source and destination conditions and leases apply. Block blob bytes are copied rather than shared; page and append blob copies keep their type and share extents, and a copied append blob is not sealed. Incremental and sealed copies are unsupported."
+      "notes": "Sources on this listener (path-style or host-style URLs); other hosts answer NotImplemented unless the operator allowlists them with --allow-external-copy-sources (ADR-0024), in which case the source is fetched synchronously with SSRF guards. Completes synchronously with x-ms-copy-status: success and a copy id. The source is read with the caller's own Shared Key in the same account, a read SAS on the source URL, or public access, and may name a snapshot or version of a block blob. Source and destination conditions and leases apply. Block blob bytes are copied rather than shared; page and append blob copies keep their type and share extents, and a copied append blob is not sealed. Sealed copies are unsupported; incremental copy is a separate operation."
     },
     {
       "name": "Create Container",
@@ -76,7 +76,20 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Deletes the current blob, a snapshot, or a version; x-ms-delete-snapshots include or only, otherwise SnapshotsPresent (Azure's code is BlobHasSnapshots). Requires the lease id while leased and supports conditions. Honors the account delete retention (soft delete, evaluated lazily against the clock) and versioning. Page and append blobs are always deleted permanently. Deletes are synchronous."
+      "notes": "Deletes the current blob, a snapshot, or a version; x-ms-delete-snapshots include or only, otherwise SnapshotsPresent (Azure's code is BlobHasSnapshots). Requires the lease id while leased and supports conditions. Honors the account delete retention (soft delete, evaluated lazily against the clock) and versioning. Page and append blobs follow the same soft delete, version, and snapshot rules as block blobs. A legal hold or unexpired immutability policy refuses the delete. Deletes are synchronous."
+    },
+    {
+      "name": "Delete Blob Immutability Policy",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Removes an unlocked or expired policy. A locked, unexpired policy is refused."
     },
     {
       "name": "Delete Container",
@@ -89,7 +102,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Deletes immediately and requires the lease id while a lease is active. Azure's asynchronous deletion window (ContainerBeingDeleted) and soft delete are not modeled."
+      "notes": "Deletes immediately and requires the lease id while a lease is active. With a DeleteRetentionPolicy on the account (one setting governs blob and container soft delete here; Azure keeps a separate container setting in the management plane) the container is kept under a hidden name for the retention days on the injected clock and can be restored. Azure's asynchronous deletion window (ContainerBeingDeleted) is not modeled."
     },
     {
       "name": "Find Blobs by Tags",
@@ -177,7 +190,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Stub with Azure's response shape: GeoReplication is always live with the current time. Azure serves this only on the secondary endpoint."
+      "notes": "Answered only on the {account}-secondary host, as in Azure, with GeoReplication always live and the current time as the last sync time. The primary endpoint is rejected; the exact error code there is unverified."
     },
     {
       "name": "Get Blob Tags",
@@ -258,7 +271,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Lists allocated ranges with a byte window, marker, and maxresults; touching ranges merge, no clear ranges are reported, and snapshot and prevsnapshot diffs answer NotImplemented. The snapshot and prevsnapshot parameters answer NotImplemented."
+      "notes": "Lists allocated ranges with a byte window, marker, and maxresults; touching ranges merge. snapshot lists a snapshot's ranges, and prevsnapshot returns the diff (PageRange for changed ranges, ClearRange for ranges cleared since) against the live blob or a newer snapshot. Page range diffs have not been compared with Azure."
     },
     {
       "name": "Get User Delegation Key",
@@ -267,6 +280,19 @@
         "Bearer"
       ],
       "notes": "Requires a bearer token (--oauth basic or jwks) and returns a generated 32-byte key valid for at most seven days. Keys are held in memory, so a restart invalidates every user-delegation SAS."
+    },
+    {
+      "name": "Incremental Copy Blob",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Same-instance page blob snapshots only; each copy must name a newer snapshot of the same source. The destination shares the snapshot's extents and takes its own snapshot at completion (x-ms-copy-destination-snapshot). Completes synchronously. Copies from another instance are unsupported."
     },
     {
       "name": "Lease Blob",
@@ -446,9 +472,16 @@
     },
     {
       "name": "Restore Container",
-      "state": "unsupported",
-      "authorization": [],
-      "notes": "Container soft delete is not modeled."
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "PUT restype=container&comp=undelete with x-ms-deleted-container-name and x-ms-deleted-container-version restores a soft-deleted container under the same or a new name. Soft delete is tied to the account DeleteRetentionPolicy. List Containers include=deleted reports Deleted, Version, DeletedTime, and RemainingRetentionDays."
     },
     {
       "name": "Seal Append Blob",
@@ -465,9 +498,42 @@
     },
     {
       "name": "Set Blob Expiry",
-      "state": "unsupported",
-      "authorization": [],
-      "notes": "Not planned for the block blob slice."
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "x-ms-expiry-option RelativeToCreation, RelativeToNow, Absolute, or NeverExpire. Expiry is evaluated lazily against the injected clock (ADR-0022) and removes the blob and its snapshots at the deadline. Get, Head, and List Blobs report the expiry time."
+    },
+    {
+      "name": "Set Blob Immutability Policy",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Time-based policy in Unlocked or Locked mode on the current blob. Does not change the ETag. While a policy or legal hold applies, writes, property changes, and deletes are refused. Policies on snapshots and versions and container-level immutability are unsupported."
+    },
+    {
+      "name": "Set Blob Legal Hold",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "x-ms-legal-hold true or false on the current blob; a hold blocks writes and deletes until cleared. Holds on snapshots and versions are unsupported."
     },
     {
       "name": "Set Blob Metadata",

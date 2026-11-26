@@ -25,7 +25,9 @@ The [product specification](../specs/azuifer.md) describes the target. An ADR re
 | [ADR-0019: Store account-level Blob features separately from blob content](0019-store-account-level-blob-features-separately.md) | Proposed |
 | [ADR-0020: Represent HNS directories and POSIX ACLs on the shared namespace](0020-represent-hns-directories-and-posix-acls.md) | Proposed |
 | [ADR-0021: Publish one conformance manifest per service](0021-publish-one-conformance-manifest-per-service.md) | Proposed |
+| [ADR-0022: Keep blob lifecycle state beside the content and sweep it lazily on the clock](0022-keep-blob-lifecycle-state-and-sweep-lazily.md) | Proposed |
 | [ADR-0023: Serve Blob calls addressed to the `blob` host on the DFS listener](0023-serve-blob-calls-addressed-to-the-blob-host-on-the-dfs-listener.md) | Proposed |
+| [ADR-0024: Fetch external copy sources only from allowlisted hosts](0024-fetch-external-copy-sources-only-from-allowlisted-hosts.md) | Proposed |
 
 Search the index before drafting a record. If a change needs a new decision, use the [template](template.md), pick the next four-digit number, and add the proposed record to the index. Keep separate decisions in separate records.
 

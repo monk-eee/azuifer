@@ -4,12 +4,13 @@
 use crate::{
     acl,
     blob_auth::Credentials,
-    blob_copy,
+    blob_copy, blob_external,
     blob_sas::Connection,
     blob_snapshot,
     checksum::{Checksums, Hasher},
+    conditions::Conditions,
     delegation,
-    domain::{AccountName, BlobInfo, BlobWrite, BlockList, CopyRecord, Error, Result},
+    domain::{AccountName, BlobInfo, BlobWrite, BlockList, ByteRange, CopyRecord, Error, Result},
     lease::LeaseAction,
     protocol::{self, ContainerView, Operation, SourceRequest, UploadOptions},
     respond::{self, empty, entity_response, set, write_response},
@@ -27,6 +28,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::StreamExt as _;
 use uuid::Uuid;
 
+mod lifecycle;
 mod page;
 
 /// Facts about the request that operations need beyond their typed arguments.
@@ -46,9 +48,13 @@ pub(crate) async fn execute(
 ) -> Result<Response> {
     let store = &app.store;
     match op {
-        Operation::ListContainers(account, page, metadata) => {
+        Operation::ListContainers(account, page, metadata, deleted) => {
             let endpoint = storage_endpoint(app, account.as_str());
             let (limit, prefix) = (page.limit, page.prefix.clone());
+            if deleted {
+                let page = store.list_containers_with_deleted(account, page).await?;
+                return lifecycle::list_containers(&endpoint, limit, &prefix, page, metadata);
+            }
             let page = store.list_containers(account, page).await?;
             respond::list_containers(&endpoint, limit, &prefix, page, metadata)
         }
@@ -80,6 +86,14 @@ pub(crate) async fn execute(
             )
         }
         Operation::ServiceStats => {
+            // Azure serves replication statistics only from the read-only secondary endpoint.
+            let secondary = crate::address::host_label("blob", ctx.host)
+                .is_some_and(|label| label.ends_with(crate::address::SECONDARY));
+            if !secondary {
+                return Err(Error::Ext(
+                    crate::blob_lifecycle::LifecycleError::InsufficientAccountPermissions,
+                ));
+            }
             let mut xml = Xml::root("StorageServiceStats", &[]);
             xml.open("GeoReplication");
             xml.element("Status", "live");
@@ -164,10 +178,13 @@ pub(crate) async fn execute(
             write_response(entity_response(StatusCode::CREATED, entity)?, checksum)
         }
         Operation::PutBlobFromUrl(key, mut options, request) => {
-            let copy_properties = request.copy_properties;
+            let (copy_properties, copy_tags) = (request.copy_properties, request.copy_tags);
             let (source, _) = read_source(app, ctx, request).await?;
             if copy_properties {
                 options.headers = source.info.headers.clone();
+            }
+            if copy_tags {
+                options.tags = source.info.tags.clone();
             }
             let checksum = ("content-md5", source.upload.checksums.md5_text());
             let entity = store.put_blob(key, options, source.upload).await?;
@@ -261,17 +278,19 @@ pub(crate) async fn execute(
             lease_response(action, store.lease_blob(key, action, conditions).await?)
         }
         Operation::CopyBlob(key, options, request) => {
-            let replace_metadata = request.replace_metadata;
-            let resolved = resolve_source(app, ctx, &request).await?;
-            // Snapshots and versions only hold block blobs, so a selected source never copies ranges.
-            if resolved.selector.is_none()
-                && let Some(response) =
+            let choices = (request.replace_metadata, request.copy_tags);
+            let (source, display) = if is_external(app, ctx, &request) {
+                read_source(app, ctx, request).await?
+            } else {
+                let resolved = resolve_source(app, ctx, &request).await?;
+                if let Some(response) =
                     page::copy_ranges(app, &key, &options, &resolved, &request).await?
-            {
-                return Ok(response);
-            }
-            let (source, display) = read_resolved(app, resolved, request).await?;
-            let write = copy_write(options, &source.info, replace_metadata, display);
+                {
+                    return Ok(response);
+                }
+                read_resolved(app, resolved, request).await?
+            };
+            let write = copy_write(options, &source.info, choices, display);
             let id = write
                 .copy
                 .as_ref()
@@ -291,6 +310,7 @@ pub(crate) async fn execute(
             blob_snapshot::delete_response(store.delete_path(key, guard, removal).await?)
         }
         Operation::Page(operation) => page::execute(app, operation, body, ctx).await,
+        Operation::Lifecycle(operation) => lifecycle::execute(app, operation, ctx).await,
         other => blob_snapshot::execute(app, other, body, ctx).await,
     }
 }
@@ -299,14 +319,43 @@ pub(crate) fn storage_endpoint(app: &App, account: &str) -> String {
     format!("{}://{}/{account}/", app.config.scheme(), app.address)
 }
 
-/// Authorizes and reads a same-instance copy source.
+/// Authorizes and reads a copy source: on this listener, or when the operator
+/// allowed its host, on another one.
 async fn read_source(
     app: &App,
     ctx: &Context<'_>,
     request: SourceRequest,
 ) -> Result<(SourceBytes, String)> {
+    if is_external(app, ctx, &request) {
+        return read_external(app, request).await;
+    }
     let resolved = resolve_source(app, ctx, &request).await?;
     read_resolved(app, resolved, request).await
+}
+
+fn is_external(app: &App, ctx: &Context<'_>, request: &SourceRequest) -> bool {
+    !request.url.is_local(app.address.port(), ctx.host)
+}
+
+/// Reads a source on an allowed host (`--allow-external-copy-sources`). Source
+/// conditions and leases belong to Azure sources, so they are refused here.
+async fn read_external(app: &App, request: SourceRequest) -> Result<(SourceBytes, String)> {
+    if request.guard.lease.is_some() || request.guard.conditions != Conditions::default() {
+        return Err(Error::Unsupported);
+    }
+    let target = blob_external::Target::new(&request.url);
+    let range = request.range.as_ref().map(ByteRange::header_value);
+    let remote = blob_external::open(
+        &app.config.external_copy_sources,
+        &target,
+        range.as_deref(),
+        app.config.max_assembled_blob_bytes,
+        app.config.upload_timeout,
+    )
+    .await?;
+    let now = u64::try_from(app.clock.now_millis() / 1000).unwrap_or_default();
+    let source = blob_external::read(&app.store, remote, now).await?;
+    Ok((source, target.display().to_owned()))
 }
 
 /// Resolves a copy source on this listener and checks the caller may read it.
@@ -354,12 +403,15 @@ async fn read_resolved(
 fn copy_write(
     mut options: BlobWrite,
     source: &BlobInfo,
-    replace_metadata: bool,
+    (replace_metadata, copy_tags): (bool, bool),
     display: String,
 ) -> BlobWrite {
     options.headers = source.headers.clone();
     if !replace_metadata {
         options.metadata = source.metadata.clone();
+    }
+    if copy_tags {
+        options.tags = source.tags.clone();
     }
     options.md5 = source
         .md5

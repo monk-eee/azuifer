@@ -9,8 +9,9 @@
 use super::{
     BLOB_COLUMN_COUNT, BLOB_COLUMNS, BlobRow, ContentSource, Download, Mode, Store, blob,
     blob_params, blob_row,
-    blobs::{guard_write, read_row},
-    check_memory_quota, container, db_error, internal, remove_staged, require_blob, tags,
+    blobs::{guard_delete, read_row},
+    check_memory_quota, container, db_error, internal, page_history, pages, remove_staged,
+    require_blob, tags,
 };
 use crate::{
     blob_snapshot::{DeleteSnapshots, Removal, Selector},
@@ -72,11 +73,11 @@ struct Retained {
 }
 
 /// The first `BLOB_COLUMN_COUNT` columns match `BLOB_COLUMNS` so `blob_row` reads a
-/// history row too. History rows hold only block blobs, so the type columns are constants.
+/// history row too. History rows carry no lease, so those columns are constants.
 const HISTORY_BLOB: &str = "content_id, modified, etag, created, length, content_type, \
     content_encoding, content_language, content_disposition, cache_control, md5, metadata, \
     access_tier, access_tier_changed, NULL, 0, 0, 0, copy_id, copy_source, copy_completed, \
-    0, 0, 0, 0";
+    blob_type, sequence_number, append_count, sealed";
 
 fn retained(row: &Row<'_>, now: i64) -> rusqlite::Result<Retained> {
     let mut blob = blob_row(row, now)?;
@@ -148,7 +149,9 @@ pub(super) fn release(db: &Connection, mode: &Mode, ids: &[Uuid]) {
             Err(_) => continue,
         }
         let live = used(
-            "SELECT EXISTS(SELECT 1 FROM blobs WHERE id=?1 UNION ALL SELECT 1 FROM staged_blocks WHERE id=?1)",
+            "SELECT EXISTS(SELECT 1 FROM blobs WHERE id=?1 UNION ALL SELECT 1 FROM staged_blocks WHERE id=?1
+                           UNION ALL SELECT 1 FROM blob_ranges WHERE extent=?1
+                           UNION ALL SELECT 1 FROM history_ranges WHERE extent=?1)",
         );
         if matches!(live, Ok(false)) {
             super::reclaim(mode, *id);
@@ -157,14 +160,12 @@ pub(super) fn release(db: &Connection, mode: &Mode, ids: &[Uuid]) {
 }
 
 /// The extent ids a container's history rows hold, for Delete Container.
-pub(super) fn history_ids(db: &Connection, key: &crate::domain::ContainerKey) -> Result<Vec<Uuid>> {
+pub(super) fn history_ids(db: &Connection, account: &str, name: &str) -> Result<Vec<Uuid>> {
     let mut query = db
         .prepare("SELECT DISTINCT content_id FROM blob_history WHERE account=?1 AND container=?2")
         .map_err(db_error)?;
     query
-        .query_map(params![key.account.as_str(), key.name.as_str()], |row| {
-            row.get(0)
-        })
+        .query_map(params![account, name], |row| row.get(0))
         .map_err(db_error)?
         .collect::<rusqlite::Result<_>>()
         .map_err(db_error)
@@ -177,7 +178,7 @@ pub(super) fn unpin_all(mode: &Mode, ids: &[Uuid]) {
     }
 }
 
-fn is_versioned(db: &Connection, account: &str) -> Result<bool> {
+pub(super) fn is_versioned(db: &Connection, account: &str) -> Result<bool> {
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM versioned_accounts WHERE account=?1)",
         [account],
@@ -187,7 +188,7 @@ fn is_versioned(db: &Connection, account: &str) -> Result<bool> {
 }
 
 /// The soft-delete retention in milliseconds, when the account enabled it.
-fn retention(db: &Connection, account: &AccountName) -> Result<Option<i64>> {
+pub(super) fn retention(db: &Connection, account: &AccountName) -> Result<Option<i64>> {
     let policy = super::service::stored(db, account)?.delete_retention;
     Ok(policy
         .filter(|policy| policy.enabled)
@@ -239,12 +240,12 @@ fn archive(
             (account, container, name, kind, state_id, content_id, modified, etag, created, length,
              content_type, content_encoding, content_language, content_disposition, cache_control,
              md5, metadata, access_tier, access_tier_changed, copy_id, copy_source, copy_completed,
-             bytes, deleted_at, expires_at)
+             bytes, deleted_at, expires_at, blob_type, sequence_number, append_count, sealed)
          SELECT account, container, name, ?4, ?5, id, modified, COALESCE(etag, id),
                 CASE WHEN created=0 THEN modified ELSE created END, length,
                 content_type, content_encoding, content_language, content_disposition, cache_control,
                 md5, metadata, access_tier, access_tier_changed, copy_id, copy_source, copy_completed,
-                CASE WHEN ?6 THEN bytes END, ?7, ?8
+                CASE WHEN ?6 THEN bytes END, ?7, ?8, blob_type, sequence_number, append_count, sealed
          FROM blobs WHERE account=?1 AND container=?2 AND name=?3",
         params![
             account,
@@ -265,8 +266,22 @@ fn archive(
         params![account, container, name, kind.code(), state.0],
     )
     .map_err(db_error)?;
+    page_history::archive_ranges(db, key, kind.code(), state.0)?;
     pin(mode, id);
     Ok(())
+}
+
+/// Snapshots the current blob: a history row sharing its content. Returns the snapshot time.
+pub(super) fn snapshot_current(
+    db: &Connection,
+    mode: &Mode,
+    key: &BlobKey,
+    id: Uuid,
+    now: i64,
+) -> Result<Ticks> {
+    let time = unique_ticks(db, key, Ticks::from_millis(now), None)?;
+    archive(db, mode, key, id, Kind::Snapshot, time, None)?;
+    Ok(time)
 }
 
 /// The `blob_tags.state` of a soft-deleted blob\'s tags.
@@ -323,10 +338,6 @@ pub(super) fn begin_write(
         None
     };
     let Some(old) = old else { return Ok(new) };
-    // Page and append blobs keep their bytes in range maps, which history rows do not hold.
-    if !old.info.kind.is_block() {
-        return Ok(new);
-    }
     if versioned {
         let state = match old.info.entity.version {
             Some(version) => version,
@@ -391,8 +402,13 @@ pub(super) fn finish_write(
 }
 
 /// Deletes expired soft-deleted rows, returning the extents they referenced.
-fn purge_expired(db: &Connection, now: i64) -> Result<Vec<Uuid>> {
+fn purge_expired(db: &Connection, mode: &Mode, now: i64) -> Result<Vec<Uuid>> {
     type Purged = (String, String, String, i64, i64, Uuid);
+    let ranges = page_history::extents_where(
+        db,
+        "b.deleted_at IS NOT NULL AND b.expires_at <= ?1",
+        params![now],
+    )?;
     let mut statement = db
         .prepare(
             "DELETE FROM blob_history WHERE deleted_at IS NOT NULL AND expires_at <= ?1
@@ -429,13 +445,14 @@ fn purge_expired(db: &Connection, now: i64) -> Result<Vec<Uuid>> {
         }
         ids.push(id);
     }
+    ids.extend(page_history::free(db, mode, ranges)?);
     Ok(ids)
 }
 
 /// Reclaims the storage of soft-deleted entries that expired while the server was stopped.
 pub(super) fn purge_at_open(db: &Connection, mode: &Mode, now: i64) -> anyhow::Result<()> {
-    let ids =
-        purge_expired(db, now).map_err(|_| anyhow::anyhow!("could not purge expired entries"))?;
+    let ids = purge_expired(db, mode, now)
+        .map_err(|_| anyhow::anyhow!("could not purge expired entries"))?;
     release(db, mode, &ids);
     Ok(())
 }
@@ -500,7 +517,11 @@ fn resolve(
         Selector::Snapshot(time) => (Kind::Snapshot, time),
     };
     match find(db, key, kind, state, now)? {
-        Some(kept) if kept.tombstone.is_none() => Ok((kept.row, ContentSource::History, false)),
+        Some(kept) if kept.tombstone.is_none() => Ok((
+            kept.row,
+            ContentSource::History(kind.code(), state.0),
+            false,
+        )),
         _ => Err(missing(db, key)),
     }
 }
@@ -514,7 +535,15 @@ pub(super) fn resolve_source(
 ) -> Result<(BlobRow, ContentSource)> {
     match selector {
         None => Ok((require_blob(db, key, now)?, ContentSource::Blob)),
-        Some(selector) => resolve(db, key, selector, now).map(|(row, source, _)| (row, source)),
+        Some(selector) => {
+            let (mut row, source, current) = resolve(db, key, selector, now)?;
+            if let Selector::Version(version) = selector
+                && !current
+            {
+                row.info.tags = tags::load(db, key, version.0)?;
+            }
+            Ok((row, source))
+        }
     }
 }
 
@@ -551,6 +580,7 @@ fn count_snapshots(db: &Connection, key: &BlobKey) -> Result<i64> {
 /// marks them soft-deleted when the account keeps deleted data.
 fn remove_states(
     db: &Connection,
+    mode: &Mode,
     key: &BlobKey,
     kind: Kind,
     state: Option<Ticks>,
@@ -579,6 +609,12 @@ fn remove_states(
         .map_err(db_error)?;
         return Ok(());
     }
+    let ranges = page_history::extents_where(
+        db,
+        "b.account=?1 AND b.container=?2 AND b.name=?3 AND b.kind=?4 AND b.deleted_at IS NULL
+         AND (?6 OR b.state_id=?5)",
+        params![account, container, name, kind.code(), state, all],
+    )?;
     let mut delete = db
         .prepare(
             "DELETE FROM blob_history
@@ -605,6 +641,7 @@ fn remove_states(
             .map_err(db_error)?;
         }
     }
+    released.extend(page_history::free(db, mode, ranges)?);
     Ok(())
 }
 
@@ -621,15 +658,6 @@ fn retire_current(
 ) -> Result<Deletion> {
     let [account, container, name] = blob_params(key);
     let id = row.info.entity.id;
-    if !row.info.kind.is_block() {
-        // Page and append blobs keep their bytes in range maps; deleting one is permanent.
-        released.extend(super::pages::retire(db, mode, key, row.info.kind)?);
-        drop_tags(db, key, 0)?;
-        db.execute("DELETE FROM blobs WHERE id=?1", [id])
-            .map_err(db_error)?;
-        released.push(id);
-        return Ok(Deletion::Permanent);
-    }
     let outcome = if keep_as_version && is_versioned(db, account)? {
         let state = match row.info.entity.version {
             Some(version) => version,
@@ -644,6 +672,11 @@ fn retire_current(
                 // A soft-deleted blob keeps its tags (state -1) so an undelete restores them.
                 drop_tags(db, key, DELETED_TAGS)?;
                 move_tags_to(db, key, 0, DELETED_TAGS)?;
+                let replaced_ranges = page_history::extents_where(
+                    db,
+                    "b.account=?1 AND b.container=?2 AND b.name=?3 AND b.kind=3",
+                    params![account, container, name],
+                )?;
                 let replaced = db
                     .query_row(
                         "DELETE FROM blob_history WHERE account=?1 AND container=?2 AND name=?3
@@ -654,6 +687,7 @@ fn retire_current(
                     .optional()
                     .map_err(db_error)?;
                 released.extend(replaced);
+                released.extend(page_history::free(db, mode, replaced_ranges)?);
                 let tombstone = Tombstone {
                     deleted_at: now,
                     expires_at: now + retention,
@@ -667,10 +701,61 @@ fn retire_current(
             }
         }
     };
+    // A page or append blob keeps its extents through any history row copy of its ranges.
+    released.extend(pages::retire(db, mode, key, row.info.kind)?);
     db.execute("DELETE FROM blobs WHERE id=?1", [id])
         .map_err(db_error)?;
     released.push(id);
     Ok(outcome)
+}
+
+/// Removes a blob that reached its expiry. Azure does not soft-delete an expired
+/// blob, so the blob and its snapshots go for good; an account that keeps
+/// versions keeps the blob as a version.
+pub(super) fn expire(
+    db: &Connection,
+    mode: &Mode,
+    key: &BlobKey,
+    row: &BlobRow,
+    now: i64,
+    released: &mut Vec<Uuid>,
+) -> Result<()> {
+    let [account, container, name] = blob_params(key);
+    released.extend(remove_staged(db, key)?);
+    let ranges = page_history::extents_where(
+        db,
+        "b.account=?1 AND b.container=?2 AND b.name=?3 AND b.kind=1",
+        params![account, container, name],
+    )?;
+    let mut delete = db
+        .prepare(
+            "DELETE FROM blob_history WHERE account=?1 AND container=?2 AND name=?3 AND kind=1
+             RETURNING content_id",
+        )
+        .map_err(db_error)?;
+    let snapshots: Vec<Uuid> = delete
+        .query_map(params![account, container, name], |row| row.get(0))
+        .map_err(db_error)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(db_error)?;
+    released.extend(snapshots);
+    released.extend(page_history::free(db, mode, ranges)?);
+    let id = row.info.entity.id;
+    if is_versioned(db, account)? {
+        let state = match row.info.entity.version {
+            Some(version) => version,
+            None => unique_ticks(db, key, Ticks::from_millis(now), None)?,
+        };
+        archive(db, mode, key, id, Kind::Version, state, None)?;
+        move_tags(db, key, state)?;
+    } else {
+        drop_tags(db, key, 0)?;
+    }
+    released.extend(pages::retire(db, mode, key, row.info.kind)?);
+    db.execute("DELETE FROM blobs WHERE id=?1", [id])
+        .map_err(db_error)?;
+    released.push(id);
+    Ok(())
 }
 
 impl Store {
@@ -699,16 +784,13 @@ impl Store {
     ) -> Result<Snapshot> {
         self.run(move |db, mode, now| {
             let tx = db.transaction().map_err(db_error)?;
-            let released = purge_expired(&tx, now)?;
+            let released = purge_expired(&tx, mode, now)?;
             let row = require_blob(&tx, &key, now)?;
             row.lease
                 .check(guard.lease, LeaseNeed::Optional, LeaseOwner::Blob, now)?;
             guard.conditions.check(Some(row.info.entity), false)?;
             guard.conditions.check_tags(Some(&row.info.tags))?;
-            if !row.info.kind.is_block() {
-                return Err(Error::Page(crate::blob_page::PageError::InvalidBlobType));
-            }
-            check_memory_quota(&tx, mode, 0, row.info.length.0)?;
+            check_memory_quota(&tx, mode, 0, pages::block_length(&row.info))?;
             let time = unique_ticks(&tx, &key, Ticks::from_millis(now), None)?;
             archive(
                 &tx,
@@ -773,7 +855,7 @@ impl Store {
                 Selector::Snapshot(time) => (Kind::Snapshot.code(), time.0),
                 Selector::Version(version) => (Kind::Version.code(), version.0),
             };
-            let history = source == ContentSource::History;
+            let history = matches!(source, ContentSource::History(..));
             let mut query = db
                 .prepare(if history {
                     "SELECT block_id, length FROM history_blocks
@@ -813,7 +895,7 @@ impl Store {
     ) -> Result<Deletion> {
         self.run(move |db, mode, now| {
             let tx = db.transaction().map_err(db_error)?;
-            let mut released = purge_expired(&tx, now)?;
+            let mut released = purge_expired(&tx, mode, now)?;
             let outcome = match removal.selector {
                 None => delete_current(
                     &tx,
@@ -824,24 +906,30 @@ impl Store {
                     now,
                     &mut released,
                 )?,
-                Some(Selector::Snapshot(time)) => {
-                    delete_retained(&tx, &key, &guard, Kind::Snapshot, time, now, &mut released)?
-                }
+                Some(Selector::Snapshot(time)) => delete_retained(
+                    &tx,
+                    mode,
+                    &key,
+                    &guard,
+                    (Kind::Snapshot, time),
+                    now,
+                    &mut released,
+                )?,
                 Some(Selector::Version(version)) => {
                     let current = blob(&tx, &key, now)?
                         .filter(|row| row.info.entity.version == Some(version));
                     match current {
                         Some(row) => {
-                            guard_write(&guard, Some(&row), false, now)?;
+                            guard_delete(&guard, &row, now)?;
                             released.extend(remove_staged(&tx, &key)?);
                             retire_current(&tx, mode, &key, &row, false, now, &mut released)?
                         }
                         None => delete_retained(
                             &tx,
+                            mode,
                             &key,
                             &guard,
-                            Kind::Version,
-                            version,
+                            (Kind::Version, version),
                             now,
                             &mut released,
                         )?,
@@ -861,7 +949,7 @@ impl Store {
         let hierarchical = self.hierarchical(&key.container);
         self.run(move |db, mode, now| {
             let tx = db.transaction().map_err(db_error)?;
-            let released = purge_expired(&tx, now)?;
+            let released = purge_expired(&tx, mode, now)?;
             container(&tx, &key.container)?;
             let current = blob(&tx, &key, now)?;
             let [account, container, name] = blob_params(&key);
@@ -915,12 +1003,12 @@ pub(super) fn delete_current(
     released: &mut Vec<Uuid>,
 ) -> Result<Deletion> {
     let old = require_blob(db, key, now)?;
-    guard_write(guard, Some(&old), false, now)?;
+    guard_delete(guard, &old, now)?;
     if snapshots == DeleteSnapshots::Refuse && count_snapshots(db, key)? > 0 {
         return Err(Error::SnapshotsPresent);
     }
     if snapshots != DeleteSnapshots::Refuse {
-        remove_states(db, key, Kind::Snapshot, None, now, released)?;
+        remove_states(db, mode, key, Kind::Snapshot, None, now, released)?;
     }
     if snapshots == DeleteSnapshots::Only {
         return Ok(if retention(db, &key.container.account)?.is_some() {
@@ -935,10 +1023,10 @@ pub(super) fn delete_current(
 
 fn delete_retained(
     db: &Connection,
+    mode: &Mode,
     key: &BlobKey,
     guard: &Guard,
-    kind: Kind,
-    state: Ticks,
+    (kind, state): (Kind, Ticks),
     now: i64,
     released: &mut Vec<Uuid>,
 ) -> Result<Deletion> {
@@ -947,7 +1035,7 @@ fn delete_retained(
         return Err(missing(db, key));
     };
     guard.conditions.check(Some(kept.row.info.entity), false)?;
-    remove_states(db, key, kind, Some(state), now, released)?;
+    remove_states(db, mode, key, kind, Some(state), now, released)?;
     Ok(if retention(db, &key.container.account)?.is_some() {
         Deletion::Retained
     } else {
@@ -975,15 +1063,16 @@ fn restore_current(
         "INSERT INTO blobs (account, container, name, id, etag, modified, created, length,
             content_type, content_encoding, content_language, content_disposition, cache_control,
             md5, metadata, bytes, access_tier, access_tier_changed, copy_id, copy_source,
-            copy_completed)
+            copy_completed, blob_type, sequence_number, append_count, sealed)
          SELECT account, container, name, content_id, etag, modified, created, length,
             content_type, content_encoding, content_language, content_disposition, cache_control,
             md5, metadata, bytes, access_tier, access_tier_changed, copy_id, copy_source,
-            copy_completed
+            copy_completed, blob_type, sequence_number, append_count, sealed
          FROM blob_history WHERE account=?1 AND container=?2 AND name=?3 AND kind=3",
         params![account, container, name],
     )
     .map_err(db_error)?;
+    page_history::restore_ranges(db, key)?;
     db.execute(
         "INSERT INTO committed_blocks
          SELECT account, container, name, position, block_id, offset, length
@@ -1097,6 +1186,8 @@ impl Store {
             let limit = request.page.limit as usize;
             let prefix = request.page.prefix.as_str();
             let cursor = Cursor::parse(&request.page.after);
+            let lifecycle =
+                super::expiry::load_container(db, key.account.as_str(), key.name.as_str())?;
             let sql = format!(
                 "SELECT {BLOB_COLUMNS}, name, 0, 9223372036854775807, version_id, NULL, NULL
                    FROM blobs WHERE account=?1 AND container=?2 AND name>=?3 AND instr(name, ?4)=1
@@ -1165,6 +1256,11 @@ impl Store {
                 let mut info = blob_row(row, now).map_err(db_error)?.info;
                 if kind == 2 {
                     info.entity.version = Some(Ticks(state));
+                }
+                if kind == 0
+                    && let Some(found) = lifecycle.get(&name)
+                {
+                    info.lifecycle = *found;
                 }
                 let current = kind == 0;
                 let version = if current {
@@ -1301,11 +1397,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn page_and_append_blobs_cannot_be_snapshotted_and_are_deleted_permanently() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = open(dir.path()).await;
-        let options = BlobWrite {
+    fn options() -> BlobWrite {
+        BlobWrite {
             headers: ContentHeaders::default(),
             metadata: Metadata::new(),
             guard: Guard::default(),
@@ -1313,29 +1406,150 @@ mod tests {
             copy: None,
             md5: None,
             tags: Tags::new(),
+        }
+    }
+
+    async fn write_page(store: &Store, name: &str, start: u64, bytes: &[u8]) {
+        let mut upload = store
+            .begin_upload(ContentLength(bytes.len() as u64))
+            .await
+            .unwrap();
+        upload.append(bytes).await.unwrap();
+        let upload = upload.finish(None).await.unwrap();
+        let write = crate::blob_page::PageWrite {
+            range: start..start + bytes.len() as u64,
+            sequence: Default::default(),
+            guard: Guard::default(),
         };
         store
-            .create_paged(key("log"), options, crate::blob_page::Creation::Append)
+            .put_page(key(name), write, Some(upload))
+            .await
+            .unwrap();
+    }
+
+    async fn read_snapshot(store: &Store, name: &str, time: Ticks) -> Vec<u8> {
+        let read = crate::domain::BlobRead {
+            guard: Guard::default(),
+            range: None,
+            with_body: true,
+            range_checksum: None,
+        };
+        let selected = store
+            .read_selected(key(name), Selector::Snapshot(time), read)
+            .await
+            .unwrap();
+        match selected.download.payload {
+            Some(crate::store::Payload::Ranges(body)) => body.into_vec().unwrap(),
+            _ => panic!("a page blob snapshot reads through its range map"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_page_blob_snapshot_shares_extents_and_outlives_later_writes_and_deletes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path()).await;
+        store
+            .create_paged(
+                key("disk"),
+                options(),
+                crate::blob_page::Creation::Page {
+                    length: 1024,
+                    sequence: 0,
+                },
+            )
+            .await
+            .unwrap();
+        write_page(&store, "disk", 0, &[b'a'; 512]).await;
+        let snapshot = store
+            .snapshot_blob(key("disk"), None, Guard::default())
+            .await
+            .unwrap();
+        assert_eq!(extents(dir.path()), 1, "a snapshot shares the extent");
+        write_page(&store, "disk", 0, &[b'b'; 512]).await;
+        assert_eq!(extents(dir.path()), 2, "the overwritten extent is retained");
+        let mut expected = vec![b'a'; 512];
+        expected.extend([0u8; 512]);
+        assert_eq!(read_snapshot(&store, "disk", snapshot.time).await, expected);
+        let refuse = store
+            .delete_blob(
+                key("disk"),
+                Guard::default(),
+                removal(None, DeleteSnapshots::Refuse),
+            )
+            .await;
+        assert_eq!(refuse.err(), Some(Error::SnapshotsPresent));
+        store
+            .delete_blob(
+                key("disk"),
+                Guard::default(),
+                removal(None, DeleteSnapshots::Only),
+            )
             .await
             .unwrap();
         assert_eq!(
-            store
-                .snapshot_blob(key("log"), None, Guard::default())
-                .await
-                .err(),
-            Some(Error::Page(crate::blob_page::PageError::InvalidBlobType))
+            extents(dir.path()),
+            1,
+            "deleting the snapshot frees its extent"
         );
         let outcome = store
             .delete_blob(
-                key("log"),
+                key("disk"),
                 Guard::default(),
                 removal(None, DeleteSnapshots::Refuse),
             )
             .await
             .unwrap();
         assert!(outcome == Deletion::Permanent);
+        assert_eq!(extents(dir.path()), 0);
     }
 
+    #[tokio::test]
+    async fn history_ranges_keep_extents_across_restart_until_the_last_reference_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let time = {
+            let store = open(dir.path()).await;
+            store
+                .create_paged(key("log"), options(), crate::blob_page::Creation::Append)
+                .await
+                .unwrap();
+            let mut upload = store.begin_upload(ContentLength(3)).await.unwrap();
+            upload.append(b"abc").await.unwrap();
+            let upload = upload.finish(None).await.unwrap();
+            store
+                .append_block(
+                    key("log"),
+                    crate::blob_page::AppendWrite {
+                        condition: Default::default(),
+                        guard: Guard::default(),
+                    },
+                    upload,
+                )
+                .await
+                .unwrap();
+            let snapshot = store
+                .snapshot_blob(key("log"), None, Guard::default())
+                .await
+                .unwrap();
+            snapshot.time
+        };
+        let store = open(dir.path()).await;
+        assert_eq!(extents(dir.path()), 1);
+        let read = crate::domain::BlobRead {
+            guard: Guard::default(),
+            range: None,
+            with_body: true,
+            range_checksum: None,
+        };
+        let selected = store
+            .read_selected(key("log"), Selector::Snapshot(time), read)
+            .await
+            .unwrap();
+        assert_eq!(selected.download.info.length.0, 3);
+        assert!(matches!(
+            selected.download.info.kind,
+            crate::blob_page::BlobKind::Append { committed: 1, .. }
+        ));
+    }
     #[tokio::test]
     async fn an_extent_lives_until_no_blob_snapshot_or_version_references_it() {
         let dir = tempfile::tempdir().unwrap();

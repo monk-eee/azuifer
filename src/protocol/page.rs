@@ -3,7 +3,7 @@
 //! so the block blob operations parse them unchanged.
 
 use super::{
-    BLOB_PROPERTIES, CHECKSUMS, CONDITIONS, LEASE, PLAIN_PROPERTIES, Request, SOURCE,
+    BLOB_PROPERTIES, CHECKSUMS, CONDITIONS, LEASE, PLAIN_PROPERTIES, Request, SOURCE, TAGS,
     UploadOptions, blob_write, upload_options,
 };
 use crate::{
@@ -15,6 +15,7 @@ use crate::{
     },
     conditions::Guard,
     domain::{BlobKey, ByteRange, Error, Result},
+    stamp::Ticks,
 };
 use axum::http::Method;
 
@@ -50,7 +51,7 @@ impl Request<'_> {
     }
 
     /// A request that carries no body: its `Content-Length` must be zero.
-    fn require_empty_body(&self) -> Result<()> {
+    pub(super) fn require_empty_body(&self) -> Result<()> {
         if upload_options(self.headers, u64::MAX)?.length.0 == 0 {
             Ok(())
         } else {
@@ -67,6 +68,7 @@ impl Request<'_> {
                 BLOB_PROPERTIES,
                 PLAIN_PROPERTIES,
                 CREATE,
+                TAGS,
                 &["x-ms-blob-content-length", "x-ms-blob-sequence-number"],
             ],
             true,
@@ -89,7 +91,14 @@ impl Request<'_> {
     fn create_append(&self, key: BlobKey) -> Result<PageOperation> {
         self.check(
             &[],
-            &[CONDITIONS, LEASE, BLOB_PROPERTIES, PLAIN_PROPERTIES, CREATE],
+            &[
+                CONDITIONS,
+                LEASE,
+                BLOB_PROPERTIES,
+                PLAIN_PROPERTIES,
+                CREATE,
+                TAGS,
+            ],
             true,
         )?;
         self.require_empty_body()?;
@@ -172,10 +181,11 @@ impl Request<'_> {
 
     fn page_ranges(&self, key: BlobKey) -> Result<PageOperation> {
         self.check(
-            &["comp", "marker", "maxresults"],
+            &["comp", "marker", "maxresults", "snapshot", "prevsnapshot"],
             &[CONDITIONS, LEASE, &["x-ms-range", "range"]],
             false,
         )?;
+        let time = |name: &str| self.param(name).map(Ticks::parse).transpose();
         let number = |name: &str| {
             self.param(name)
                 .map(|value| value.parse::<u64>().map_err(|_| Error::InvalidQuery))
@@ -192,6 +202,8 @@ impl Request<'_> {
         Ok(PageOperation::PageRanges(
             key,
             RangeQuery {
+                snapshot: time("snapshot")?,
+                previous: time("prevsnapshot")?,
                 window: header(self.headers, "x-ms-range")?
                     .or(header(self.headers, "range")?)
                     .map(ByteRange::parse)

@@ -837,7 +837,7 @@ fn resizing_a_page_blob_trims_and_zero_extends() {
 }
 
 #[test]
-fn page_ranges_support_windows_paging_and_reject_diffs() {
+fn page_ranges_support_windows_paging_and_reject_unknown_snapshots() {
     let server = Emulator::start(None, &[]);
     server.create_container();
     assert_eq!(server.create_page(PAGE, 8192, &[]).status(), 201);
@@ -876,13 +876,13 @@ fn page_ranges_support_windows_paging_and_reject_diffs() {
     );
     error(
         server.page_ranges(PAGE, "&prevsnapshot=2024-01-01T00:00:00.0000000Z", &[]),
-        501,
-        "NotImplemented",
+        409,
+        "PreviousSnapshotNotFound",
     );
     error(
         server.page_ranges(PAGE, "&snapshot=2024-01-01T00:00:00.0000000Z", &[]),
-        501,
-        "NotImplemented",
+        404,
+        "BlobNotFound",
     );
     error(
         server.page_ranges(PAGE, "", &[("if-match", "\"nope\"")]),

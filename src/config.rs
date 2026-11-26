@@ -65,6 +65,10 @@ pub(crate) struct Options {
     versioning_accounts: Option<String>,
     #[arg(long, env = "AZUIFER_FILE_PORT", global = true)]
     file_port: Option<u16>,
+    /// Comma-separated hosts (`host`, `host:port`, `*.domain`) that Copy Blob and the
+    /// `...From URL` operations may read from other servers. Off by default.
+    #[arg(long, env = "AZUIFER_ALLOW_EXTERNAL_COPY_SOURCES", global = true)]
+    allow_external_copy_sources: Option<String>,
     #[command(flatten)]
     telemetry: telemetry::TelemetryOptions,
     #[command(flatten)]
@@ -140,6 +144,7 @@ struct FileConfig {
     hns_accounts: Option<String>,
     versioning_accounts: Option<String>,
     file_port: Option<u16>,
+    allow_external_copy_sources: Option<String>,
     otlp_endpoint: Option<String>,
     otlp_protocol: Option<telemetry::OtlpProtocol>,
     prometheus: Option<bool>,
@@ -181,6 +186,7 @@ pub(crate) struct Config {
     pub(crate) accounts: HashMap<AccountName, Vec<Vec<u8>>>,
     pub(crate) hns_accounts: HashSet<AccountName>,
     pub(crate) versioning_accounts: HashSet<AccountName>,
+    pub(crate) external_copy_sources: crate::blob_external::Allowlist,
     pub(crate) tls: Option<crate::tls::Settings>,
     pub(crate) oauth: crate::oauth::OAuth,
     pub(crate) delegation: crate::delegation::Keys,
@@ -331,6 +337,13 @@ impl Config {
             &accounts,
             "versioning-accounts",
         )?;
+        let external_copy_sources = crate::blob_external::Allowlist::parse(
+            &options
+                .allow_external_copy_sources
+                .or(file.allow_external_copy_sources)
+                .unwrap_or_default(),
+        )
+        .context("invalid allow-external-copy-sources")?;
         let test_clock = options.test_clock.or(file.test_clock).unwrap_or(false);
         ensure!(
             !test_clock || binding.is_loopback(),
@@ -362,6 +375,7 @@ impl Config {
             accounts,
             hns_accounts,
             versioning_accounts,
+            external_copy_sources,
             tls: crate::tls::Settings::resolve(options.tls, file.tls)?,
             oauth: crate::oauth::OAuth::resolve(options.oauth, file.oauth, binding.is_loopback())?,
             delegation: crate::delegation::Keys::default(),

@@ -13,7 +13,7 @@ use crate::{
 use rusqlite::{Connection, OptionalExtension as _, Row, params};
 use uuid::Uuid;
 
-const CONTAINER_COLUMNS: &str = "id, modified, COALESCE(etag, id), metadata, public_access, acl, lease_id, lease_state, lease_duration, lease_expiry";
+pub(super) const CONTAINER_COLUMNS: &str = "id, modified, COALESCE(etag, id), metadata, public_access, acl, lease_id, lease_state, lease_duration, lease_expiry";
 
 pub(crate) struct LeaseResult {
     pub(crate) entity: Entity,
@@ -26,7 +26,7 @@ pub(super) struct ContainerRow {
     pub(super) lease: StoredLease,
 }
 
-fn container_row(row: &Row<'_>, now: i64) -> rusqlite::Result<ContainerRow> {
+pub(super) fn container_row(row: &Row<'_>, now: i64) -> rusqlite::Result<ContainerRow> {
     let public: String = row.get(4)?;
     let acl: String = row.get(5)?;
     let identifiers = serde_json::from_str(&acl).map_err(|error| {
@@ -79,6 +79,59 @@ fn lease_guard(row: &ContainerRow, guard: &Guard, need: LeaseNeed, now: i64) -> 
     row.lease
         .check(guard.lease, need, LeaseOwner::Container, now)?;
     guard.conditions.check(Some(row.info.entity), false)
+}
+
+/// What a container erase leaves to clean up once its transaction commits.
+pub(super) struct Erased {
+    reclaimed: Vec<Uuid>,
+    retained: Vec<Uuid>,
+}
+
+impl Erased {
+    pub(super) fn finish(self, mode: &super::Mode) {
+        snapshots::unpin_all(mode, &self.retained);
+        for id in self.reclaimed.into_iter().chain(self.retained) {
+            reclaim(mode, id);
+        }
+    }
+}
+
+/// Deletes a container row and everything under it, noting the content to reclaim.
+pub(super) fn erase(
+    tx: &Connection,
+    mode: &super::Mode,
+    account: &str,
+    name: &str,
+) -> Result<Erased> {
+    let values = params![account, name];
+    let mut reclaimed = if matches!(mode, super::Mode::Disk { .. }) {
+        let mut statement = tx
+            .prepare(
+                "SELECT id FROM blobs WHERE account=?1 AND container=?2
+                 UNION ALL SELECT id FROM staged_blocks WHERE account=?1 AND container=?2",
+            )
+            .map_err(db_error)?;
+        statement
+            .query_map(values, |row| row.get::<_, Uuid>(0))
+            .map_err(db_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(db_error)?
+    } else {
+        Vec::new()
+    };
+    let history_ranges = super::page_history::container_extents(tx, account, name)?;
+    reclaimed.extend(super::pages::retire_container(tx, mode, account, name)?);
+    let retained = snapshots::history_ids(tx, account, name)?;
+    tx.execute(
+        "DELETE FROM containers WHERE account=?1 AND name=?2",
+        values,
+    )
+    .map_err(db_error)?;
+    reclaimed.extend(super::page_history::free(tx, mode, history_ranges)?);
+    Ok(Erased {
+        reclaimed,
+        retained,
+    })
 }
 
 impl Store {
@@ -226,32 +279,14 @@ impl Store {
             let tx = db.transaction().map_err(db_error)?;
             let row = require_container(&tx, &key, now)?;
             lease_guard(&row, &guard, LeaseNeed::Required, now)?;
-            let values = params![key.account.as_str(), key.name.as_str()];
-            let mut reclaimed = if matches!(mode, super::Mode::Disk { .. }) {
-                let mut statement = tx
-                    .prepare("SELECT id FROM blobs WHERE account=?1 AND container=?2
-                              UNION ALL SELECT id FROM staged_blocks WHERE account=?1 AND container=?2")
-                    .map_err(db_error)?;
-                statement
-                    .query_map(values, |row| row.get::<_, Uuid>(0))
-                    .map_err(db_error)?
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .map_err(db_error)?
-            } else {
-                Vec::new()
-            };
-            reclaimed.extend(super::pages::retire_container(&tx, mode, &key)?);
-            let retained = snapshots::history_ids(&tx, &key)?;
-            tx.execute(
-                "DELETE FROM containers WHERE account=?1 AND name=?2",
-                values,
-            )
-            .map_err(db_error)?;
-            tx.commit().map_err(db_error)?;
-            snapshots::unpin_all(mode, &retained);
-            for id in reclaimed.into_iter().chain(retained) {
-                reclaim(mode, id);
+            super::immutability::check_container(&tx, &key, now)?;
+            if let Some(retention) = snapshots::retention(&tx, &key.account)? {
+                super::deleted_containers::retire(&tx, &key, retention, now)?;
+                return tx.commit().map_err(db_error);
             }
+            let erased = erase(&tx, mode, key.account.as_str(), key.name.as_str())?;
+            tx.commit().map_err(db_error)?;
+            erased.finish(mode);
             Ok(())
         })
         .await
@@ -266,7 +301,8 @@ impl Store {
             let mut query = db
                 .prepare(&format!(
                     "SELECT {CONTAINER_COLUMNS}, name FROM containers
-                     WHERE account=?1 AND name>?2 AND instr(name, ?3)=1 ORDER BY name LIMIT ?4"
+                     WHERE account=?1 AND name>?2 AND instr(name, ?3)=1 AND instr(name, '~')=0
+                     ORDER BY name LIMIT ?4"
                 ))
                 .map_err(db_error)?;
             let rows = query

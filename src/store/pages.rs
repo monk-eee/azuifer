@@ -6,19 +6,19 @@
 //! it any more, so same-instance copies can share extents.
 
 use super::{
-    BlobRow, Mode, Store, Uploaded, UploadedData, blob, blob_params,
+    BlobRow, ContentSource, Mode, Store, Uploaded, UploadedData, blob, blob_params,
     blobs::{ensure_parents, guard_write, touch},
     check_memory_quota, container, db_error, extent, internal, io_error, remove_staged,
-    require_blob, row_uint, save_row, sqlite_int, staging_file,
+    require_blob, row_uint, save_row, snapshots, sqlite_int, staging_file,
 };
 use crate::{
     blob_page::{
-        BlobKind, Creation, PageError, PageWrite, PropertyChange, RangeQuery, check_tier,
-        check_within,
+        BlobKind, Creation, PageError, PageWrite, PropertyChange, check_tier, check_within,
     },
+    blob_snapshot::Selector,
     checksum::Hasher,
     conditions::Guard,
-    domain::{BlobInfo, BlobKey, BlobWrite, ContainerKey, ContentLength, Entity, Error, Result},
+    domain::{BlobInfo, BlobKey, BlobWrite, ContentLength, Entity, Error, Result},
     lease::{LeaseNeed, LeaseOwner},
     ranges::{Mapping, RangeMap, Segment},
     store::SourceBytes,
@@ -55,10 +55,12 @@ pub(crate) struct PageWritten {
 }
 
 /// A page of Get Page Ranges results; `next` resumes after the last returned range.
+/// `cleared` holds the clear ranges of a diff (`prevsnapshot`), empty otherwise.
 pub(crate) struct PageRanges {
     pub(crate) entity: Entity,
     pub(crate) length: u64,
     pub(crate) ranges: Vec<Range<u64>>,
+    pub(crate) cleared: Vec<Range<u64>>,
     pub(crate) next: Option<u64>,
 }
 
@@ -69,6 +71,23 @@ pub(crate) struct Copied {
 }
 
 type Rows = Vec<(u64, Mapping<Uuid>)>;
+
+/// Where a blob's range rows live: the current blob, or a retained snapshot,
+/// version, or soft-deleted entry (`kind` and `state` as in `blob_history`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RangeSource {
+    Current,
+    Retained { kind: i64, state: i64 },
+}
+
+impl From<ContentSource> for RangeSource {
+    fn from(source: ContentSource) -> Self {
+        match source {
+            ContentSource::History(kind, state) => Self::Retained { kind, state },
+            _ => Self::Current,
+        }
+    }
+}
 
 impl Uploaded {
     /// The number of bytes received.
@@ -84,14 +103,33 @@ fn load_window(
     end: u64,
     length: u64,
 ) -> Result<RangeMap<Uuid>> {
+    load_source_window(db, key, RangeSource::Current, start, end, length)
+}
+
+/// Loads the ranges of `source` that overlap `[start, end)` of a blob `length` bytes long.
+pub(super) fn load_source_window(
+    db: &Connection,
+    key: &BlobKey,
+    source: RangeSource,
+    start: u64,
+    end: u64,
+    length: u64,
+) -> Result<RangeMap<Uuid>> {
     let [account, container, name] = blob_params(key);
-    let mut query = db
-        .prepare_cached(
-            "SELECT offset, length, extent, extent_offset FROM blob_ranges
-             WHERE account=?1 AND container=?2 AND name=?3 AND offset<?4 AND offset+length>?5
-             ORDER BY offset",
-        )
-        .map_err(db_error)?;
+    let (table, filter) = match source {
+        RangeSource::Current => ("blob_ranges", String::new()),
+        // Both values are integers, so formatting them into the statement is safe.
+        RangeSource::Retained { kind, state } => (
+            "history_ranges",
+            format!(" AND kind={kind} AND state_id={state}"),
+        ),
+    };
+    let sql = format!(
+        "SELECT offset, length, extent, extent_offset FROM {table}
+         WHERE account=?1 AND container=?2 AND name=?3 AND offset<?4 AND offset+length>?5{filter}
+         ORDER BY offset"
+    );
+    let mut query = db.prepare_cached(&sql).map_err(db_error)?;
     let rows = query
         .query_map(
             params![
@@ -120,7 +158,7 @@ fn load_window(
 }
 
 /// Applies the difference between two loads of the same window as row changes.
-fn save_window(
+pub(super) fn save_window(
     db: &Connection,
     key: &BlobKey,
     old: &RangeMap<Uuid>,
@@ -165,7 +203,7 @@ fn save_window(
     Ok(())
 }
 
-fn set_kind(db: &Connection, key: &BlobKey, kind: BlobKind) -> Result<()> {
+pub(super) fn set_kind(db: &Connection, key: &BlobKey, kind: BlobKind) -> Result<()> {
     let [account, container, name] = blob_params(key);
     let (code, sequence, committed, sealed) = kind.columns();
     db.execute(
@@ -187,6 +225,11 @@ impl Reclaim {
         self.0.extend(map.extents().copied());
     }
 
+    /// Notes extents that lost a reference outside this module (retained range rows).
+    pub(super) fn add_ids(&mut self, ids: impl IntoIterator<Item = Uuid>) {
+        self.0.extend(ids);
+    }
+
     /// Notes every extent of a blob and deletes its range rows.
     pub(super) fn add_blob(&mut self, db: &Connection, key: &BlobKey) -> Result<()> {
         let [account, container, name] = blob_params(key);
@@ -197,11 +240,11 @@ impl Reclaim {
         )
     }
 
-    fn add_container(&mut self, db: &Connection, key: &ContainerKey) -> Result<()> {
+    fn add_container(&mut self, db: &Connection, account: &str, name: &str) -> Result<()> {
         self.collect(
             db,
             "DELETE FROM blob_ranges WHERE account=?1 AND container=?2 RETURNING extent",
-            &[key.account.as_str(), key.name.as_str()],
+            &[account, name],
         )
     }
 
@@ -225,7 +268,8 @@ impl Reclaim {
         for id in self.0 {
             let referenced: bool = db
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM blob_ranges WHERE extent=?1)",
+                    "SELECT EXISTS(SELECT 1 FROM blob_ranges WHERE extent=?1
+                                   UNION ALL SELECT 1 FROM history_ranges WHERE extent=?1)",
                     [id],
                     |row| row.get(0),
                 )
@@ -268,10 +312,11 @@ pub(super) fn retire(
 pub(super) fn retire_container(
     db: &Connection,
     mode: &Mode,
-    key: &ContainerKey,
+    account: &str,
+    name: &str,
 ) -> Result<Vec<Uuid>> {
     let mut reclaim = Reclaim::default();
-    reclaim.add_container(db, key)?;
+    reclaim.add_container(db, account, name)?;
     reclaim.finish(db, mode)
 }
 
@@ -450,10 +495,11 @@ pub(super) fn open_body(
     db: &Connection,
     mode: &Mode,
     key: &BlobKey,
+    source: RangeSource,
     length: u64,
     window: Range<u64>,
 ) -> Result<RangeBody> {
-    let map = load_window(db, key, window.start, window.end, length)?;
+    let map = load_source_window(db, key, source, window.start, window.end, length)?;
     RangeBody::open(db, mode, &map, window.start, window.end - window.start)
 }
 
@@ -462,6 +508,7 @@ pub(super) fn source_bytes(
     db: &Connection,
     mode: &Mode,
     key: &BlobKey,
+    source: RangeSource,
     info: BlobInfo,
     window: Range<u64>,
 ) -> Result<SourceBytes> {
@@ -471,7 +518,7 @@ pub(super) fn source_bytes(
     {
         return Err(Error::QuotaExceeded);
     }
-    let body = open_body(db, mode, key, info.length.0, window)?;
+    let body = open_body(db, mode, key, source, info.length.0, window)?;
     let mut hasher = Hasher::new();
     let data = match mode {
         Mode::Disk { extents, .. } => {
@@ -551,7 +598,7 @@ pub(super) fn apply_change(
     Ok((Some(current), free))
 }
 
-fn page_blob(row: &BlobRow) -> Result<u64> {
+pub(super) fn page_blob(row: &BlobRow) -> Result<u64> {
     match row.info.kind {
         BlobKind::Page { sequence } => Ok(sequence),
         _ => Err(Error::Page(PageError::InvalidBlobType)),
@@ -575,12 +622,21 @@ impl Store {
             ensure_parents(&tx, &key, hierarchical, now)?;
             let kind = creation.kind();
             check_tier(kind, options.tier)?;
+            let version = snapshots::begin_write(
+                &tx,
+                mode,
+                &key,
+                old.as_ref(),
+                snapshots::Change::Content,
+                now,
+            )?;
             let mut reclaim = Reclaim::default();
             reclaim.add_blob(&tx, &key)?;
             let mut discard = remove_staged(&tx, &key)?;
             let length = ContentLength(creation.length());
             let entity = save_row(&tx, &key, &options, length, None, None, now)?;
             set_kind(&tx, &key, kind)?;
+            let entity = snapshots::finish_write(&tx, &key, entity, version, Some(&options.tags))?;
             discard.extend(reclaim.finish(&tx, mode)?);
             check_memory_quota(&tx, mode, 0, 0)?;
             tx.commit().map_err(db_error)?;
@@ -605,6 +661,11 @@ impl Store {
             let old = require_blob(&tx, &key, now)?;
             let sequence = page_blob(&old)?;
             guard_write(&write.guard, Some(&old), false, now)?;
+            if old.info.lifecycle.incremental.is_some() {
+                return Err(Error::Ext(
+                    crate::blob_lifecycle::LifecycleError::OperationNotAllowedOnIncrementalCopyBlob,
+                ));
+            }
             write.sequence.check(sequence)?;
             let length = old.info.length.0;
             check_within(&write.range, length)?;
@@ -615,6 +676,14 @@ impl Store {
             {
                 return Err(Error::InvalidHeader);
             }
+            let version = snapshots::begin_write(
+                &tx,
+                mode,
+                &key,
+                Some(&old),
+                snapshots::Change::Properties,
+                now,
+            )?;
             let before = load_window(&tx, &key, write.range.start, write.range.end, length)?;
             let mut after = before.clone();
             let mut reclaim = Reclaim::default();
@@ -637,6 +706,7 @@ impl Store {
             let free = reclaim.finish(&tx, mode)?;
             check_memory_quota(&tx, mode, 0, 0)?;
             let entity = touch(&tx, &key, now)?;
+            let entity = snapshots::finish_write(&tx, &key, entity, version, None)?;
             if let Some((id, data)) = staged {
                 data.persist(mode, id)?;
             }
@@ -647,49 +717,14 @@ impl Store {
         .await
     }
 
-    /// Get Page Ranges, without snapshot diffs.
-    pub(crate) async fn page_ranges(&self, key: BlobKey, query: RangeQuery) -> Result<PageRanges> {
-        self.run(move |db, _, now| {
-            let row = require_blob(db, &key, now)?;
-            page_blob(&row)?;
-            row.lease.check(
-                query.guard.lease,
-                LeaseNeed::Optional,
-                LeaseOwner::Blob,
-                now,
-            )?;
-            query.guard.conditions.check(Some(row.info.entity), true)?;
-            let length = row.info.length.0;
-            let window = match &query.window {
-                Some(range) => range.resolve(ContentLength(length))?,
-                None => 0..length,
-            };
-            let from = query.marker.map_or(window.start, |at| at.max(window.start));
-            let map = load_window(db, &key, from, window.end, length)?;
-            let mut ranges = map.allocated_ranges_in(from, window.end.saturating_sub(from));
-            let mut next = None;
-            if let Some(limit) = query.limit.map(|limit| limit as usize)
-                && ranges.len() > limit
-            {
-                next = ranges.get(limit).map(|range| range.start);
-                ranges.truncate(limit);
-            }
-            Ok(PageRanges {
-                entity: row.info.entity,
-                length,
-                ranges,
-                next,
-            })
-        })
-        .await
-    }
-
-    /// Same-instance Copy Blob of a page or append blob: the destination shares the
-    /// source's extents and keeps its type. Returns `None`, changing nothing, when the
-    /// source is a block blob. `make` builds the destination write from the source.
+    /// Same-instance Copy Blob of a page or append blob (or of a snapshot or version
+    /// of one): the destination shares the source's extents and keeps its type.
+    /// Returns `None`, changing nothing, when the source is a block blob. `make`
+    /// builds the destination write from the source.
     pub(crate) async fn copy_ranges<F>(
         &self,
         source: BlobKey,
+        selector: Option<Selector>,
         source_guard: Guard,
         dest: BlobKey,
         make: F,
@@ -700,10 +735,12 @@ impl Store {
         let hierarchical = self.hierarchical(&dest.container);
         self.run(move |db, mode, now| {
             let tx = db.transaction().map_err(db_error)?;
-            let src = require_blob(&tx, &source, now).map_err(|error| match error {
-                Error::BlobMissing | Error::ContainerMissing => Error::CopySourceMissing,
-                other => other,
-            })?;
+            let (src, content) = snapshots::resolve_source(&tx, &source, selector, now).map_err(
+                |error| match error {
+                    Error::BlobMissing | Error::ContainerMissing => Error::CopySourceMissing,
+                    other => other,
+                },
+            )?;
             if src.info.kind.is_block() {
                 return Ok(None);
             }
@@ -733,12 +770,28 @@ impl Store {
                 other => other,
             };
             check_tier(kind, options.tier)?;
-            let rows = load_window(&tx, &source, 0, src.info.length.0, src.info.length.0)?;
+            let rows = load_source_window(
+                &tx,
+                &source,
+                content.into(),
+                0,
+                src.info.length.0,
+                src.info.length.0,
+            )?;
+            let version = snapshots::begin_write(
+                &tx,
+                mode,
+                &dest,
+                old.as_ref(),
+                snapshots::Change::Content,
+                now,
+            )?;
             let mut reclaim = Reclaim::default();
             reclaim.add_blob(&tx, &dest)?;
             let mut discard = remove_staged(&tx, &dest)?;
             let entity = save_row(&tx, &dest, &options, src.info.length, None, None, now)?;
             set_kind(&tx, &dest, kind)?;
+            let entity = snapshots::finish_write(&tx, &dest, entity, version, Some(&options.tags))?;
             save_window(&tx, &dest, &RangeMap::new(src.info.length.0), &rows)?;
             discard.extend(reclaim.finish(&tx, mode)?);
             check_memory_quota(&tx, mode, 0, 0)?;

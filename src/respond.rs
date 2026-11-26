@@ -185,6 +185,7 @@ fn blob_headers(
             &http_date(copy.completed)?,
         )?;
     }
+    crate::blob_lifecycle::lifecycle_headers(headers, &info.lifecycle)?;
     Ok(())
 }
 
@@ -318,7 +319,7 @@ pub(crate) fn acl_response(
     Ok(response)
 }
 
-fn lease_elements(xml: &mut Xml, view: LeaseView) {
+pub(crate) fn lease_elements(xml: &mut Xml, view: LeaseView) {
     xml.element("LeaseStatus", view.status());
     xml.element("LeaseState", view.state.name());
     if let Some(duration) = view.duration() {
@@ -479,6 +480,7 @@ pub(crate) fn blob_properties(
         xml.element("CopyCompletionTime", &http_date(copy.completed)?);
     }
     xml.element("ServerEncrypted", "true");
+    crate::blob_lifecycle::lifecycle_elements(xml, &info.lifecycle)?;
     for (name, value) in extra {
         xml.element(name, value);
     }
@@ -798,6 +800,7 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
             "CORS is not enabled or no matching rule was found for this request.",
         ),
         Error::Page(error) => error.describe(),
+        Error::Ext(error) => error.describe(),
     })
 }
 

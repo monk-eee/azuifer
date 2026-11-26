@@ -3,12 +3,16 @@ mod blobs;
 mod blocks;
 mod containers;
 mod copy;
+mod deleted_containers;
 mod dfs_acl;
 mod dfs_data;
 mod dfs_paths;
 mod dfs_tree;
+mod expiry;
+mod immutability;
 mod listing;
 mod namespace;
+mod page_history;
 mod pages;
 mod schema;
 mod service;
@@ -41,6 +45,7 @@ use uuid::Uuid;
 pub(crate) use append::Appended;
 pub(crate) use containers::LeaseResult;
 pub(crate) use copy::SourceBytes;
+pub(crate) use deleted_containers::ListedContainer;
 pub(crate) use dfs_acl::{AclMode, RecursiveAcl, RecursiveOutcome};
 pub(crate) use dfs_data::{Append, Flush, LeaseUse};
 pub(crate) use dfs_paths::{
@@ -77,8 +82,9 @@ enum Mode {
 enum ContentSource {
     Blob,
     StagedBlock,
-    /// Bytes held by a history row; only the in-memory backend keeps them in the row.
-    History,
+    /// Bytes held by a history row (`kind` and `state_id`); only the in-memory
+    /// backend keeps block bytes in the row, and page ranges are found by the pair.
+    History(i64, i64),
 }
 
 pub(crate) struct Upload {
@@ -215,7 +221,9 @@ impl Store {
                 .db
                 .lock()
                 .map_err(|_| internal("poisoned metadata lock"))?;
-            action(&mut db, &inner.mode, inner.clock.now_millis())
+            let now = inner.clock.now_millis();
+            expiry::sweep(&mut db, &inner.mode, now)?;
+            action(&mut db, &inner.mode, now)
         })
         .await
         .map_err(|_| internal("metadata operation did not complete"))?
@@ -352,7 +360,7 @@ fn read_memory_slice(
         ContentSource::StagedBlock => {
             "SELECT COALESCE(substr(bytes, ?2, ?3), bytes) FROM staged_blocks WHERE id=?1"
         }
-        ContentSource::History => {
+        ContentSource::History(..) => {
             "SELECT COALESCE(substr(bytes, ?2, ?3), bytes) FROM blob_history
              WHERE content_id=?1 AND bytes IS NOT NULL LIMIT 1"
         }
@@ -513,6 +521,7 @@ fn save_row(
         blob_params(key),
     )
     .map_err(db_error)?;
+    expiry::clear(db, key)?;
     Ok(entity)
 }
 
@@ -548,7 +557,10 @@ fn blob(db: &Connection, key: &BlobKey, now: i64) -> Result<Option<BlobRow>> {
         )
         .optional()
         .map_err(db_error)?;
-    row.map(|row| tags::attach(db, key, row)).transpose()
+    row.map(|row| tags::attach(db, key, row))
+        .transpose()?
+        .map(|row| expiry::attach(db, key, row))
+        .transpose()
 }
 
 fn require_blob(db: &Connection, key: &BlobKey, now: i64) -> Result<BlobRow> {
@@ -661,6 +673,7 @@ fn blob_row(row: &Row<'_>, now: i64) -> rusqlite::Result<BlobRow> {
                 row.get(24)?,
             ),
             tags: Tags::new(),
+            lifecycle: Default::default(),
         },
         lease,
     })
@@ -715,6 +728,7 @@ fn recover(db: &Connection, dir: &Path) -> anyhow::Result<()> {
             !db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM blobs WHERE id=?1 UNION ALL SELECT 1 FROM staged_blocks WHERE id=?1 UNION ALL SELECT 1 FROM blob_ranges WHERE extent=?1
                  UNION ALL SELECT 1 FROM dfs_staged WHERE extent=?1
+                 UNION ALL SELECT 1 FROM history_ranges WHERE extent=?1
                  UNION ALL SELECT 1 FROM blob_history WHERE content_id=?1)",
                 [id],
                 |row| row.get::<_, bool>(0),

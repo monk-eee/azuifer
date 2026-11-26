@@ -65,6 +65,9 @@ pub(crate) async fn serve(config: Config, shutdown_on_stdin_eof: bool) -> anyhow
         .await
         .context("could not bind the admin listener")?;
     let admin_address = admin.local_addr()?;
+    if config.external_copy_sources.is_enabled() {
+        tracing::info!("copies from allowlisted external hosts are enabled");
+    }
     let clock = Clock::new();
     let namespace =
         if config.services.contains(&Service::Blob) || config.services.contains(&Service::Dfs) {

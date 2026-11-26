@@ -57,7 +57,7 @@ impl Store {
             };
             let length = window.end - window.start;
             if !info.kind.is_block() {
-                return super::pages::source_bytes(db, mode, &key, info, window);
+                return super::pages::source_bytes(db, mode, &key, source.into(), info, window);
             }
             let mut hasher = Hasher::new();
             let data = match mode {

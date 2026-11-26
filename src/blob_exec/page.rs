@@ -82,16 +82,17 @@ pub(super) async fn copy_ranges(
     source: &Resolved,
     request: &SourceRequest,
 ) -> Result<Option<Response>> {
-    let replace_metadata = request.replace_metadata;
+    let choices = (request.replace_metadata, request.copy_tags);
     let display = source.display.clone();
     let options = options.clone();
     let copied = app
         .store
         .copy_ranges(
             source.key.clone(),
+            source.selector,
             request.guard.clone(),
             key.clone(),
-            move |info: &BlobInfo| copy_write(options, info, replace_metadata, display),
+            move |info: &BlobInfo| copy_write(options, info, choices, display),
         )
         .await?;
     let Some(copied) = copied else {
@@ -149,11 +150,19 @@ fn appended(appended: Appended, checksum: (&'static str, String)) -> Result<Resp
 
 fn page_list(list: PageRanges) -> Result<Response> {
     let mut xml = Xml::root("PageList", &[]);
-    for range in &list.ranges {
-        xml.open("PageRange");
+    // A diff lists changed and cleared ranges together, in offset order.
+    let mut entries: Vec<(&std::ops::Range<u64>, &str)> = list
+        .ranges
+        .iter()
+        .map(|range| (range, "PageRange"))
+        .chain(list.cleared.iter().map(|range| (range, "ClearRange")))
+        .collect();
+    entries.sort_by_key(|(range, _)| range.start);
+    for (range, tag) in entries {
+        xml.open(tag);
         xml.element("Start", &range.start.to_string());
         xml.element("End", &(range.end - 1).to_string());
-        xml.close("PageRange");
+        xml.close(tag);
     }
     xml.element(
         "NextMarker",

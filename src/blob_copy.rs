@@ -21,12 +21,25 @@ const READ: Need = Need {
     public: Public::Blob,
 };
 
-#[derive(Clone, Debug)]
+/// A parsed `x-ms-copy-source`. Its query may carry a SAS, so `Debug` omits it.
+#[derive(Clone)]
 pub(crate) struct CopySource {
+    scheme: String,
     host: String,
     port: Option<u16>,
     path: String,
     query: Option<String>,
+}
+
+impl std::fmt::Debug for CopySource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CopySource")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
 }
 
 pub(crate) struct Resolved {
@@ -45,7 +58,11 @@ impl CopySource {
             return Err(Error::InvalidHeader);
         }
         let authority = uri.authority().ok_or(Error::InvalidHeader)?;
+        if authority.as_str().contains('@') {
+            return Err(Error::InvalidHeader);
+        }
         Ok(Self {
+            scheme: uri.scheme_str().unwrap_or_default().to_owned(),
             host: authority.host().to_ascii_lowercase(),
             port: authority.port_u16(),
             path: uri.path().to_owned(),
@@ -53,19 +70,41 @@ impl CopySource {
         })
     }
 
-    /// Resolves a source on this listener. `own_port` is the listener port and
-    /// `request_host` the `Host` header of the copy request.
-    pub(crate) fn resolve(&self, own_port: u16, request_host: Option<&str>) -> Result<Resolved> {
+    fn authority(&self) -> String {
+        match self.port {
+            Some(port) => format!("{}:{port}", self.host),
+            None => self.host.clone(),
+        }
+    }
+
+    /// Whether the URL names this listener: the host of the copy request itself,
+    /// or a loopback name on the listener's port.
+    pub(crate) fn is_local(&self, own_port: u16, request_host: Option<&str>) -> bool {
         let local_name = matches!(
             self.host.as_str(),
             "localhost" | "127.0.0.1" | "::1" | "[::1]"
         ) || self.host.ends_with(".localhost");
-        let authority = match self.port {
-            Some(port) => format!("{}:{port}", self.host),
-            None => self.host.clone(),
-        };
-        let same_host = request_host.is_some_and(|host| host.eq_ignore_ascii_case(&authority));
-        if !(same_host || local_name && self.port == Some(own_port)) {
+        let same_host =
+            request_host.is_some_and(|host| host.eq_ignore_ascii_case(&self.authority()));
+        same_host || local_name && self.port == Some(own_port)
+    }
+
+    /// The scheme, host, port, path, and query, for a fetch from another host.
+    pub(crate) fn parts(&self) -> (&str, &str, Option<u16>, &str, Option<&str>) {
+        (
+            &self.scheme,
+            &self.host,
+            self.port,
+            &self.path,
+            self.query.as_deref(),
+        )
+    }
+
+    /// Resolves a source on this listener. `own_port` is the listener port and
+    /// `request_host` the `Host` header of the copy request.
+    pub(crate) fn resolve(&self, own_port: u16, request_host: Option<&str>) -> Result<Resolved> {
+        let authority = self.authority();
+        if !self.is_local(own_port, request_host) {
             return Err(Error::Unsupported);
         }
         let account = address::host_account("blob", Some(&authority));

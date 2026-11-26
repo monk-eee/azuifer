@@ -32,9 +32,11 @@ pub(super) fn guard_write(
     now: i64,
 ) -> Result<()> {
     match old {
-        Some(row) => row
-            .lease
-            .check(guard.lease, LeaseNeed::Required, LeaseOwner::Blob, now)?,
+        Some(row) => {
+            row.lease
+                .check(guard.lease, LeaseNeed::Required, LeaseOwner::Blob, now)?;
+            row.info.lifecycle.check_write(now)?;
+        }
         None if guard.lease.is_some() => return Err(Error::LeaseNotPresentBlob),
         None => (),
     }
@@ -45,6 +47,13 @@ pub(super) fn guard_write(
     guard
         .conditions
         .check(old.map(|row| row.info.entity), false)
+}
+
+/// Checks a delete of the current blob: a write\'s checks, and no legal hold or
+/// unexpired immutability policy even in a versioned account.
+pub(super) fn guard_delete(guard: &Guard, old: &BlobRow, now: i64) -> Result<()> {
+    guard_write(guard, Some(old), false, now)?;
+    old.info.lifecycle.protection.check_delete(now)
 }
 
 /// Creates the missing parent directories of a new blob inside the writer's
@@ -134,6 +143,7 @@ pub(super) fn read_row(
             db,
             mode,
             key,
+            source.into(),
             info.length.0,
             window,
         )?));
@@ -195,6 +205,15 @@ impl Store {
             let old = blob(&tx, &key, now)?;
             guard_write(&options.guard, old.as_ref(), true, now)?;
             let mut discard = remove_staged(&tx, &key)?;
+            // A snapshot or version keeps the old ranges, so retire them only after it archived.
+            let version = snapshots::begin_write(
+                &tx,
+                mode,
+                &key,
+                old.as_ref(),
+                snapshots::Change::Content,
+                now,
+            )?;
             if let Some(old) = &old {
                 discard.extend(pages::retire(&tx, mode, &key, old.info.kind)?);
             }
@@ -209,14 +228,6 @@ impl Store {
                 data: upload.data,
                 computed_md5: Some(upload.checksums.md5),
             };
-            let version = snapshots::begin_write(
-                &tx,
-                mode,
-                &key,
-                old.as_ref(),
-                snapshots::Change::Content,
-                now,
-            )?;
             let entity = save_blob(&tx, mode, &key, &options, content, now)?;
             let entity = snapshots::finish_write(&tx, &key, entity, version, Some(&options.tags))?;
             tx.commit().map_err(db_error)?;
@@ -312,7 +323,6 @@ impl Store {
             let tx = db.transaction().map_err(db_error)?;
             let old = require_blob(&tx, &key, now)?;
             guard_write(&guard, Some(&old), false, now)?;
-            let (sequence, free) = pages::apply_change(&tx, mode, &key, &old.info, change)?;
             let version = snapshots::begin_write(
                 &tx,
                 mode,
@@ -321,6 +331,7 @@ impl Store {
                 snapshots::Change::Properties,
                 now,
             )?;
+            let (sequence, free) = pages::apply_change(&tx, mode, &key, &old.info, change)?;
             let entity = touch(&tx, &key, now)?;
             let entity = snapshots::finish_write(&tx, &key, entity, version, None)?;
             if replace {

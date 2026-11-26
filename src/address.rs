@@ -46,6 +46,15 @@ pub(crate) fn host_account(service: &str, host: Option<&str>) -> Option<AccountN
     AccountName::parse(&host_label(service, host)?).ok()
 }
 
+/// The suffix of the read-only secondary endpoint of a geo-redundant account.
+pub(crate) const SECONDARY: &str = "-secondary";
+
+/// Like [`host_account`], and also the account of a `{account}-secondary` host.
+pub(crate) fn host_account_or_secondary(service: &str, host: Option<&str>) -> Option<AccountName> {
+    let label = host_label(service, host)?;
+    AccountName::parse(label.strip_suffix(SECONDARY).unwrap_or(&label)).ok()
+}
+
 /// The path-style form of a request path, given the account from the host if any.
 pub(crate) fn logical_path(host_account: Option<&AccountName>, path: &str) -> String {
     match host_account {

@@ -68,6 +68,7 @@ pub(crate) enum Error {
     CorsPreflight,
     SourceConditionNotMet,
     Page(crate::blob_page::PageError),
+    Ext(crate::blob_lifecycle::LifecycleError),
     SnapshotsPresent,
     InvalidTag,
     TagsTooLarge,
@@ -319,6 +320,14 @@ impl ByteRange {
         Ok(Self { start, end })
     }
 
+    /// The `Range` header value that asks for this range.
+    pub(crate) fn header_value(&self) -> String {
+        match self.end {
+            Some(end) => format!("bytes={}-{end}", self.start),
+            None => format!("bytes={}-", self.start),
+        }
+    }
+
     pub(crate) fn resolve(&self, len: ContentLength) -> Result<std::ops::Range<u64>> {
         if self.start >= len.0 {
             return Err(Error::InvalidRange(len.0));
@@ -507,6 +516,8 @@ pub(crate) struct BlobInfo {
     pub(crate) kind: crate::blob_page::BlobKind,
     /// Blob index tags of a blob read for a single-blob operation; empty in listings.
     pub(crate) tags: Tags,
+    /// Expiry, immutability, and incremental copy state; loaded with the blob and by listings.
+    pub(crate) lifecycle: crate::blob_lifecycle::Lifecycle,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

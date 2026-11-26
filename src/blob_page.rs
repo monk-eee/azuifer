@@ -360,8 +360,11 @@ pub(crate) struct AppendWrite {
     pub(crate) guard: Guard,
 }
 
-/// Get Page Ranges: an optional byte window and a page of results.
+/// Get Page Ranges: an optional byte window and a page of results. `snapshot`
+/// lists a snapshot, and `previous` (`prevsnapshot`) reports the changes since it.
 pub(crate) struct RangeQuery {
+    pub(crate) snapshot: Option<crate::stamp::Ticks>,
+    pub(crate) previous: Option<crate::stamp::Ticks>,
     pub(crate) window: Option<ByteRange>,
     pub(crate) marker: Option<u64>,
     pub(crate) limit: Option<u32>,

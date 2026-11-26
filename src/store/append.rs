@@ -9,7 +9,7 @@ use super::{
     blobs::{guard_write, touch},
     check_memory_quota, db_error, internal,
     pages::stage_extent,
-    require_blob, sqlite_int,
+    require_blob, snapshots, sqlite_int,
 };
 use crate::{
     blob_page::{AppendWrite, BlobKind, MAX_APPEND_BLOCKS, PageError},
@@ -50,6 +50,14 @@ impl Store {
                 return Err(Error::BlockCountExceeded);
             }
             let committed = committed + 1;
+            let version = snapshots::begin_write(
+                &tx,
+                mode,
+                &key,
+                Some(&old),
+                snapshots::Change::Properties,
+                now,
+            )?;
             let id = Uuid::new_v4();
             let [account, container, name] = blob_params(&key);
             stage_extent(&tx, mode, id, &upload.data, size)?;
@@ -70,6 +78,7 @@ impl Store {
             .map_err(db_error)?;
             check_memory_quota(&tx, mode, 0, 0)?;
             let entity = touch(&tx, &key, now)?;
+            let entity = snapshots::finish_write(&tx, &key, entity, version, None)?;
             upload.data.persist(mode, id)?;
             tx.commit().map_err(db_error)?;
             Ok(Appended {
@@ -83,7 +92,7 @@ impl Store {
 
     /// Seal makes an append blob read-only. Sealing a sealed blob changes nothing.
     pub(crate) async fn seal_blob(&self, key: BlobKey, write: AppendWrite) -> Result<Entity> {
-        self.run(move |db, _, now| {
+        self.run(move |db, mode, now| {
             let tx = db.transaction().map_err(db_error)?;
             let old = require_blob(&tx, &key, now)?;
             let BlobKind::Append { sealed, .. } = old.info.kind else {
@@ -94,6 +103,14 @@ impl Store {
             if sealed {
                 return Ok(old.info.entity);
             }
+            let version = snapshots::begin_write(
+                &tx,
+                mode,
+                &key,
+                Some(&old),
+                snapshots::Change::Properties,
+                now,
+            )?;
             let [account, container, name] = blob_params(&key);
             tx.execute(
                 "UPDATE blobs SET sealed=1 WHERE account=?1 AND container=?2 AND name=?3",
@@ -101,6 +118,7 @@ impl Store {
             )
             .map_err(db_error)?;
             let entity = touch(&tx, &key, now)?;
+            let entity = snapshots::finish_write(&tx, &key, entity, version, None)?;
             tx.commit().map_err(db_error)?;
             Ok(entity)
         })

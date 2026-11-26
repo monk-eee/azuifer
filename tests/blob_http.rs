@@ -634,10 +634,21 @@ fn listing_uses_opaque_markers_and_rejects_unimplemented_options() {
             .unwrap()
             .contains("<Name>container</Name>")
     );
+    assert_eq!(
+        server
+            .request(
+                Method::GET,
+                "/testaccount/?comp=list&include=deleted",
+                &[],
+                b"",
+            )
+            .status(),
+        200
+    );
     error(
         server.request(
             Method::GET,
-            "/testaccount/?comp=list&include=deleted",
+            "/testaccount/?comp=list&include=system",
             &[],
             b"",
         ),
@@ -695,7 +706,7 @@ fn listing_uses_opaque_markers_and_rejects_unimplemented_options() {
         "InvalidHeaderValue",
     );
     error(
-        server.request(Method::PUT, &format!("{BLOB}?comp=expiry"), &[], b""),
+        server.request(Method::PUT, &format!("{BLOB}?comp=query"), &[], b""),
         501,
         "NotImplemented",
     );
@@ -807,7 +818,7 @@ fn newer_version_fallback_is_opt_in_and_does_not_change_auth_or_operations() {
         "AuthenticationFailed",
     );
     error(
-        compatible.request(Method::PUT, &format!("{BLOB}?comp=expiry"), &newer, b""),
+        compatible.request(Method::PUT, &format!("{BLOB}?comp=query"), &newer, b""),
         501,
         "NotImplemented",
     );
@@ -4317,17 +4328,16 @@ fn service_properties_cors_stats_and_account_information() {
             .contains("<Cors></Cors>")
     );
 
-    let stats = server.request(
-        Method::GET,
-        "/testaccount/?restype=service&comp=stats",
-        &[],
-        b"",
-    );
-    assert_eq!(stats.status(), 200);
-    let stats = stats.text().unwrap();
-    assert!(
-        stats.contains("<GeoReplication><Status>live</Status><LastSyncTime>"),
-        "{stats}"
+    // Replication statistics exist only on the secondary endpoint (see blob3_http).
+    error(
+        server.request(
+            Method::GET,
+            "/testaccount/?restype=service&comp=stats",
+            &[],
+            b"",
+        ),
+        403,
+        "InsufficientAccountPermissions",
     );
     for target in [
         "/testaccount/?restype=account&comp=properties",

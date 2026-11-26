@@ -40,7 +40,9 @@ pub(super) fn restore_parents(
     // Databases created before directory support only have file rows.
     let tx = db.transaction()?;
     for account in accounts {
-        let mut files = tx.prepare("SELECT container, name FROM blobs WHERE account=?1")?;
+        let mut files = tx.prepare(
+            "SELECT container, name FROM blobs WHERE account=?1 AND instr(container, '~')=0",
+        )?;
         let mut rows = files.query([account.as_str()])?;
         while let Some(row) = rows.next()? {
             let name: String = row.get(0)?;

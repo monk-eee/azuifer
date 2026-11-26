@@ -25,6 +25,7 @@ use percent_encoding::percent_decode_str;
 use quick_xml::{Reader, events::Event};
 use std::{collections::HashMap, time::SystemTime};
 
+mod lifecycle;
 mod page;
 
 const MAX_BLOCK_LIST_BYTES: u64 = 8 * 1024 * 1024;
@@ -118,6 +119,8 @@ pub(crate) struct SourceRequest {
     pub(crate) copy_properties: bool,
     /// Copy Blob: any `x-ms-meta-*` header replaces the source metadata.
     pub(crate) replace_metadata: bool,
+    /// `x-ms-copy-source-tag-option: COPY` takes the source blob's tags.
+    pub(crate) copy_tags: bool,
 }
 
 /// The parsed envelope of a Submit Batch request.
@@ -127,7 +130,8 @@ pub(crate) struct BatchRequest {
 }
 
 pub(crate) enum Operation {
-    ListContainers(AccountName, PageRequest, bool),
+    /// The flags ask for container metadata and for soft-deleted containers.
+    ListContainers(AccountName, PageRequest, bool, bool),
     GetServiceProperties(AccountName),
     SetServiceProperties(AccountName, UploadOptions),
     UserDelegationKey(AccountName, UploadOptions),
@@ -173,6 +177,7 @@ pub(crate) enum Operation {
     AbortCopy(BlobKey, String, Option<LeaseId>),
     DeleteBlob(BlobKey, Guard, Removal),
     Page(crate::blob_page::PageOperation),
+    Lifecycle(crate::blob_lifecycle::LifecycleOperation),
 }
 
 pub(crate) struct UploadOptions {
@@ -276,7 +281,7 @@ fn parse_with(
         return Err(Error::InvalidVersion);
     }
     let mut query = parse_query(parts.uri.query())?;
-    let host_account = address::host_account("blob", host(parts));
+    let host_account = address::host_account_or_secondary("blob", host(parts));
     let logical = address::logical_path(host_account.as_ref(), parts.uri.path());
     let target = parse_target(&logical)?;
     let keys = config
@@ -365,6 +370,7 @@ impl Operation {
             | Self::AbortCopy(..) => WRITE_BLOB,
             Self::DeleteBlob(..) => DELETE_BLOB,
             Self::Page(operation) => operation.need(),
+            Self::Lifecycle(operation) => operation.need(),
         }
     }
 }
@@ -395,12 +401,16 @@ impl Request<'_> {
                     &[],
                     false,
                 )?;
-                let metadata = match self.param("include") {
-                    None | Some("") => false,
-                    Some("metadata") => true,
-                    Some(_) => return Err(Error::Unsupported),
-                };
-                Operation::ListContainers(account, self.listing()?, metadata)
+                let (mut metadata, mut deleted) = (false, false);
+                for item in self.param("include").unwrap_or_default().split(',') {
+                    match item {
+                        "" => (),
+                        "metadata" => metadata = true,
+                        "deleted" => deleted = true,
+                        _ => return Err(Error::Unsupported),
+                    }
+                }
+                Operation::ListContainers(account, self.listing()?, metadata, deleted)
             }
             (&Method::GET, Some("service"), Some("properties")) => {
                 self.check(&["restype", "comp"], &[], false)?;
@@ -456,6 +466,9 @@ impl Request<'_> {
         let (restype, comp) = (self.param("restype"), self.param("comp"));
         let reading = matches!(*self.method, Method::GET | Method::HEAD);
         let lease = || lease_id(self.headers, "x-ms-lease-id");
+        if let Some(operation) = self.restore_container(&key)? {
+            return Ok(Operation::Lifecycle(operation));
+        }
         Ok(match (restype, comp) {
             (Some("container"), None) => {
                 self.check(
@@ -590,6 +603,9 @@ impl Request<'_> {
         if let Some(operation) = self.page_operation(&key)? {
             return Ok(Operation::Page(operation));
         }
+        if let Some(operation) = self.lifecycle_operation(&key)? {
+            return Ok(Operation::Lifecycle(operation));
+        }
         let selector = blob_snapshot::selector(self.query)?;
         Ok(match (self.method, comp) {
             (&Method::PUT, None) if self.headers.contains_key("x-ms-copy-source") => {
@@ -600,6 +616,7 @@ impl Request<'_> {
                             &[
                                 "x-ms-blob-type",
                                 "x-ms-copy-source-blob-properties",
+                                "x-ms-copy-source-tag-option",
                                 "x-ms-access-tier",
                             ],
                             TAGS,
@@ -627,6 +644,7 @@ impl Request<'_> {
                                 "x-ms-requires-sync",
                                 "x-ms-access-tier",
                                 "x-ms-rehydrate-priority",
+                                "x-ms-copy-source-tag-option",
                             ],
                             TAGS,
                             SOURCE,
@@ -873,6 +891,16 @@ impl Request<'_> {
 
     fn source(&self, range: Option<ByteRange>, copy_properties: bool) -> Result<SourceRequest> {
         let url = header(self.headers, "x-ms-copy-source")?.ok_or(Error::MissingHeader)?;
+        let copy_tags = match header(self.headers, "x-ms-copy-source-tag-option")? {
+            None | Some("REPLACE") => false,
+            Some("COPY") if self.headers.contains_key("x-ms-tags") => {
+                return Err(Error::Ext(
+                    crate::blob_lifecycle::LifecycleError::ConflictingTagOptions,
+                ));
+            }
+            Some("COPY") => true,
+            Some(_) => return Err(Error::InvalidHeader),
+        };
         Ok(SourceRequest {
             url: CopySource::parse(url)?,
             guard: Guard {
@@ -885,6 +913,7 @@ impl Request<'_> {
                 .headers
                 .keys()
                 .any(|name| name.as_str().starts_with("x-ms-meta-")),
+            copy_tags,
         })
     }
 }

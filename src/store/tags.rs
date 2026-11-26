@@ -138,7 +138,9 @@ impl Store {
             if let Some(scope) = &scope {
                 container(db, scope)?;
             }
-            let mut sql = String::from("SELECT b.container, b.name FROM blobs b WHERE b.account=?");
+            let mut sql = String::from(
+                "SELECT b.container, b.name FROM blobs b WHERE b.account=? AND instr(b.container, '~')=0",
+            );
             let mut values: Vec<Value> = vec![account.as_str().to_owned().into()];
             if let Some(scope) = &scope {
                 sql.push_str(" AND b.container=?");

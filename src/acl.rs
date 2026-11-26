@@ -8,7 +8,7 @@ use crate::{
 
 const MAX_IDENTIFIERS: usize = 5;
 const MAX_ID_LENGTH: usize = 64;
-const PERMISSIONS: &str = "racwdxyltfmeop";
+const PERMISSIONS: &str = "racwdxyltfmeopi";
 
 pub(crate) fn parse(body: &[u8]) -> Result<Vec<SignedIdentifier>> {
     if body.iter().all(u8::is_ascii_whitespace) {
