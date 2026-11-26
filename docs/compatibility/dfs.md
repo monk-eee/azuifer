@@ -72,7 +72,7 @@ File metadata written by Blob is returned in `x-ms-properties` with base64-encod
 
 ## Known differences from Azure
 
-- Path listings use binary name order, not Azure's slash-first order, and return `isDirectory` and `contentLength` as JSON booleans and numbers where Azure returns strings.
+- Path listings use binary name order, not Azure's slash-first order.
 - `If-None-Match: *` on an existing path is `409 PathAlreadyExists` (the code the Data Lake SDKs map to `ResourceExistsError`); other failed conditions are `412 ConditionNotMet`. Neither is verified against Azure here.
 - Delete Path answers `200`. Soft delete, the filesystem recreation delay, Set Path Expiry, `x-ms-expiry-*`, encryption headers and requested range checksums are not implemented; unknown `x-ms-*` headers are `501 NotImplemented`.
 - Append accepts any position, including one before the committed length, but only data contiguous with the committed bytes ever publishes. An unflushed append that created its file leaves an empty file visible to Blob.

@@ -101,7 +101,13 @@ fn subrequest(part: &str) -> Result<Subrequest> {
     else {
         return Err(Error::InvalidInput);
     };
-    if !version.starts_with("HTTP/1.") || !target.starts_with('/') {
+    // The .NET SDK sends the target without its leading slash.
+    let target = if target.starts_with('/') {
+        target.to_owned()
+    } else {
+        format!("/{target}")
+    };
+    if !version.starts_with("HTTP/1.") || target.starts_with("//") || target.contains("://") {
         return Err(Error::InvalidInput);
     }
     let mut headers = HeaderMap::new();
@@ -116,7 +122,7 @@ fn subrequest(part: &str) -> Result<Subrequest> {
     Ok(Subrequest {
         content_id,
         method: Method::from_bytes(method.as_bytes()).map_err(|_| Error::InvalidInput)?,
-        target: target.to_owned(),
+        target,
         headers,
     })
 }
@@ -359,7 +365,17 @@ mod tests {
         assert!(parse_body(b"", "b1").is_err());
         assert!(parse_body(batch(&[]).as_bytes(), "b1").is_err());
         assert!(parse_body(batch(&["GET"]).as_bytes(), "b1").is_err());
-        assert!(parse_body(batch(&["DELETE a/b HTTP/1.1\r\n\r\n"]).as_bytes(), "b1").is_err());
+        assert!(
+            parse_body(
+                batch(&["DELETE http://h/a/b HTTP/1.1\r\n\r\n"]).as_bytes(),
+                "b1"
+            )
+            .is_err()
+        );
+        assert!(parse_body(batch(&["DELETE //a/b HTTP/1.1\r\n\r\n"]).as_bytes(), "b1").is_err());
+        let slashless =
+            parse_body(batch(&["DELETE a/b HTTP/1.1\r\n\r\n"]).as_bytes(), "b1").unwrap();
+        assert_eq!(slashless[0].target, "/a/b");
         assert!(
             parse_body(
                 batch(&["DELETE /a/b HTTP/1.1\r\nbroken\r\n\r\n"]).as_bytes(),

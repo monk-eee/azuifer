@@ -1736,7 +1736,7 @@ fn dfs_directory_lifecycle_shares_identity_and_pages_the_tree() {
     let page: serde_json::Value = serde_json::from_slice(&root_page.bytes().unwrap()).unwrap();
     assert_eq!(page["paths"].as_array().unwrap().len(), 2);
     assert_eq!(page["paths"][0]["name"], "docs");
-    assert_eq!(page["paths"][0]["isDirectory"], true);
+    assert_eq!(page["paths"][0]["isDirectory"], "true");
     assert_eq!(page["paths"][1]["name"], "docs2");
     let next = emulator.dfs(
         Method::GET,
@@ -1770,8 +1770,8 @@ fn dfs_directory_lifecycle_shares_identity_and_pages_the_tree() {
     assert_eq!(page["paths"].as_array().unwrap().len(), 1);
     assert_eq!(page["paths"][0]["name"], "docs/a&b.txt");
     assert_eq!(page["paths"][0]["etag"], file_tag);
-    assert_eq!(page["paths"][0]["contentLength"], body.len());
-    assert_eq!(page["paths"][0]["isDirectory"], false);
+    assert_eq!(page["paths"][0]["contentLength"], body.len().to_string());
+    assert!(page["paths"][0].get("isDirectory").is_none());
     dfs_error(
         emulator.dfs(
             Method::GET,

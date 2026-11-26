@@ -6,3 +6,5 @@
 __pycache__/
 /.env
 /azuifer.local.toml
+tests/dotnet_sdk/bin/
+tests/dotnet_sdk/obj/

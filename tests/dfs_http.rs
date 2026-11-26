@@ -1684,14 +1684,14 @@ fn path_listing_reports_ownership_and_pages_with_continuation() {
     let top = json_body(list("recursive=false&upn=true"));
     assert_eq!(path_names(&top), ["a.txt", "dir"]);
     let file = &top["paths"][0];
-    assert_eq!(file["contentLength"], 5);
-    assert_eq!(file["isDirectory"], false);
+    assert_eq!(file["contentLength"], "5");
+    assert!(file.get("isDirectory").is_none());
     assert_eq!(file["owner"], "$superuser");
     assert_eq!(file["group"], "$superuser");
     assert_eq!(file["permissions"], "rw-r-----");
     assert!(file["etag"].as_str().unwrap().starts_with('"'));
     assert!(file["lastModified"].as_str().unwrap().ends_with("GMT"));
-    assert_eq!(top["paths"][1]["isDirectory"], true);
+    assert_eq!(top["paths"][1]["isDirectory"], "true");
     assert_eq!(top["paths"][1]["permissions"], "rwxr-x---");
 
     let mut seen = Vec::new();

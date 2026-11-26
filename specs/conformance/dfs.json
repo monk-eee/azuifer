@@ -11,7 +11,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Lists active filesystems on HNS-enabled accounts with prefix filtering and opaque local continuation tokens. The JSON uses numbers and booleans where Azure uses strings."
+      "notes": "Lists active filesystems on HNS-enabled accounts with prefix filtering and opaque local continuation tokens."
     },
     {
       "name": "Create File System",
@@ -76,7 +76,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Lists files and directories recursively or one level at a time, optionally scoped to a directory, with owner, group, and permissions, and opaque local continuation tokens in binary name order. upn is accepted but ignored. isDirectory and contentLength are JSON booleans and numbers where Azure uses strings."
+      "notes": "Lists files and directories recursively or one level at a time, optionally scoped to a directory, with owner, group, and permissions, and opaque local continuation tokens in binary name order. upn is accepted but ignored. contentLength is a string and isDirectory is the string \"true\", present only for directories."
     },
     {
       "name": "Create Path",

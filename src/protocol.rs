@@ -947,7 +947,7 @@ fn includes(value: Option<&str>) -> Result<Vec<Include>> {
         .unwrap_or_default()
         .split(',')
         .filter(|item| !item.is_empty())
-        .map(|item| match item {
+        .map(|item| match item.to_ascii_lowercase().as_str() {
             "metadata" => Ok(Include::Metadata),
             "copy" => Ok(Include::Copy),
             "uncommittedblobs" => Ok(Include::Uncommitted),
@@ -1303,6 +1303,17 @@ fn decode(value: &str, query: bool) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn include_values_are_case_insensitive() {
+        // The .NET SDK sends include=Snapshots.
+        let parsed = includes(Some("Snapshots,METADATA")).unwrap();
+        assert!(matches!(
+            parsed[..],
+            [Include::Snapshots, Include::Metadata]
+        ));
+        assert!(includes(Some("nonsense")).is_err());
+    }
     use axum::http::HeaderValue;
 
     fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {

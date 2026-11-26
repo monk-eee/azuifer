@@ -89,16 +89,20 @@ pub(super) fn list_paths(entity: Entity, page: Page<(PathEntry, Attributes)>) ->
                 PathEntry::File(entity, length) => (entity, false, length.0),
                 PathEntry::Directory(entity) => (entity, true, 0),
             };
-            Ok(serde_json::json!({
+            // Azure sends every number and boolean as a string, and omits isDirectory for files.
+            let mut path = serde_json::json!({
                 "name": name,
                 "etag": entity.etag().as_str(),
                 "lastModified": modified(entity)?,
-                "isDirectory": directory,
-                "contentLength": length,
+                "contentLength": length.to_string(),
                 "owner": attributes.owner,
                 "group": attributes.group,
                 "permissions": attributes.mode().render(),
-            }))
+            });
+            if directory {
+                path["isDirectory"] = serde_json::Value::from("true");
+            }
+            Ok(path)
         })
         .collect::<Result<Vec<_>>>()?;
     let mut response = list_response(serde_json::json!({ "paths": paths }), &page.next)?;
