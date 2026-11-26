@@ -268,8 +268,11 @@ async fn render_part(
         part.push_str(&format!("{}: {value}\r\n", name.as_str()));
     }
     part.push_str("\r\n");
-    part.push_str(&String::from_utf8_lossy(&body));
-    part.push_str("\r\n");
+    // Azure writes no extra line for an empty body; the Java SDK reads one as an error body.
+    if !body.is_empty() {
+        part.push_str(&String::from_utf8_lossy(&body));
+        part.push_str("\r\n");
+    }
     Ok(part)
 }
 
@@ -425,5 +428,7 @@ mod tests {
         .unwrap();
         assert!(ok.contains("HTTP/1.1 202 Accepted\r\n"));
         assert!(!ok.contains("Content-ID"));
+        // The Java SDK treats any text after the blank line as an error body.
+        assert!(ok.ends_with("\r\n\r\n") && !ok.ends_with("\r\n\r\n\r\n"));
     }
 }

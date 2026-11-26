@@ -66,7 +66,7 @@ AzCopy 10.34.2 (Windows amd64) ran against a debug build serving `--services blo
 
 Limits you meet when using AzCopy against Azuifer:
 
-- Files addressing is path-style only, so AzCopy needs `--from-to` (`LocalFile`, `FileLocal`, `FileFile`, `FileTrash`) and `--location File` for `list`, and `azcopy make` cannot create a share: it rejects an IP endpoint, and Files has no `{account}.file.…` host-style addressing to fall back on. Create the share with the SDK, `az storage share create`, or one HTTP request. AzCopy never creates a missing share.
+- AzCopy needs `--from-to` (`LocalFile`, `FileLocal`, `FileFile`, `FileTrash`) and `--location File` for `list`, and `azcopy make` cannot create a share: it rejects an IP endpoint, and the host-style form (which Files does serve) was not tried with AzCopy. Create the share with the SDK, `az storage share create`, or one HTTP request. AzCopy never creates a missing share.
 - Copies between Blob and Files (`BlobFile`, `FileBlob`) fail: the two services keep separate stores and Azuifer makes no outbound requests. Download to disk and upload instead.
 - A request waits up to 5 seconds for one of the 16 active-request slots before it is answered `503 ServerBusy`, which AzCopy retries.
 
