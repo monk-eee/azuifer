@@ -10,3 +10,4 @@ tests/dotnet_sdk/bin/
 tests/dotnet_sdk/obj/
 tests/js_sdk/node_modules/
 tests/java_sdk/target/
+tests/go_sdk/probe

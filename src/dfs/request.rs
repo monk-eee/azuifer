@@ -359,6 +359,13 @@ fn rename_source(headers: &HeaderMap, target: &ContainerKey) -> Result<BlobKey> 
     let decoded = percent_encoding::percent_decode_str(path_part)
         .decode_utf8()
         .map_err(|_| Error::InvalidHeader)?;
+    // The Go Data Lake client builds the source from the whole URL path, so against a
+    // path-style endpoint it names the account too: `/{account}/{filesystem}/{path}`.
+    let own = format!("/{}/{}/", target.account.as_str(), target.name.as_str());
+    let decoded = match decoded.strip_prefix(&own) {
+        Some(rest) => format!("/{}/{rest}", target.name.as_str()),
+        None => decoded.into_owned(),
+    };
     let (filesystem, path) = decoded
         .strip_prefix('/')
         .and_then(|rest| rest.split_once('/'))
