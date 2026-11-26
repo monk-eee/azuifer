@@ -325,6 +325,9 @@ pub(crate) async fn dispatch(State(app): State<Arc<App>>, request: Request) -> R
 
 /// Authenticates, authorizes, and runs one request.
 async fn handle(app: &App, parts: &Parts, body: Body, request_id: &str) -> Result<Response> {
+    if let Some(account) = crate::blob_web::account_of(parts) {
+        return crate::blob_web::serve(app, parts, account, request_id).await;
+    }
     let now = app.clock.now();
     let parsed = protocol::parse(parts, &app.config, now)?;
     if parsed.requested_version != app.config.api_version {

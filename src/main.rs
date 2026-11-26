@@ -15,6 +15,7 @@ mod blob_page;
 mod blob_sas;
 mod blob_snapshot;
 mod blob_tags;
+mod blob_web;
 mod checksum;
 mod clock;
 mod commands;

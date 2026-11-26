@@ -209,9 +209,11 @@ pub(crate) fn parse_target(path: &str) -> Result<Target> {
     Ok(match (label, blob) {
         (None | Some(""), None) => Target::Account(account),
         (Some(label), blob) => {
+            // `$web` arrives percent-encoded from some SDKs.
+            let label = decode(label, false).ok_or(Error::InvalidName)?;
             let key = ContainerKey {
                 account,
-                name: ContainerName::parse(label)?,
+                name: ContainerName::parse(&label)?,
             };
             if let Some(path) = blob {
                 if path.is_empty() {

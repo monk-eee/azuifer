@@ -63,7 +63,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Accepts x-ms-meta-* and x-ms-blob-public-access. $root, $web, and $logs are not supported. A service SAS cannot create containers."
+      "notes": "Accepts x-ms-meta-* and x-ms-blob-public-access. $web is supported for the static website; $root and $logs are not. A service SAS cannot create containers."
     },
     {
       "name": "Delete Blob",
@@ -636,6 +636,14 @@
         "Bearer"
       ],
       "notes": "Creates a snapshot that shares the blob's extent; metadata override, conditions, x-ms-if-tags, and lease id are honored. The in-memory backend copies the bytes. A snapshot does not receive its own version id."
+    },
+    {
+      "name": "Static website request",
+      "state": "known-difference",
+      "authorization": [
+        "Anonymous"
+      ],
+      "notes": "GET and HEAD on {account}.web.{domain} of the Blob listener read the $web container using the account's index document and 404 document; other methods are 405. Responses are approximations of Azure's: the HTML error pages differ, and defaultIndexDocumentPath, custom domains and the z13 host form are not served."
     },
     {
       "name": "Submit Batch",

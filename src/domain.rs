@@ -100,7 +100,10 @@ pub(crate) struct ContainerName(String);
 
 impl ContainerName {
     pub(crate) fn parse(value: &str) -> Result<Self> {
-        if matches!(value, "$root" | "$web" | "$logs") {
+        if value == "$web" {
+            return Ok(Self(value.to_owned()));
+        }
+        if matches!(value, "$root" | "$logs") {
             return Err(Error::Unsupported);
         }
         if !(3..=63).contains(&value.len())

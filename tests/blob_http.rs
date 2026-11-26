@@ -5214,3 +5214,99 @@ fn the_conformance_manifest_inventory_is_well_formed_and_never_claims_exact() {
         assert!(names.contains(&name), "{name} is inventoried");
     }
 }
+
+#[test]
+fn the_web_host_serves_the_web_container_as_a_static_website() {
+    let server = Emulator::start(None, &[]);
+    let port = server.blob_url().rsplit(':').next().unwrap().to_owned();
+    let host = format!("testaccount.web.localhost:{port}");
+    let site = |enabled: bool| {
+        format!(
+            "<StorageServiceProperties><StaticWebsite><Enabled>{enabled}</Enabled>\
+             <IndexDocument>index.html</IndexDocument>\
+             <ErrorDocument404Path>404.html</ErrorDocument404Path></StaticWebsite>\
+             </StorageServiceProperties>"
+        )
+    };
+    let settings = "/testaccount?restype=service&comp=properties";
+    assert_eq!(
+        server
+            .request(Method::PUT, settings, &[], site(true).as_bytes())
+            .status(),
+        202
+    );
+    assert_eq!(
+        server
+            .request(Method::PUT, "/testaccount/$web?restype=container", &[], b"")
+            .status(),
+        201
+    );
+    for (name, body) in [
+        ("index.html", "home"),
+        ("docs/index.html", "docs home"),
+        ("docs/page.html", "a page"),
+        ("404.html", "custom missing"),
+    ] {
+        let put = server.request(
+            Method::PUT,
+            &format!("/testaccount/$web/{name}"),
+            &[
+                ("x-ms-blob-type", "BlockBlob"),
+                ("x-ms-blob-content-type", "text/html"),
+            ],
+            body.as_bytes(),
+        );
+        assert_eq!(put.status(), 201, "{name}");
+    }
+    // SDKs may percent-encode the `$` of the container name.
+    let encoded = server.request(Method::GET, "/testaccount/%24web/index.html", &[], b"");
+    assert_eq!(encoded.status(), 200);
+    assert_eq!(encoded.text().unwrap(), "home");
+    let client = Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let get = |method: Method, path: &str| {
+        client
+            .request(method, format!("{}{path}", server.blob_url()))
+            .header("host", &host)
+            .send()
+            .unwrap()
+    };
+
+    let home = get(Method::GET, "/");
+    assert_eq!(home.status(), 200);
+    assert_eq!(home.headers()["content-type"], "text/html");
+    assert_eq!(home.text().unwrap(), "home");
+    assert_eq!(get(Method::GET, "/docs/").text().unwrap(), "docs home");
+    assert_eq!(
+        get(Method::GET, "/docs/page.html").text().unwrap(),
+        "a page"
+    );
+    let redirect = get(Method::GET, "/docs?x=1");
+    assert_eq!(redirect.status(), 302);
+    assert_eq!(redirect.headers()["location"], "/docs/?x=1");
+
+    let missing = get(Method::GET, "/nothing.html");
+    assert_eq!(missing.status(), 404);
+    assert_eq!(missing.text().unwrap(), "custom missing");
+    let head = get(Method::HEAD, "/docs/page.html");
+    assert_eq!(head.status(), 200);
+    assert_eq!(head.headers()["content-length"], "6");
+    assert_eq!(get(Method::PUT, "/index.html").status(), 405);
+
+    // Path-style access still needs authorization; the website setting does not open it.
+    assert_eq!(
+        server
+            .raw(Method::GET, "/testaccount/$web/index.html", &[], b"")
+            .status(),
+        404
+    );
+
+    // Turning the website off answers 404 with the web error code.
+    server.request(Method::PUT, settings, &[], site(false).as_bytes());
+    let off = get(Method::GET, "/");
+    assert_eq!(off.status(), 404);
+    assert_eq!(off.headers()["x-ms-error-code"], "WebContentNotFound");
+}

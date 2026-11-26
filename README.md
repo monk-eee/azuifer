@@ -88,7 +88,7 @@ Stop the container with `docker stop azuifer-quickstart` when you're done.
 
 | Service | Available on Azuifer |
 | --- | --- |
-| Blob | Containers, block, page, and append blobs, snapshots, versions and soft delete (including soft-deleted containers), blob index tags, Submit Batch, leases, Set Blob Expiry, immutability policies and legal holds, page range diffs, incremental copy, copy within the instance (external sources only when allowlisted), CORS, ACLs and public access, and service properties |
+| Blob | Containers, block, page, and append blobs, snapshots, versions and soft delete (including soft-deleted containers), blob index tags, Submit Batch, leases, Set Blob Expiry, immutability policies and legal holds, page range diffs, incremental copy, copy within the instance (external sources only when allowlisted), CORS, ACLs and public access, service properties, and a static website served from `{account}.web.localhost` |
 | Queue | Queues, metadata, ACLs, service properties, and messages with visibility timeouts, pop receipts, and TTL |
 | Table | Tables, ACLs, every entity operation, OData `$filter` and `$select`, paging, ETag concurrency, and atomic entity-group batches |
 | Azure Files | Shares, snapshots, directories, files, ranges, rename, copy, leases, permissions, and service properties |
