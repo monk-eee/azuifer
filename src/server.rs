@@ -331,6 +331,7 @@ async fn handle(app: &App, parts: &Parts, body: Body, request_id: &str) -> Resul
         account: parsed.target.account(),
         credentials: &parsed.credentials,
         connection: &connection,
+        request_id,
     };
     let operation: Operation = parsed.operation;
     blob_exec::execute(app, operation, body, &context)

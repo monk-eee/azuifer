@@ -192,9 +192,21 @@ impl Xml {
 
 /// Azure-shaped XML error with the `x-ms-error-code` header.
 pub(crate) fn xml_error(status: StatusCode, code: &'static str, message: &str) -> Response {
+    xml_error_with_details(status, code, message, &[])
+}
+
+pub(crate) fn xml_error_with_details(
+    status: StatusCode,
+    code: &'static str,
+    message: &str,
+    details: &[(&str, &str)],
+) -> Response {
     let mut xml = Xml::root("Error", &[]);
     xml.element("Code", code);
     xml.element("Message", message);
+    for (name, value) in details {
+        xml.element(name, value);
+    }
     let mut response = xml.finish("Error", status);
     response
         .headers_mut()

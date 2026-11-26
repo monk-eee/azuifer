@@ -150,6 +150,7 @@ fn az(arguments: &[&str], phase: &'static str) -> Result<Vec<u8>> {
 pub(super) enum Record<'a> {
     Sas(&'a Cassette),
     Delegation(&'a delegation::KeyCassette),
+    InvalidWindows(&'a delegation::WindowCassette),
 }
 
 pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
@@ -158,6 +159,7 @@ pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
     let scenario = match cassette {
         Record::Sas(_) => "blob-user-delegation-sas-read-only",
         Record::Delegation(_) => "blob-get-user-delegation-key",
+        Record::InvalidWindows(_) => "blob-delegation-key-invalid-windows",
     };
     let name = format!("{scenario}-{}.json", Uuid::new_v4().simple());
     let target = directory.join(name);
@@ -229,6 +231,21 @@ fn record_live_delegation_key_contract() -> Result<()> {
     save_azure(Record::Delegation(&azure))?;
     azure.compare(&local)?;
     println!("Live Azure and Azuifer matched on the selected delegation key fields");
+    Ok(())
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn record_live_delegation_window_contract() -> Result<()> {
+    let local = with_local(|client, endpoint, bearer| {
+        delegation::observe_invalid_windows(client, endpoint, bearer, Source::Synthetic)
+    })?;
+    let azure = with_azure(|client, _, endpoint, bearer| {
+        delegation::observe_invalid_windows(client, endpoint, bearer, Source::Azure)
+    })?;
+    save_azure(Record::InvalidWindows(&azure))?;
+    azure.compare(&local)?;
+    println!("Live Azure and Azuifer matched on all selected invalid delegation window responses");
     Ok(())
 }
 

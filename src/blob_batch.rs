@@ -224,6 +224,7 @@ async fn run_one(
         account: parsed.target.account(),
         credentials: &parsed.credentials,
         connection: ctx.connection,
+        request_id: ctx.request_id,
     };
     Box::pin(blob_exec::execute(
         app,

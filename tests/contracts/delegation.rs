@@ -1,6 +1,9 @@
 use super::{
     VERSION,
-    cassette::{ApiVersion, Header, Media, Scenario, Source, flat_xml, header, media},
+    cassette::{
+        ApiVersion, ErrorCode, Header, Media, Scenario, Source, error_message, flat_xml, header,
+        header_text, media,
+    },
     get_delegation_key, iso, read_bounded, require_status, with_local,
 };
 use anyhow::{Context as _, Result, anyhow, ensure};
@@ -18,6 +21,8 @@ const KEY_FIELDS: [&str; 7] = [
     "SignedVersion",
     "Value",
 ];
+const AZURE_WINDOW_FIXTURE: &[u8] =
+    include_bytes!("cassettes/blob-delegation-key-invalid-windows.json");
 const AZURE_FIXTURE: &[u8] = include_bytes!("cassettes/blob-get-user-delegation-key.json");
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -51,7 +56,7 @@ struct KeyResponse {
 impl KeyCassette {
     pub(super) fn compare(&self, local: &Self) -> Result<()> {
         ensure!(
-            self.scenario == Scenario::BlobGetUserDelegationKey
+            self.scenario == Scenario::DelegationKeyIssued
                 && self.schema_version == 1
                 && self.response == local.response,
             "Get User Delegation Key: expected {:#?}, observed {:#?}",
@@ -83,7 +88,7 @@ pub(super) fn observe(
     source: Source,
 ) -> Result<KeyCassette> {
     let (start, expiry) = (iso(-120), iso(300));
-    let response = get_delegation_key(client, endpoint, bearer, &start, &expiry)?;
+    let response = get_delegation_key(client, endpoint, bearer, Some(&start), Some(&expiry))?;
     require_status(&response, 200, "get user delegation key")?;
     let status = response.status().as_u16();
     let headers = response.headers().clone();
@@ -92,7 +97,7 @@ pub(super) fn observe(
     Ok(KeyCassette {
         schema_version: 1,
         source,
-        scenario: Scenario::BlobGetUserDelegationKey,
+        scenario: Scenario::DelegationKeyIssued,
         api_version: ApiVersion::Baseline,
         response: result,
     })
@@ -190,4 +195,204 @@ fn delegation_value_and_identifiers_are_not_serialized() {
     for raw in [key.as_str(), oid, tid, start, expiry] {
         assert!(!serialized.contains(raw));
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WindowCase {
+    MissingExpiry,
+    Reversed,
+    MalformedStart,
+}
+
+const WINDOW_CASES: [WindowCase; 3] = [
+    WindowCase::MissingExpiry,
+    WindowCase::Reversed,
+    WindowCase::MalformedStart,
+];
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Node {
+    Missing,
+    Start,
+    Expiry,
+    Other,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum NodeValue {
+    Missing,
+    Empty,
+    AsSent,
+    Other,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WindowMessage {
+    InvalidXmlNode,
+    Other,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WindowError {
+    code: ErrorCode,
+    correlation: Header,
+    node: Node,
+    value: NodeValue,
+    message: WindowMessage,
+    has_reason: bool,
+    additional_elements: usize,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WindowResponse {
+    case: WindowCase,
+    status: u16,
+    media: Media,
+    api_version_header: Header,
+    request_id: Header,
+    error_header: ErrorCode,
+    body: Option<WindowError>,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WindowCassette {
+    schema_version: u8,
+    source: Source,
+    scenario: Scenario,
+    api_version: ApiVersion,
+    responses: [WindowResponse; 3],
+}
+
+impl WindowCassette {
+    pub(super) fn compare(&self, local: &Self) -> Result<()> {
+        ensure!(
+            self.schema_version == 1
+                && self.scenario == Scenario::DelegationKeyInvalidWindows
+                && self.responses.each_ref().map(|response| response.case) == WINDOW_CASES,
+            "unexpected delegation window cassette"
+        );
+        ensure!(
+            self.responses == local.responses,
+            "delegation window responses differ: expected {:#?}, observed {:#?}",
+            self.responses,
+            local.responses
+        );
+        ensure!(
+            self.responses.iter().all(|response| {
+                response.status == 400
+                    && response.media == Media::Xml
+                    && response.api_version_header == Header::Matches
+                    && response.request_id == Header::Matches
+                    && response.body.as_ref().is_some_and(|body| {
+                        response.error_header == ErrorCode::InvalidXmlNodeValue
+                            && body.code == response.error_header
+                            && body.correlation == Header::Matches
+                            && body.message == WindowMessage::InvalidXmlNode
+                            && matches!(body.value, NodeValue::Empty | NodeValue::AsSent)
+                    })
+            }),
+            "matching responses must contain recognizable Blob XML rejections"
+        );
+        Ok(())
+    }
+}
+
+#[test]
+fn replay_delegation_window_errors_against_azure_cassette() -> Result<()> {
+    let expected: WindowCassette = serde_json::from_slice(AZURE_WINDOW_FIXTURE)
+        .map_err(|_| anyhow!("invalid Azure window cassette"))?;
+    ensure!(
+        expected.source == Source::Azure,
+        "replay requires the observed Azure fixture"
+    );
+    let local = with_local(|client, endpoint, bearer| {
+        observe_invalid_windows(client, endpoint, bearer, Source::Synthetic)
+    })?;
+    expected.compare(&local)
+}
+
+pub(super) fn observe_invalid_windows(
+    client: &Client,
+    endpoint: &Url,
+    bearer: &str,
+    source: Source,
+) -> Result<WindowCassette> {
+    let (start, expiry, earlier_expiry) = (iso(-120), iso(300), iso(120));
+    let observe_case = |case| -> Result<_> {
+        let (start, expiry) = match case {
+            WindowCase::MissingExpiry => (Some(start.as_str()), None),
+            WindowCase::Reversed => (Some(expiry.as_str()), Some(earlier_expiry.as_str())),
+            WindowCase::MalformedStart => (Some("not-a-date"), Some(expiry.as_str())),
+        };
+        let response = get_delegation_key(client, endpoint, bearer, start, expiry)?;
+        let status = response.status().as_u16();
+        let headers = response.headers().clone();
+        let body = read_bounded(response)?;
+        let body = std::str::from_utf8(&body)
+            .ok()
+            .and_then(|text| flat_xml(text, "Error"))
+            .and_then(|fields| {
+                let get = |name| fields.get(name).map(String::as_str);
+                let (message, correlation) =
+                    error_message(get("Message")?, header_text(&headers, "x-ms-request-id"));
+                let known = ["Code", "Message", "XmlNodeName", "XmlNodeValue", "Reason"];
+                let (node, sent_value) = match get("XmlNodeName") {
+                    None => (Node::Missing, None),
+                    Some("Start") => (Node::Start, start),
+                    Some("Expiry") => (Node::Expiry, expiry),
+                    Some(_) => (Node::Other, None),
+                };
+                Some(WindowError {
+                    code: ErrorCode::from_value(get("Code")),
+                    correlation,
+                    node,
+                    value: match get("XmlNodeValue") {
+                        None => NodeValue::Missing,
+                        Some("") => NodeValue::Empty,
+                        Some(value) if Some(value) == sent_value => NodeValue::AsSent,
+                        Some(_) => NodeValue::Other,
+                    },
+                    message: match message {
+                        "The value for one of the XML nodes is not in the correct format." => {
+                            WindowMessage::InvalidXmlNode
+                        }
+                        _ => WindowMessage::Other,
+                    },
+                    has_reason: fields.contains_key("Reason"),
+                    additional_elements: fields
+                        .keys()
+                        .filter(|name| !known.contains(&name.as_str()))
+                        .count(),
+                })
+            });
+        Ok(WindowResponse {
+            case,
+            status,
+            media: media(&headers),
+            api_version_header: header(&headers, "x-ms-version", |value| value == VERSION),
+            request_id: header(&headers, "x-ms-request-id", |id| {
+                Uuid::parse_str(id).is_ok()
+            }),
+            error_header: ErrorCode::from_value(header_text(&headers, "x-ms-error-code")),
+            body,
+        })
+    };
+    Ok(WindowCassette {
+        schema_version: 1,
+        source,
+        scenario: Scenario::DelegationKeyInvalidWindows,
+        api_version: ApiVersion::Baseline,
+        responses: [
+            observe_case(WindowCase::MissingExpiry)?,
+            observe_case(WindowCase::Reversed)?,
+            observe_case(WindowCase::MalformedStart)?,
+        ],
+    })
 }

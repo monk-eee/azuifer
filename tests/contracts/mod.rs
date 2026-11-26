@@ -123,17 +123,22 @@ fn get_delegation_key(
     client: &Client,
     endpoint: &Url,
     bearer: &str,
-    start: &str,
-    expiry: &str,
+    start: Option<&str>,
+    expiry: Option<&str>,
 ) -> Result<Response> {
     let url = endpoint.join("?restype=service&comp=userdelegationkey")?;
+    let mut body = "<KeyInfo>".to_owned();
+    for (name, value) in [("Start", start), ("Expiry", expiry)] {
+        if let Some(value) = value {
+            std::fmt::Write::write_fmt(&mut body, format_args!("<{name}>{value}</{name}>"))?;
+        }
+    }
+    body.push_str("</KeyInfo>");
     send(
         request(client, Method::POST, url)
             .bearer_auth(bearer)
             .header("content-type", "application/xml")
-            .body(format!(
-                "<KeyInfo><Start>{start}</Start><Expiry>{expiry}</Expiry></KeyInfo>"
-            )),
+            .body(body),
         "get user delegation key",
     )
 }
@@ -173,7 +178,7 @@ fn observe_blob(
             .context("seed test blob: missing or malformed ETag")?;
 
         let expiry = iso(900);
-        let key = get_delegation_key(client, endpoint, bearer, &iso(-120), &expiry)?;
+        let key = get_delegation_key(client, endpoint, bearer, Some(&iso(-120)), Some(&expiry))?;
         require_status(&key, 200, "get user delegation key")?;
         let key = read_bounded(key)?;
         let key = std::str::from_utf8(&key)

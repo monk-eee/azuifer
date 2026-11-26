@@ -5,6 +5,7 @@ The [Rust harness](../../tests/contracts/mod.rs) runs the same requests against 
 | Case | What it compares |
 | --- | --- |
 | Get User Delegation Key | HTTP status, selected headers, the XML fields, the requested validity window, and the decoded key length. The cassette omits the key and identifiers. |
+| Invalid delegation key windows | Missing expiry, a future expiry before the requested start, and a malformed start. Checks the Azure error code, the rejected node, the value's relation to the input, and error-message correlation. |
 | Read-only Blob user-delegation SAS | HEAD, byte-range GET, a denied DELETE, and a final GET that must return the original bytes and ETag. It checks the XML error shape and correlation fields rather than treating missing fields as equivalent. |
 
 ## Replay without Azure
@@ -13,7 +14,7 @@ The [Rust harness](../../tests/contracts/mod.rs) runs the same requests against 
 cargo test --locked --test tls_auth_http replay_
 ```
 
-The regular Rust CI suite runs both tests. The [Get User Delegation Key cassette](../../tests/contracts/cassettes/blob-get-user-delegation-key.json) was recorded against Azure and matched Azuifer on the selected fields. The [read-only SAS cassette](../../tests/contracts/cassettes/blob-user-delegation-sas-read-only.json) remains synthetic. Set `AZUIFER_CONTRACT_REPLAY_FILE` to a saved read-only SAS cassette to replay that case without running any Azure commands.
+The regular Rust CI suite runs all three cases. The [key issuance cassette](../../tests/contracts/cassettes/blob-get-user-delegation-key.json) and [invalid-window cassette](../../tests/contracts/cassettes/blob-delegation-key-invalid-windows.json) were recorded against Azure. The [read-only SAS cassette](../../tests/contracts/cassettes/blob-user-delegation-sas-read-only.json) remains synthetic. Set `AZUIFER_CONTRACT_REPLAY_FILE` to a saved read-only SAS cassette to replay that case without running any Azure commands.
 
 ## Record from a dedicated Azure test account
 
@@ -32,10 +33,13 @@ cargo test --locked --test tls_auth_http \
   contracts::live::record_live_delegation_key_contract -- --ignored --exact --nocapture
 
 cargo test --locked --test tls_auth_http \
+  contracts::live::record_live_delegation_window_contract -- --ignored --exact --nocapture
+
+cargo test --locked --test tls_auth_http \
   contracts::live::record_live_blob_sas_contract -- --ignored --exact --nocapture
 ```
 
-Both live tests check the account and tag before requesting a Storage access token. The key case uses a short validity window and does not create containers or blobs. The SAS case creates a new randomly named container and one synthetic blob, uses a short-lived SAS for the probes, then deletes the test container. Neither test lists account keys, changes account settings, or accesses existing containers. The SAS test reports cleanup failures; an interrupted run may leave an `azuifer-contract-` container.
+All live tests check the account and tag before requesting a Storage access token. The delegation cases use short validity windows and do not create containers or blobs. The SAS case creates a new randomly named container and one synthetic blob, uses a short-lived SAS for the probes, then deletes the test container. The tests do not list account keys, change account settings, or access existing containers. The SAS test reports cleanup failures; an interrupted run may leave an `azuifer-contract-` container.
 
 The recorder writes only the allowlisted contract model to `dist/azure-contracts/` (ignored by Git). It never writes request URLs, Azure resource identifiers, access tokens, SAS parameters, delegation keys, raw headers, or arbitrary bodies. For example, an ETag is recorded as matching the seeded object's ETag, not as the original value. The Azure result is saved before comparison so a mismatch can be inspected and replayed. A failed setup or an Azure response that cannot be tied to the seeded blob does not produce a cassette.
 

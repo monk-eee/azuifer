@@ -35,6 +35,7 @@ pub(crate) struct Context<'a> {
     pub(crate) account: &'a AccountName,
     pub(crate) credentials: &'a Credentials,
     pub(crate) connection: &'a Connection,
+    pub(crate) request_id: &'a str,
 }
 
 pub(crate) async fn execute(
@@ -75,6 +76,7 @@ pub(crate) async fn execute(
                 &bytes,
                 app.clock.now(),
                 app.config.api_version.as_str(),
+                ctx.request_id,
             )
         }
         Operation::ServiceStats => {

@@ -20,9 +20,11 @@ pub(super) enum Source {
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) enum Scenario {
     #[serde(rename = "blob-user-delegation-sas-read-only")]
-    BlobSasReadOnly,
+    SasReadOnly,
     #[serde(rename = "blob-get-user-delegation-key")]
-    BlobGetUserDelegationKey,
+    DelegationKeyIssued,
+    #[serde(rename = "blob-delegation-key-invalid-windows")]
+    DelegationKeyInvalidWindows,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -68,6 +70,9 @@ pub(super) enum ErrorCode {
     AuthorizationFailure,
     BlobNotFound,
     ContainerNotFound,
+    InvalidInput,
+    InvalidXmlDocument,
+    InvalidXmlNodeValue,
     Other,
 }
 
@@ -80,6 +85,9 @@ impl ErrorCode {
             Some("AuthorizationFailure") => Self::AuthorizationFailure,
             Some("BlobNotFound") => Self::BlobNotFound,
             Some("ContainerNotFound") => Self::ContainerNotFound,
+            Some("InvalidInput") => Self::InvalidInput,
+            Some("InvalidXmlDocument") => Self::InvalidXmlDocument,
+            Some("InvalidXmlNodeValue") => Self::InvalidXmlNodeValue,
             Some(_) => Self::Other,
         }
     }
@@ -134,7 +142,7 @@ impl Cassette {
         Self {
             schema_version: 1,
             source,
-            scenario: Scenario::BlobSasReadOnly,
+            scenario: Scenario::SasReadOnly,
             api_version: ApiVersion::Baseline,
             exchanges,
         }
@@ -152,7 +160,7 @@ impl Cassette {
             "unsupported cassette schema version"
         );
         ensure!(
-            value.scenario == Scenario::BlobSasReadOnly,
+            value.scenario == Scenario::SasReadOnly,
             "unexpected cassette scenario"
         );
         ensure!(
@@ -313,10 +321,18 @@ impl Exchange {
 fn xml_error(bytes: &[u8], request_id: Option<&str>) -> Option<Body> {
     let fields = flat_xml(std::str::from_utf8(bytes).ok()?, "Error")?;
     let code = ErrorCode::from_value(fields.get("Code").map(String::as_str));
-    let mut lines = fields.get("Message")?.lines();
-    let permission_message = lines
-        .next()
-        .is_some_and(|line| line.trim() == PERMISSION_MESSAGE);
+    let (message, correlation) = error_message(fields.get("Message")?, request_id);
+    Some(Body::XmlError {
+        code,
+        permission_message: message == PERMISSION_MESSAGE,
+        correlation,
+        extra_elements: fields.len() != 2,
+    })
+}
+
+pub(super) fn error_message<'a>(message: &'a str, request_id: Option<&str>) -> (&'a str, Header) {
+    let mut lines = message.lines();
+    let prefix = lines.next().unwrap_or_default().trim();
     let correlation = match (lines.next(), lines.next(), lines.next()) {
         (None, None, None) => Header::Missing,
         (Some(id), Some(time), None)
@@ -334,12 +350,7 @@ fn xml_error(bytes: &[u8], request_id: Option<&str>) -> Option<Body> {
         }
         _ => Header::Different,
     };
-    Some(Body::XmlError {
-        code,
-        permission_message,
-        correlation,
-        extra_elements: fields.len() != 2,
-    })
+    (prefix, correlation)
 }
 
 // These two Azure envelopes contain only text leaves. Never include a parse error's input.
@@ -363,6 +374,14 @@ pub(super) fn flat_xml(document: &str, root: &str) -> Option<BTreeMap<String, St
                     || fields
                         .insert(name.to_owned(), text.trim().to_owned())
                         .is_some()
+                {
+                    return None;
+                }
+            }
+            Event::Empty(tag) => {
+                if fields
+                    .insert(tag.name().as_ref().to_owned(), String::new())
+                    .is_some()
                 {
                     return None;
                 }

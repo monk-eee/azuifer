@@ -7,10 +7,10 @@
 //! seven days anyway).
 
 use crate::{
-    domain::{AccountName, Error, Result},
+    domain::{AccountName, Error, Result, xml_safe},
     oauth::Principal,
     sas::{self, Sas},
-    wire::Xml,
+    wire::{Xml, xml_error_with_details},
     xml_tree,
 };
 use axum::{http::StatusCode, response::Response};
@@ -99,8 +99,26 @@ pub(crate) fn respond(
     body: &[u8],
     now: SystemTime,
     version: &str,
+    request_id: &str,
 ) -> Result<Response> {
-    let window = parse_window(body, now)?;
+    let root = parse_key_info(body)?;
+    let window = match parse_window(&root, now) {
+        Ok(window) => window,
+        Err(WindowError::NodeValue(field, value)) if xml_safe(value) => {
+            let message = format!(
+                "The value for one of the XML nodes is not in the correct format.\nRequestId:{request_id}\nTime:{}",
+                sas::format_time(now)
+            );
+            return Ok(xml_error_with_details(
+                StatusCode::BAD_REQUEST,
+                "InvalidXmlNodeValue",
+                &message,
+                &[("XmlNodeName", field.name()), ("XmlNodeValue", value)],
+            ));
+        }
+        Err(WindowError::NodeValue(..)) => return Err(Error::InvalidXml),
+        Err(WindowError::TooLong) => return Err(Error::InvalidInput),
+    };
     let key = keys.issue(account, principal, window, now)?;
     let mut xml = Xml::root("UserDelegationKey", &[]);
     xml.element("SignedOid", &key.oid);
@@ -113,34 +131,70 @@ pub(crate) fn respond(
     Ok(xml.finish("UserDelegationKey", StatusCode::OK))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowField {
+    Start,
+    Expiry,
+}
+
+impl WindowField {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Start => "Start",
+            Self::Expiry => "Expiry",
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum WindowError<'a> {
+    NodeValue(WindowField, &'a str),
+    TooLong,
+}
+
+fn parse_key_info(body: &[u8]) -> Result<xml_tree::Node> {
+    let root = xml_tree::parse(body)?;
+    if root.name == "KeyInfo" {
+        Ok(root)
+    } else {
+        Err(Error::InvalidXml)
+    }
+}
+
 /// `<KeyInfo><Start/><Expiry/></KeyInfo>`: start defaults to now, expiry is
 /// required and at most seven days after the start. Times have whole seconds.
-fn parse_window(body: &[u8], now: SystemTime) -> Result<(SystemTime, SystemTime)> {
-    let root = xml_tree::parse(body)?;
-    if root.name != "KeyInfo" {
-        return Err(Error::InvalidXml);
-    }
+fn parse_window(
+    root: &xml_tree::Node,
+    now: SystemTime,
+) -> std::result::Result<(SystemTime, SystemTime), WindowError<'_>> {
     let whole = |time: SystemTime| {
-        let seconds = time
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| Error::InvalidInput)?
-            .as_secs();
-        Ok(UNIX_EPOCH + Duration::from_secs(seconds))
+        let seconds = time.duration_since(UNIX_EPOCH).ok()?.as_secs();
+        UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
     };
-    let read = |name| {
-        root.text_of(name)
-            .map(|text| sas::parse_time(text).map_err(|_| Error::InvalidXml))
-            .transpose()
+    let read = |field: WindowField, default| {
+        let text = root.text_of(field.name());
+        let time = match text {
+            Some(value) => sas::parse_time(value).ok(),
+            None => default,
+        };
+        let value = text.unwrap_or_default();
+        time.and_then(whole)
+            .map(|time| (time, value))
+            .ok_or(WindowError::NodeValue(field, value))
     };
-    let start = whole(read("Start")?.unwrap_or(now))?;
-    let expiry = whole(read("Expiry")?.ok_or(Error::InvalidXml)?)?;
-    if expiry <= start
-        || expiry <= now
-        || expiry
-            .duration_since(start)
-            .is_ok_and(|span| span > MAX_VALIDITY)
+    let (start, start_value) = read(WindowField::Start, Some(now))?;
+    let (expiry, expiry_value) = read(WindowField::Expiry, None)?;
+    if expiry <= now {
+        return Err(WindowError::NodeValue(WindowField::Expiry, expiry_value));
+    }
+    if expiry <= start {
+        return Err(WindowError::NodeValue(WindowField::Start, start_value));
+    }
+    if expiry
+        .duration_since(start)
+        .is_ok_and(|span| span > MAX_VALIDITY)
     {
-        return Err(Error::InvalidInput);
+        return Err(WindowError::TooLong);
     }
     Ok((start, expiry))
 }
@@ -259,54 +313,57 @@ mod tests {
         );
     }
 
-    fn window(body: &str, now: &str) -> Result<(SystemTime, SystemTime)> {
-        parse_window(body.as_bytes(), at(now))
-    }
-
     #[test]
     fn key_info_defaults_the_start_and_bounds_the_lifetime() {
-        let now = "2029-01-01T10:00:00.750Z";
-        let (start, expiry) = window(
-            "<KeyInfo><Expiry>2029-01-02T00:00:00Z</Expiry></KeyInfo>",
-            now,
-        )
-        .unwrap();
+        let now = at("2029-01-01T10:00:00.750Z");
+        let parse = |text: &str| parse_key_info(text.as_bytes()).unwrap();
+        let default = parse("<KeyInfo><Expiry>2029-01-02T00:00:00Z</Expiry></KeyInfo>");
+        let (start, expiry) = parse_window(&default, now).unwrap();
         assert_eq!(sas::format_time(start), "2029-01-01T10:00:00Z");
         assert_eq!(sas::format_time(expiry), "2029-01-02T00:00:00Z");
-        let explicit = window(
+        let explicit = parse(
             "<KeyInfo><Start>2029-01-01T09:00:00Z</Start><Expiry>2029-01-08T09:00:00Z</Expiry></KeyInfo>",
-            now,
         );
-        assert!(explicit.is_ok(), "exactly seven days is allowed");
-        let long = window(
+        assert!(
+            parse_window(&explicit, now).is_ok(),
+            "exactly seven days is allowed"
+        );
+        let long = parse(
             "<KeyInfo><Start>2029-01-01T09:00:00Z</Start><Expiry>2029-01-08T09:00:01Z</Expiry></KeyInfo>",
-            now,
         );
-        assert_eq!(long.err(), Some(Error::InvalidInput));
-        let backwards = window(
+        assert_eq!(parse_window(&long, now).err(), Some(WindowError::TooLong));
+        let backwards = parse(
             "<KeyInfo><Start>2029-01-01T11:00:00Z</Start><Expiry>2029-01-01T10:30:00Z</Expiry></KeyInfo>",
-            now,
         );
-        assert_eq!(backwards.err(), Some(Error::InvalidInput));
-        let expired = window(
+        assert_eq!(
+            parse_window(&backwards, now).err(),
+            Some(WindowError::NodeValue(
+                WindowField::Start,
+                "2029-01-01T11:00:00Z"
+            ))
+        );
+        let expired = parse(
             "<KeyInfo><Start>2028-01-01T00:00:00Z</Start><Expiry>2028-01-02T00:00:00Z</Expiry></KeyInfo>",
-            now,
-        );
-        assert_eq!(expired.err(), Some(Error::InvalidInput));
-        assert_eq!(
-            window(
-                "<KeyInfo><Start>2029-01-01T10:00:00Z</Start></KeyInfo>",
-                now
-            )
-            .err(),
-            Some(Error::InvalidXml)
         );
         assert_eq!(
-            window("<KeyInfo><Expiry>tomorrow</Expiry></KeyInfo>", now).err(),
-            Some(Error::InvalidXml)
+            parse_window(&expired, now).err(),
+            Some(WindowError::NodeValue(
+                WindowField::Expiry,
+                "2028-01-02T00:00:00Z"
+            ))
+        );
+        let missing_expiry = parse("<KeyInfo><Start>2029-01-01T10:00:00Z</Start></KeyInfo>");
+        assert_eq!(
+            parse_window(&missing_expiry, now).err(),
+            Some(WindowError::NodeValue(WindowField::Expiry, ""))
+        );
+        let invalid_expiry = parse("<KeyInfo><Expiry>tomorrow</Expiry></KeyInfo>");
+        assert_eq!(
+            parse_window(&invalid_expiry, now).err(),
+            Some(WindowError::NodeValue(WindowField::Expiry, "tomorrow"))
         );
         assert_eq!(
-            window("<Other><Expiry>2029-01-02T00:00:00Z</Expiry></Other>", now).err(),
+            parse_key_info(b"<Other><Expiry>2029-01-02T00:00:00Z</Expiry></Other>").err(),
             Some(Error::InvalidXml)
         );
     }
