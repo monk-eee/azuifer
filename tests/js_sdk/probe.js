@@ -140,6 +140,13 @@ async function toBuf(stream) { const c = []; for await (const x of stream) c.pus
     await sh.delete();
   });
 
+  await step("files: service properties round trip", async () => {
+    const props = await fsvc.getProperties();
+    check(props.hourMetrics && props.hourMetrics.enabled, "default hour metrics");
+    await fsvc.setProperties({ ...props, cors: [{ allowedOrigins: "http://app.example", allowedMethods: "GET,PUT", allowedHeaders: "*", exposedHeaders: "x-ms-*", maxAgeInSeconds: 60 }] });
+    const again = await fsvc.getProperties();
+    check(again.cors.length === 1 && again.cors[0].allowedOrigins === "http://app.example", "cors kept");
+  });
   const dsvc = new DataLakeServiceClient(`http://${account}.dfs.localhost:20003`, new DKey(account, key));
   const fs = dsvc.getFileSystemClient("jsf" + sfx);
   await step("dfs: filesystem, directory, file", async () => {

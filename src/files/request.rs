@@ -297,9 +297,7 @@ impl Operation {
     pub(crate) fn is_unsupported(self) -> bool {
         matches!(
             self,
-            Self::GetFileServiceProperties
-                | Self::SetFileServiceProperties
-                | Self::RestoreShare
+            Self::RestoreShare
                 | Self::CreateHardLink
                 | Self::CreateSymbolicLink
                 | Self::GetSymbolicLink
@@ -348,9 +346,9 @@ impl Operation {
             | Self::RenameFile
             | Self::ForceCloseFileHandles => (Level::File, "o", "w", "w"),
             Self::DeleteFile => (Level::File, "o", "d", "d"),
-            Self::GetFileServiceProperties
-            | Self::SetFileServiceProperties
-            | Self::RestoreShare
+            Self::GetFileServiceProperties => (Level::Account, "s", "r", ""),
+            Self::SetFileServiceProperties => (Level::Account, "s", "w", ""),
+            Self::RestoreShare
             | Self::CreateHardLink
             | Self::CreateSymbolicLink
             | Self::GetSymbolicLink => (Level::Account, "s", "", ""),

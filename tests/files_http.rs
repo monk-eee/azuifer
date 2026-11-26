@@ -1850,20 +1850,41 @@ fn conditional_reads_use_etags_and_modification_times() {
 }
 
 #[test]
+fn file_service_properties_round_trip_and_survive_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = format!("/{ACCOUNT}?restype=service&comp=properties");
+    {
+        let mut emulator = Emulator::start(Some(directory.path()), &[]);
+        let defaults = emulator.send("GET", &target, &[], b"");
+        assert_eq!(defaults.status, 200);
+        let text = String::from_utf8(defaults.body).unwrap();
+        assert!(text.contains("<HourMetrics><Version>1.0</Version><Enabled>true</Enabled>"));
+        assert!(text.contains("<Cors></Cors>") || text.contains("<Cors/>"));
+        assert!(text.contains("<Multichannel><Enabled>false</Enabled></Multichannel>"));
+
+        let update = "<StorageServiceProperties><Cors><CorsRule>\
+            <AllowedOrigins>http://app.example</AllowedOrigins><AllowedMethods>GET,PUT</AllowedMethods>\
+            <MaxAgeInSeconds>120</MaxAgeInSeconds><ExposedHeaders>x-ms-*</ExposedHeaders>\
+            <AllowedHeaders>*</AllowedHeaders></CorsRule></Cors></StorageServiceProperties>";
+        let set = emulator.send("PUT", &target, &[], update.as_bytes());
+        assert_eq!(set.status, 202);
+        expect_error(
+            emulator.send("PUT", &target, &[], b"<StorageServiceProperties><Cors>"),
+            400,
+            "InvalidXmlDocument",
+        );
+        emulator.shutdown();
+    }
+    let emulator = Emulator::start(Some(directory.path()), &[]);
+    let kept = String::from_utf8(emulator.send("GET", &target, &[], b"").body).unwrap();
+    assert!(kept.contains("<AllowedOrigins>http://app.example</AllowedOrigins>"));
+    assert!(kept.contains("<HourMetrics><Version>1.0</Version><Enabled>true</Enabled>"));
+}
+#[test]
 fn unsupported_operations_return_a_stable_error() {
     let emulator = Emulator::start(None, &[]);
     share(&emulator, "later");
     file(&emulator, "later", "f.txt", 1);
-    expect_error(
-        emulator.send(
-            "GET",
-            &format!("/{ACCOUNT}?restype=service&comp=properties"),
-            &[],
-            b"",
-        ),
-        501,
-        "NotImplemented",
-    );
     expect_error(
         emulator.send(
             "PUT",

@@ -193,9 +193,14 @@
     },
     {
       "name": "Get File Service Properties",
-      "state": "unsupported",
-      "authorization": [],
-      "notes": "Returns 501 NotImplemented; no CORS or protocol settings are stored."
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Returns the stored HourMetrics, MinuteMetrics, CORS rules and SMB multichannel setting, with Azure's defaults for a new account. Metrics are never collected, CORS rules are stored but not applied to requests, and multichannel has no effect."
     },
     {
       "name": "Get Permission",
@@ -432,9 +437,14 @@
     },
     {
       "name": "Set File Service Properties",
-      "state": "unsupported",
-      "authorization": [],
-      "notes": "Returns 501 NotImplemented."
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Validates and stores metrics, at most five CORS rules and the SMB multichannel flag; sections left out of the body keep their stored values. Answers 202. Nothing stored is acted on."
     },
     {
       "name": "Set Share ACL",

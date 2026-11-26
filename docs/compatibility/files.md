@@ -16,7 +16,8 @@ Clients keep their storage client and set only the file endpoint, for example th
 | Shares | List Shares, Create, Get Properties, Get/Set Metadata, Set Properties, Delete, Get/Set ACL, Get Stats, Lease, Snapshot, Create/Get Permission |
 | Directories | Create, Get Properties, Set Properties, Get/Set Metadata, Delete, List Directories and Files, Rename, List Handles, Force Close Handles |
 | Files | Create, Get, Get Properties, Set Properties, Get/Set Metadata, Delete, Put Range (update and clear), Put Range From URL (a file on this instance and account), List Ranges (including `prevsharesnapshot` diffs), Copy, Abort Copy, Lease, Rename, List/Force Close Handles |
-| Recognised, answered with `501 NotImplemented` | File service properties, Restore Share, and the NFS hard link and symbolic link operations |
+| Service | Get/Set File Service Properties: metrics, CORS rules and the SMB multichannel flag are validated and stored per account and returned on request, but never acted on |
+| Recognised, answered with `501 NotImplemented` | Restore Share, and the NFS hard link and symbolic link operations |
 
 Share, directory and file URIs are `/{account}/{share}/{path}`. Resources are selected by `restype` and `comp` exactly as in the Microsoft reference; an unknown combination returns `InvalidQueryParameterValue` and a known one with the wrong verb returns `UnsupportedHttpVerb`.
 

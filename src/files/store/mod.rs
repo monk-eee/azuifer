@@ -147,6 +147,7 @@ impl Store {
         };
         db.pragma_update(None, "foreign_keys", true)?;
         db.execute_batch(SCHEMA)?;
+        db.execute_batch(super::service::SCHEMA)?;
         if let Mode::Disk { extents, .. } = &mode {
             content::recover(&db, extents).context("could not recover unreferenced content")?;
         }

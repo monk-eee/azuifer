@@ -162,28 +162,11 @@ impl ServiceProperties {
             ("MinuteMetrics", &self.minute_metrics),
         ] {
             if let Some(metrics) = metrics {
-                xml.open(tag);
-                xml.element("Version", &metrics.version);
-                xml.element("Enabled", bool_text(metrics.enabled));
-                if let Some(include) = metrics.include_apis {
-                    xml.element("IncludeAPIs", bool_text(include));
-                }
-                write_retention(&mut xml, "RetentionPolicy", &metrics.retention);
-                xml.close(tag);
+                write_metrics(&mut xml, tag, metrics);
             }
         }
         if let Some(rules) = &self.cors {
-            xml.open("Cors");
-            for rule in rules {
-                xml.open("CorsRule");
-                xml.element("AllowedOrigins", &rule.allowed_origins);
-                xml.element("AllowedMethods", &rule.allowed_methods);
-                xml.element("MaxAgeInSeconds", &rule.max_age_seconds.to_string());
-                xml.element("ExposedHeaders", &rule.exposed_headers);
-                xml.element("AllowedHeaders", &rule.allowed_headers);
-                xml.close("CorsRule");
-            }
-            xml.close("Cors");
+            write_cors(&mut xml, rules);
         }
         if let Some(version) = &self.default_service_version {
             xml.element("DefaultServiceVersion", version);
@@ -210,6 +193,31 @@ impl ServiceProperties {
         }
         xml
     }
+}
+
+pub(crate) fn write_metrics(xml: &mut Xml, tag: &str, metrics: &Metrics) {
+    xml.open(tag);
+    xml.element("Version", &metrics.version);
+    xml.element("Enabled", bool_text(metrics.enabled));
+    if let Some(include) = metrics.include_apis {
+        xml.element("IncludeAPIs", bool_text(include));
+    }
+    write_retention(xml, "RetentionPolicy", &metrics.retention);
+    xml.close(tag);
+}
+
+pub(crate) fn write_cors(xml: &mut Xml, rules: &[CorsRule]) {
+    xml.open("Cors");
+    for rule in rules {
+        xml.open("CorsRule");
+        xml.element("AllowedOrigins", &rule.allowed_origins);
+        xml.element("AllowedMethods", &rule.allowed_methods);
+        xml.element("MaxAgeInSeconds", &rule.max_age_seconds.to_string());
+        xml.element("ExposedHeaders", &rule.exposed_headers);
+        xml.element("AllowedHeaders", &rule.allowed_headers);
+        xml.close("CorsRule");
+    }
+    xml.close("Cors");
 }
 
 fn bool_text(value: bool) -> &'static str {
@@ -255,7 +263,7 @@ fn parse_logging(node: &Node) -> Result<Logging> {
     })
 }
 
-fn parse_metrics(node: &Node) -> Result<Metrics> {
+pub(crate) fn parse_metrics(node: &Node) -> Result<Metrics> {
     let enabled = node.flag("Enabled")?.ok_or(Error::InvalidXml)?;
     let include_apis = node.flag("IncludeAPIs")?;
     if enabled && include_apis.is_none() {
@@ -277,7 +285,7 @@ fn items(text: &str) -> Vec<&str> {
     text.split(',').map(str::trim).collect()
 }
 
-fn parse_cors(node: &Node) -> Result<Vec<CorsRule>> {
+pub(crate) fn parse_cors(node: &Node) -> Result<Vec<CorsRule>> {
     let rules = node
         .named("CorsRule")
         .map(|rule| {

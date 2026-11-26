@@ -9,6 +9,7 @@ using Azure.Storage.Blobs.Batch;
 using Azure.Storage.Files.DataLake;
 using Azure.Storage.Files.DataLake.Models;
 using Azure.Storage.Files.Shares;
+using Azure.Storage.Files.Shares.Models;
 using Azure.Storage.Queues;
 using Azure.Storage.Sas;
 
@@ -245,6 +246,15 @@ await Step("files: metadata, ranges, delete share", async () =>
     await share.DeleteAsync();
 });
 
+await Step("files: service properties round trip", async () =>
+{
+    var props = (await fsvc.GetPropertiesAsync()).Value;
+    Check(props.HourMetrics.Enabled, "default hour metrics");
+    props.Cors = new List<ShareCorsRule> { new ShareCorsRule { AllowedOrigins = "http://app.example", AllowedMethods = "GET,PUT", AllowedHeaders = "*", ExposedHeaders = "x-ms-*", MaxAgeInSeconds = 60 } };
+    await fsvc.SetPropertiesAsync(props);
+    var again = (await fsvc.GetPropertiesAsync()).Value;
+    Check(again.Cors.Count == 1 && again.Cors[0].AllowedOrigins == "http://app.example", "cors kept");
+});
 // ---------------- DFS
 var dsvc = new DataLakeServiceClient(new Uri($"http://127.0.0.1:10003/{account}"), cred);
 var fs = dsvc.GetFileSystemClient("dnf" + suffix);

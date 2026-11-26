@@ -340,12 +340,26 @@ pub(super) async fn execute(ctx: Context<'_>, body: Body) -> Result<Response> {
                 .await?;
             lease_response(outcome, &node.etag, node.modified)
         }
-        O::GetFileServiceProperties
-        | O::SetFileServiceProperties
-        | O::RestoreShare
-        | O::CreateHardLink
-        | O::CreateSymbolicLink
-        | O::GetSymbolicLink => Err(Error::NotImplemented),
+        O::GetFileServiceProperties => {
+            let properties = ctx
+                .app
+                .store
+                .service_properties(ctx.target.account.clone())
+                .await?;
+            Ok(properties.to_response())
+        }
+        O::SetFileServiceProperties => {
+            let bytes = read_small(&ctx, body).await?;
+            let patch = super::service::Patch::parse(&bytes)?;
+            ctx.app
+                .store
+                .set_service_properties(ctx.target.account.clone(), patch)
+                .await?;
+            Ok(empty(StatusCode::ACCEPTED))
+        }
+        O::RestoreShare | O::CreateHardLink | O::CreateSymbolicLink | O::GetSymbolicLink => {
+            Err(Error::NotImplemented)
+        }
     }
 }
 
