@@ -10,6 +10,7 @@ mod content;
 mod fs;
 mod nodes;
 mod shares;
+mod soft_delete;
 #[cfg(test)]
 mod tests;
 
@@ -82,6 +83,8 @@ struct Inner {
 pub(super) struct Env {
     pub(super) mode: Mode,
     pub(super) clock: Clock,
+    /// Days a deleted share stays restorable; zero deletes at once.
+    pub(super) retention_days: std::sync::atomic::AtomicU32,
 }
 
 pub(super) enum Mode {
@@ -148,12 +151,17 @@ impl Store {
         db.pragma_update(None, "foreign_keys", true)?;
         db.execute_batch(SCHEMA)?;
         db.execute_batch(super::service::SCHEMA)?;
+        db.execute_batch(soft_delete::SCHEMA)?;
         if let Mode::Disk { extents, .. } = &mode {
             content::recover(&db, extents).context("could not recover unreferenced content")?;
         }
         Ok(Self(Arc::new(Inner {
             db: Mutex::new(db),
-            env: Env { mode, clock },
+            env: Env {
+                mode,
+                clock,
+                retention_days: std::sync::atomic::AtomicU32::new(0),
+            },
         })))
     }
 
@@ -247,6 +255,7 @@ pub(super) fn share_row(row: &Row<'_>) -> rusqlite::Result<ShareRow> {
             access_tier_changed: row.get(7)?,
             metadata: from_json(&row.get::<_, String>(8)?)?,
             lease: optional_json::<Lease>(row, 10)?,
+            deleted: None,
         },
         acl: from_json(&row.get::<_, String>(9)?)?,
     })

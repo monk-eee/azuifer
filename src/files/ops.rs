@@ -357,7 +357,28 @@ pub(super) async fn execute(ctx: Context<'_>, body: Body) -> Result<Response> {
                 .await?;
             Ok(empty(StatusCode::ACCEPTED))
         }
-        O::RestoreShare | O::CreateHardLink | O::CreateSymbolicLink | O::GetSymbolicLink => {
+        O::RestoreShare => {
+            let name = ctx
+                .headers
+                .get("x-ms-deleted-share-name")?
+                .ok_or(Error::MissingRequiredHeader)?;
+            let version = ctx
+                .headers
+                .get("x-ms-deleted-share-version")?
+                .ok_or(Error::MissingRequiredHeader)?;
+            let share = ctx
+                .app
+                .store
+                .restore_share(
+                    ctx.target.account.clone(),
+                    name.to_owned(),
+                    version.to_owned(),
+                    ctx.share()?.share.as_str().to_owned(),
+                )
+                .await?;
+            with_etag(StatusCode::CREATED, &share.etag, share.modified)
+        }
+        O::CreateHardLink | O::CreateSymbolicLink | O::GetSymbolicLink => {
             Err(Error::NotImplemented)
         }
     }
@@ -434,6 +455,7 @@ async fn list_shares(ctx: &Context<'_>) -> Result<Response> {
                 after,
                 limit,
                 snapshots: includes.iter().any(|include| include == "snapshots"),
+                deleted: includes.iter().any(|include| include == "deleted"),
             },
         )
         .await?;

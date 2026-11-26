@@ -66,6 +66,7 @@ pub(crate) async fn router(
         tokio::task::spawn_blocking(move || Store::open(location.as_deref(), limit, store_clock))
             .await
             .context("file storage initialization did not complete")??;
+    store.set_share_retention_days(config.share_retention_days);
     let app = Arc::new(App {
         config,
         store,

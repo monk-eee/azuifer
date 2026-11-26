@@ -297,10 +297,7 @@ impl Operation {
     pub(crate) fn is_unsupported(self) -> bool {
         matches!(
             self,
-            Self::RestoreShare
-                | Self::CreateHardLink
-                | Self::CreateSymbolicLink
-                | Self::GetSymbolicLink
+            Self::CreateHardLink | Self::CreateSymbolicLink | Self::GetSymbolicLink
         )
     }
 
@@ -308,7 +305,7 @@ impl Operation {
     pub(super) fn needs(self) -> Needs {
         let (level, types, account, service) = match self {
             Self::ListShares => (Level::Account, "s", "l", ""),
-            Self::CreateShare => (Level::Share, "c", "cw", ""),
+            Self::CreateShare | Self::RestoreShare => (Level::Share, "c", "cw", ""),
             Self::GetShareProperties
             | Self::GetShareMetadata
             | Self::GetShareAcl
@@ -348,10 +345,9 @@ impl Operation {
             Self::DeleteFile => (Level::File, "o", "d", "d"),
             Self::GetFileServiceProperties => (Level::Account, "s", "r", ""),
             Self::SetFileServiceProperties => (Level::Account, "s", "w", ""),
-            Self::RestoreShare
-            | Self::CreateHardLink
-            | Self::CreateSymbolicLink
-            | Self::GetSymbolicLink => (Level::Account, "s", "", ""),
+            Self::CreateHardLink | Self::CreateSymbolicLink | Self::GetSymbolicLink => {
+                (Level::Account, "s", "", "")
+            }
         };
         Needs {
             level,

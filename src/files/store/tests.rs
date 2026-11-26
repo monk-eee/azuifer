@@ -142,6 +142,78 @@ async fn fixed_share_leases_expire_on_the_manual_clock() {
 }
 
 #[tokio::test]
+async fn a_deleted_share_is_restorable_until_its_retention_ends() {
+    let clock = Clock::new();
+    let store = Store::open(None, 1 << 20, clock.clone()).unwrap();
+    store.set_share_retention_days(2);
+    create_share(&store, "keep").await;
+    new_file(&store, "keep", "a.txt", 4).await;
+    write(&store, "keep", "a.txt", 0, b"data").await.unwrap();
+    store
+        .delete_share(share_ref("keep"), None, SnapshotPolicy::Refuse)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.share(share_ref("keep")).await.unwrap_err(),
+        Error::ShareNotFound,
+        "the name is free at once"
+    );
+    let account = AccountName::parse("testaccount").unwrap();
+    let request = |deleted| ListSharesRequest {
+        prefix: String::new(),
+        after: None,
+        limit: 10,
+        snapshots: false,
+        deleted,
+    };
+    let (live, _) = store
+        .list_shares(account.clone(), request(false))
+        .await
+        .unwrap();
+    assert!(live.is_empty());
+    let (all, _) = store
+        .list_shares(account.clone(), request(true))
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 1);
+    let deleted = all[0].deleted.clone().unwrap();
+    assert_eq!((all[0].name.as_str(), deleted.remaining_days), ("keep", 2));
+
+    clock.advance(Duration::from_secs(86_400 + 60));
+    let restored = store
+        .restore_share(
+            account.clone(),
+            "keep".into(),
+            deleted.version.clone(),
+            "again".into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(restored.name, "again");
+    assert_eq!(read(&store, "again", "a.txt").await, b"data");
+    assert_eq!(
+        store
+            .restore_share(
+                account.clone(),
+                "keep".into(),
+                deleted.version,
+                "again".into()
+            )
+            .await
+            .unwrap_err(),
+        Error::ShareNotFound,
+        "a version restores once"
+    );
+
+    store
+        .delete_share(share_ref("again"), None, SnapshotPolicy::Refuse)
+        .await
+        .unwrap();
+    clock.advance(Duration::from_secs(3 * 86_400));
+    let (after, _) = store.list_shares(account, request(true)).await.unwrap();
+    assert!(after.is_empty(), "an expired share is erased");
+}
+#[tokio::test]
 async fn a_breaking_share_lease_becomes_broken_after_its_period() {
     let clock = Clock::new();
     let store = Store::open(None, 1 << 20, clock.clone()).unwrap();

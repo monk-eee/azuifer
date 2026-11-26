@@ -65,6 +65,9 @@ pub(crate) struct Options {
     versioning_accounts: Option<String>,
     #[arg(long, env = "AZUIFER_FILE_PORT", global = true)]
     file_port: Option<u16>,
+    /// Days a deleted Azure Files share stays restorable with Restore Share; 0 deletes at once.
+    #[arg(long, env = "AZUIFER_SHARE_RETENTION_DAYS", global = true)]
+    share_retention_days: Option<u32>,
     /// Comma-separated hosts (`host`, `host:port`, `*.domain`) that Copy Blob and the
     /// `...From URL` operations may read from other servers. Off by default.
     #[arg(long, env = "AZUIFER_ALLOW_EXTERNAL_COPY_SOURCES", global = true)]
@@ -144,6 +147,7 @@ struct FileConfig {
     hns_accounts: Option<String>,
     versioning_accounts: Option<String>,
     file_port: Option<u16>,
+    share_retention_days: Option<u32>,
     allow_external_copy_sources: Option<String>,
     otlp_endpoint: Option<String>,
     otlp_protocol: Option<telemetry::OtlpProtocol>,
@@ -186,6 +190,7 @@ pub(crate) struct Config {
     pub(crate) accounts: HashMap<AccountName, Vec<Vec<u8>>>,
     pub(crate) hns_accounts: HashSet<AccountName>,
     pub(crate) versioning_accounts: HashSet<AccountName>,
+    pub(crate) share_retention_days: u32,
     pub(crate) external_copy_sources: crate::blob_external::Allowlist,
     pub(crate) tls: Option<crate::tls::Settings>,
     pub(crate) oauth: crate::oauth::OAuth,
@@ -344,6 +349,14 @@ impl Config {
                 .unwrap_or_default(),
         )
         .context("invalid allow-external-copy-sources")?;
+        let share_retention_days = options
+            .share_retention_days
+            .or(file.share_retention_days)
+            .unwrap_or(0);
+        ensure!(
+            share_retention_days <= 365,
+            "share-retention-days must be between 0 and 365"
+        );
         let test_clock = options.test_clock.or(file.test_clock).unwrap_or(false);
         ensure!(
             !test_clock || binding.is_loopback(),
@@ -375,6 +388,7 @@ impl Config {
             accounts,
             hns_accounts,
             versioning_accounts,
+            share_retention_days,
             external_copy_sources,
             tls: crate::tls::Settings::resolve(options.tls, file.tls)?,
             oauth: crate::oauth::OAuth::resolve(options.oauth, file.oauth, binding.is_loopback())?,

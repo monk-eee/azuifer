@@ -29,6 +29,7 @@ The [product specification](../specs/azuifer.md) describes the target. An ADR re
 | [ADR-0023: Serve Blob calls addressed to the `blob` host on the DFS listener](0023-serve-blob-calls-addressed-to-the-blob-host-on-the-dfs-listener.md) | Proposed |
 | [ADR-0024: Fetch external copy sources only from allowlisted hosts](0024-fetch-external-copy-sources-only-from-allowlisted-hosts.md) | Proposed |
 | [ADR-0025: Serve the static website from the `{account}.web.{domain}` host of the Blob listener](0025-serve-the-static-website-from-the-web-host.md) | Proposed |
+| [ADR-0026: Keep deleted shares under a hidden name and restore them by renaming](0026-keep-deleted-shares-under-a-hidden-name.md) | Proposed |
 
 Search the index before drafting a record. If a change needs a new decision, use the [template](template.md), pick the next four-digit number, and add the proposed record to the index. Keep separate decisions in separate records.
 
