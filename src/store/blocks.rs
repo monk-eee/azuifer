@@ -1,11 +1,17 @@
 use super::{
-    ContentSource, Mode, Store, Uploaded, UploadedData, blob, blob_params, check_memory_quota,
-    container, db_error, internal, io_error, open_extent, read_memory_slice, reclaim,
-    remove_staged, row_uint, save_blob, sqlite_int, staging_file,
+    Content, ContentSource, Mode, Store, Uploaded, UploadedData, blob, blob_params,
+    blobs::guard_write, check_memory_quota, container, db_error, internal, io_error, namespace,
+    open_extent, pages::block_length, read_memory_slice, reclaim, remove_staged, row_uint,
+    save_blob, snapshots, sqlite_int, staging_file,
 };
-use crate::domain::{
-    BlobKey, BlobWrite, BlockId, BlockList, BlockListKind, BlockSelection, BlockSource, Condition,
-    ContentLength, Entity, Error, Result,
+use crate::{
+    blob_page::require_block,
+    conditions::Guard,
+    domain::{
+        BlobKey, BlobWrite, BlockId, BlockList, BlockListKind, BlockSelection, BlockSource,
+        ContentLength, Entity, Error, Result,
+    },
+    lease::{LeaseId, LeaseNeed, LeaseOwner},
 };
 use rusqlite::{Connection, OptionalExtension as _, params};
 use std::{
@@ -30,10 +36,24 @@ impl Store {
         key: BlobKey,
         block: BlockId,
         upload: Uploaded,
+        lease: Option<LeaseId>,
     ) -> Result<()> {
-        self.run(move |db, mode| {
+        let hierarchical = self.hierarchical(&key.container);
+        self.run(move |db, mode, now| {
             let tx = db.transaction().map_err(db_error)?;
             container(&tx, &key.container)?;
+            if hierarchical {
+                namespace::validate_staged_path(&tx, &key)?;
+            }
+            match blob(&tx, &key, now)? {
+                Some(row) => {
+                    require_block(row.info.kind)?;
+                    row.lease
+                        .check(lease, LeaseNeed::Required, LeaseOwner::Blob, now)?;
+                }
+                None if lease.is_some() => return Err(Error::LeaseNotPresentBlob),
+                None => (),
+            }
             let [account, container, name] = blob_params(&key);
             let (width, count): (Option<u32>, u32) = tx.query_row(
                 "SELECT MIN(width), COUNT(*) FROM staged_blocks WHERE account=?1 AND container=?2 AND name=?3",
@@ -72,19 +92,23 @@ impl Store {
         key: BlobKey,
         options: BlobWrite,
         blocks: Vec<BlockSelection>,
-        md5: Option<[u8; 16]>,
         limit: u64,
     ) -> Result<Entity> {
-        self.run(move |db, mode| {
+        let hierarchical = self.hierarchical(&key.container);
+        self.run(move |db, mode, now| {
             let tx = db.transaction().map_err(db_error)?;
             container(&tx, &key.container)?;
-            let old = blob(&tx, &key)?;
-            options
-                .condition
-                .check(old.as_ref().map(|b| b.entity), false)?;
+            if hierarchical {
+                namespace::prepare_file(&tx, &key, now)?;
+            }
+            let old = blob(&tx, &key, now)?;
+            guard_write(&options.guard, old.as_ref(), true, now)?;
+            if let Some(old) = &old {
+                require_block(old.info.kind)?;
+            }
             let staged: HashMap<_, _> = staged(&tx, &key)?.into_iter().collect();
             let committed: HashMap<_, _> = if let Some(old) = &old {
-                committed(&tx, &key, old.entity.id, old.length.0)?
+                committed(&tx, &key, old.info.entity.id, old.info.length.0)?
                     .into_iter()
                     .collect()
             } else {
@@ -108,7 +132,7 @@ impl Store {
                 resolved.push((id, offset, range));
             }
             let retired = staged.values().map(|block| block.length).sum::<u64>()
-                + old.as_ref().map_or(0, |blob| blob.length.0);
+                + old.as_ref().map_or(0, |row| block_length(&row.info));
             check_memory_quota(&tx, mode, retired, total)?;
             let mut assembled = match mode {
                 Mode::Disk { extents, .. } => {
@@ -119,15 +143,21 @@ impl Store {
             for (_, _, block) in &resolved {
                 copy_block(&tx, mode, block, assembled.writer())?;
             }
-            let entity = save_blob(
+            let content = Content {
+                length: ContentLength(total),
+                data: assembled,
+                computed_md5: None,
+            };
+            let version = snapshots::begin_write(
                 &tx,
                 mode,
                 &key,
-                &options,
-                ContentLength(total),
-                assembled,
-                md5,
+                old.as_ref(),
+                snapshots::Change::Content,
+                now,
             )?;
+            let entity = save_blob(&tx, mode, &key, &options, content, now)?;
+            let entity = snapshots::finish_write(&tx, &key, entity, version, Some(&options.tags))?;
             let discard = remove_staged(&tx, &key)?;
             {
                 let [account, container, name] = blob_params(&key);
@@ -150,7 +180,7 @@ impl Store {
             }
             tx.commit().map_err(db_error)?;
             if let Some(old) = old {
-                reclaim(mode, old.entity.id);
+                reclaim(mode, old.info.entity.id);
             }
             for id in discard {
                 reclaim(mode, id);
@@ -164,24 +194,39 @@ impl Store {
         &self,
         key: BlobKey,
         kind: BlockListKind,
-        condition: Condition,
+        guard: Guard,
     ) -> Result<BlockList> {
-        self.run(move |db, _| {
+        let hierarchical = self.hierarchical(&key.container);
+        self.run(move |db, _, now| {
             container(db, &key.container)?;
-            let blob = blob(db, &key)?;
+            if hierarchical {
+                namespace::validate_staged_path(db, &key)?;
+            }
+            let row = blob(db, &key, now)?;
             let uncommitted = if kind == BlockListKind::Committed {
                 None
             } else {
                 Some(staged(db, &key)?)
             };
-            if blob.is_none() && uncommitted.as_ref().is_none_or(Vec::is_empty) {
+            if row.is_none() && uncommitted.as_ref().is_none_or(Vec::is_empty) {
                 return Err(Error::BlobMissing);
             }
-            let entity = blob.as_ref().map(|blob| blob.entity);
-            condition.check(entity, true)?;
+            let blob = row.as_ref().map(|row| &row.info);
+            if let Some(blob) = blob {
+                require_block(blob.kind)?;
+            }
+            if let Some(row) = &row {
+                row.lease
+                    .check(guard.lease, LeaseNeed::Optional, LeaseOwner::Blob, now)?;
+            } else if guard.lease.is_some() {
+                return Err(Error::LeaseNotPresentBlob);
+            }
+            let entity = blob.map(|blob| blob.entity);
+            guard.conditions.check(entity, true)?;
+            guard.conditions.check_tags(blob.map(|blob| &blob.tags))?;
             let committed = if kind == BlockListKind::Uncommitted {
                 None
-            } else if let Some(blob) = &blob {
+            } else if let Some(blob) = blob {
                 Some(committed(db, &key, blob.entity.id, blob.length.0)?)
             } else {
                 Some(Vec::new())

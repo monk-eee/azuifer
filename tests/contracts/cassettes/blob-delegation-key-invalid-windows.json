@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "scenario": "blob-delegation-key-invalid-windows",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "case": "missing_expiry",
+      "status": 400,
+      "media": "xml",
+      "api_version_header": "matches",
+      "request_id": "matches",
+      "error_header": "invalid_xml_node_value",
+      "body": {
+        "code": "invalid_xml_node_value",
+        "correlation": "matches",
+        "node": "expiry",
+        "value": "empty",
+        "message": "invalid_xml_node",
+        "has_reason": false,
+        "additional_elements": 0
+      }
+    },
+    {
+      "case": "reversed",
+      "status": 400,
+      "media": "xml",
+      "api_version_header": "matches",
+      "request_id": "matches",
+      "error_header": "invalid_xml_node_value",
+      "body": {
+        "code": "invalid_xml_node_value",
+        "correlation": "matches",
+        "node": "start",
+        "value": "as_sent",
+        "message": "invalid_xml_node",
+        "has_reason": false,
+        "additional_elements": 0
+      }
+    },
+    {
+      "case": "malformed_start",
+      "status": 400,
+      "media": "xml",
+      "api_version_header": "matches",
+      "request_id": "matches",
+      "error_header": "invalid_xml_node_value",
+      "body": {
+        "code": "invalid_xml_node_value",
+        "correlation": "matches",
+        "node": "start",
+        "value": "as_sent",
+        "message": "invalid_xml_node",
+        "has_reason": false,
+        "additional_elements": 0
+      }
+    }
+  ]
+}

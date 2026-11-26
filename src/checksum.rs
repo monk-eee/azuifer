@@ -49,14 +49,19 @@ pub(crate) struct Checksums {
 }
 
 impl Checksums {
+    pub(crate) fn md5_text(&self) -> String {
+        STANDARD.encode(self.md5)
+    }
+
+    pub(crate) fn crc64_text(&self) -> String {
+        STANDARD.encode(self.crc64.to_le_bytes())
+    }
+
     pub(crate) fn response(&self, requested: Option<Checksum>) -> (&'static str, String) {
         if matches!(requested, Some(Checksum::Md5(_))) {
-            ("content-md5", STANDARD.encode(self.md5))
+            ("content-md5", self.md5_text())
         } else {
-            (
-                "x-ms-content-crc64",
-                STANDARD.encode(self.crc64.to_le_bytes()),
-            )
+            ("x-ms-content-crc64", self.crc64_text())
         }
     }
 }

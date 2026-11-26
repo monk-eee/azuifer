@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "scenario": "blob-get-user-delegation-key",
+  "api_version": "2023-11-03",
+  "response": {
+    "status": 200,
+    "media": "xml",
+    "api_version_header": "matches",
+    "request_id": "matches",
+    "date": "matches",
+    "object_id_is_uuid": true,
+    "tenant_id_is_uuid": true,
+    "start_matches": true,
+    "expiry_matches": true,
+    "service_is_blob": true,
+    "signed_version_matches": true,
+    "decoded_key_bytes": 32,
+    "extra_elements": 0
+  }
+}

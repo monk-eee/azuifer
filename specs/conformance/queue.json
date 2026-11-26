@@ -1,0 +1,197 @@
+{
+  "service": "queue",
+  "api_version": "2023-11-03",
+  "operations": [
+    {
+      "name": "Clear Messages",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "DELETE /{account}/{queue}/messages removes every message and returns 204. A service SAS cannot grant this operation; an account SAS needs the d permission on the object resource type."
+    },
+    {
+      "name": "Create Queue",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "PUT /{account}/{queue}. 201 for a new queue, 204 when the queue exists with identical metadata, 409 QueueAlreadyExists when metadata differs. Queue names follow Azure rules (3-63 chars; length failures are OutOfRangeInput, character failures InvalidResourceName). Metadata names must be identifiers and total at most 8 KiB. Metadata names are returned lower-cased because HTTP header names are case-insensitive."
+    },
+    {
+      "name": "Delete Message",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "DELETE /{account}/{queue}/messages/{messageid}?popreceipt= returns 204. 404 MessageNotFound when the message is gone or expired, 400 PopReceiptMismatch when the receipt is not the current one, 400 MissingRequiredQueryParameter when popreceipt is absent. A service SAS needs the p permission."
+    },
+    {
+      "name": "Delete Queue",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "DELETE /{account}/{queue} returns 204 and removes the queue with its messages immediately; Azure's garbage-collection window (QueueBeingDeleted) is not modeled, so the name can be recreated at once."
+    },
+    {
+      "name": "Get Messages",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "GET /{account}/{queue}/messages with numofmessages 1-32 (default 1) and visibilitytimeout 1-604800 (default 30). Each returned message gets a new pop receipt, an incremented DequeueCount and a new visibility time in one transaction. Messages are served in insertion order, which Azure does not guarantee. A service SAS needs the p permission."
+    },
+    {
+      "name": "Get Queue ACL",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "GET /{account}/{queue}?comp=acl returns the stored SignedIdentifiers with times normalized to seven fractional digits. A service SAS cannot grant this operation."
+    },
+    {
+      "name": "Get Queue Metadata",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "GET or HEAD /{account}/{queue}?comp=metadata returns x-ms-meta-* and x-ms-approximate-messages-count, which is exact locally (all unexpired messages, visible or not). A service SAS needs the r permission."
+    },
+    {
+      "name": "Get Queue Service Properties",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "GET /{account}?restype=service&comp=properties. Returns the stored Logging, HourMetrics, MinuteMetrics and Cors sections, or Azure's documented defaults when never set. Not available to a service SAS."
+    },
+    {
+      "name": "Get Queue Service Stats",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Served on the single local endpoint rather than a -secondary read-access geo-replicated endpoint; always reports GeoReplication Status live with LastSyncTime set to the current clock time."
+    },
+    {
+      "name": "List Queues",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "GET /{account}?comp=list with prefix, marker, maxresults (1-5000, otherwise 400 OutOfRangeQueryParameterValue) and include=metadata. Queues are ordered by name. Markers are opaque local tokens, not Azure marker strings. ServiceEndpoint is the local path-style URL."
+    },
+    {
+      "name": "Peek Messages",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "GET /{account}/{queue}/messages?peekonly=true with numofmessages 1-32 returns visible messages without changing state and without PopReceipt or TimeNextVisible. A service SAS needs the r permission."
+    },
+    {
+      "name": "Preflight Queue Request",
+      "state": "compatible",
+      "authorization": [
+        "Anonymous",
+        "Bearer"
+      ],
+      "notes": "OPTIONS on any queue URL. Matches Origin, Access-Control-Request-Method and Access-Control-Request-Headers (exact or trailing-wildcard patterns) against the account's stored CORS rules; no match returns 403 CorsPreflightFailure, a missing CORS header returns 400."
+    },
+    {
+      "name": "Put Message",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "POST /{account}/{queue}/messages returns 201 with MessageId, InsertionTime, ExpirationTime, PopReceipt and TimeNextVisible. visibilitytimeout 0-604800 and messagettl >= 1 or -1 (never expires, reported as 9999-12-31); visibilitytimeout must be below messagettl. MessageText over 64 KiB (UTF-8 bytes) returns 413 RequestBodyTooLarge. The body is stored exactly as sent; Base64 encoding is a client concern. A service SAS needs the a permission."
+    },
+    {
+      "name": "Set Queue ACL",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "PUT /{account}/{queue}?comp=acl stores up to 5 unique signed identifiers (id up to 64 chars, permissions a subset of raup in order, ISO 8601 UTC times) and returns 204; an empty body clears them. Stored policies are honoured by service SAS tokens that carry si."
+    },
+    {
+      "name": "Set Queue Metadata",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "PUT /{account}/{queue}?comp=metadata replaces all metadata and returns 204; sending no x-ms-meta-* headers clears it. A service SAS cannot grant this operation."
+    },
+    {
+      "name": "Set Queue Service Properties",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "PUT /{account}?restype=service&comp=properties returns 202. Partial bodies replace only the sections sent; CORS (up to 5 rules) is evaluated for preflight and normal requests. Logging and metrics settings are stored and returned but no analytics logs or metrics are produced, and $logs/$metrics tables are not created."
+    },
+    {
+      "name": "Update Message",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "PUT /{account}/{queue}/messages/{messageid}?popreceipt=&visibilitytimeout= (0-604800, required) with an optional QueueMessage body returns 204 with new x-ms-popreceipt and x-ms-time-next-visible. An empty body keeps the text. The new visibility time is not capped at the message expiry. A service SAS needs the u permission."
+    }
+  ]
+}

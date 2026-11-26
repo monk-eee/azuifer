@@ -52,10 +52,20 @@ def wait_ready(admin):
             time.sleep(0.2)
 
 
-def exercise(az, env, root, key):
-    def run(*args, expected_error=None, timeout=45):
+def connection_string(endpoint, key):
+    return (
+        f"DefaultEndpointsProtocol=http;AccountName={ACCOUNT};AccountKey={key};"
+        f"BlobEndpoint={endpoint}/{ACCOUNT};"
+    )
+
+
+def exercise(az, env, root, key, dfs_url):
+    def run(*args, expected_error=None, timeout=45, endpoint=None):
         command = [az, "storage", *args, "--auth-mode", "key", "--output", "json", "--only-show-errors"]
-        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=timeout)
+        command_env = env if endpoint is None else dict(
+            env, AZURE_STORAGE_CONNECTION_STRING=connection_string(endpoint, key),
+        )
+        result = subprocess.run(command, env=command_env, capture_output=True, text=True, timeout=timeout)
         name = "az storage " + " ".join(args[:2])
         errors = result.stderr.replace(key, "[redacted]").strip()
         if expected_error is not None:
@@ -124,7 +134,7 @@ def exercise(az, env, root, key):
 
     run("container", "delete", "--name", container)
     require(not run("container", "exists", "--name", container)["exists"], "container remained visible after delete")
-    return {
+    evidence = {
         "checks": [
             "container lifecycle",
             "blob properties and metadata",
@@ -140,11 +150,106 @@ def exercise(az, env, root, key):
             "downloaded_sha256": downloaded_sha256,
         },
     }
+    if dfs_url is not None:
+        evidence["dfs"] = exercise_dfs(run, root, dfs_url, key)
+        evidence["checks"].extend([
+            "Azure CLI filesystem listing, file metadata, and download",
+            "DFS filesystem lifecycle and read of CLI-uploaded Blob bytes",
+            "Azure CLI directory create and paged listing on the DFS endpoint",
+        ])
+    return evidence
+
+
+def exercise_dfs(run, root, dfs_url, key):
+    from azure.storage.filedatalake import DataLakeFileClient, FileSystemClient, __version__
+
+    filesystem = "hns-cli-" + uuid.uuid4().hex[:12]
+    blob = "folder/a sample.txt"
+    contents = b"same bytes on Blob and DFS\n"
+    source = root / "dfs-upload.txt"
+    source.write_bytes(contents)
+    endpoint = f"{dfs_url}/{ACCOUNT}"
+    credential = {"account_name": ACCOUNT, "account_key": key}
+    client_options = {
+        "retry_total": 0, "connection_timeout": 5, "read_timeout": 10, "use_env_settings": False,
+    }
+
+    def result(pipeline, value, _headers):
+        response = pipeline.http_response
+        return response.status_code, response.headers, value
+
+    # The high-level SDK used by `az storage fs` routes these operations to
+    # Blob. Use its generated REST client to independently hit the DFS port.
+    with FileSystemClient(endpoint, filesystem, credential, **client_options) as fs:
+        dfs = fs._client.file_system
+        status, created, _ = dfs.create(cls=result)
+        require(status == 201 and created["x-ms-namespace-enabled"] == "true",
+                "DFS did not create an HNS filesystem")
+        status, properties, _ = dfs.get_properties(cls=result)
+        require(status == 200 and properties["etag"] == created["etag"],
+                "DFS returned different filesystem identity")
+        listed = run("fs", "list", "--prefix", filesystem)
+        require([item["name"] for item in listed] == [filesystem],
+                "az storage fs list did not see the filesystem created through DFS")
+
+        scope = ["--container-name", filesystem, "--name", blob]
+        run("blob", "upload", *scope, "--file", str(source), "--overwrite", "false",
+            "--metadata", "origin=cli")
+        uploaded = run("blob", "show", *scope)
+        tag = uploaded["properties"]["etag"]
+        address = ["--file-system", filesystem, "--path", blob]
+        metadata = run("fs", "file", "metadata", "show", *address)
+        require(metadata == {"origin": "cli"}, "az storage fs file metadata show did not see Blob metadata")
+        downloaded = root / "dfs-download.txt"
+        run("fs", "file", "download", *address, "--destination", str(downloaded))
+        require(downloaded.read_bytes() == contents, "az storage fs file download returned different bytes")
+
+        with DataLakeFileClient(endpoint, filesystem, blob, credential, **client_options) as file:
+            path = file._client.path
+            status, properties, _ = path.get_properties(cls=result)
+            require(status == 200 and properties["etag"] == tag
+                    and properties["x-ms-resource-type"] == "file"
+                    and properties["x-ms-properties"] == "origin=Y2xp",
+                    "DFS and Blob did not return the same file identity and metadata")
+            # The pinned Python DFS SDK doesn't sign the standard Range header.
+            # The signed HTTP tests cover DFS range reads separately.
+            status, headers, chunks = path.read(cls=result)
+            require(status == 200 and headers["etag"] == tag, "DFS returned a different file")
+            received = b"".join(chunks)
+            require(received == contents, "DFS returned different bytes from the Blob uploaded by CLI")
+
+        run("fs", "directory", "create", "--file-system", filesystem,
+            "--name", "empty/child", endpoint=dfs_url)
+        scope = ["fs", "file", "list", "--file-system", filesystem, "--recursive", "false"]
+        first = run(*scope, "--num-results", "1", "--show-next-marker", endpoint=dfs_url)
+        require(len(first) == 2 and first[0]["name"] == "empty" and first[0]["isDirectory"],
+                "DFS root page did not contain the new directory")
+        marker = first[1]["nextMarker"]
+        require(bool(marker), "DFS listing did not provide a continuation token")
+        next_page = run(*scope, "--num-results", "1", "--marker", marker, endpoint=dfs_url)
+        require(len(next_page) == 1 and next_page[0]["name"] == "folder" and next_page[0]["isDirectory"],
+                "DFS second page did not contain the implicit parent of the CLI upload")
+        children = run(*scope, "--path", "empty", endpoint=dfs_url)
+        require(len(children) == 1 and children[0]["name"] == "empty/child" and children[0]["isDirectory"],
+                "DFS listing did not see the empty child")
+
+        status, _, _ = dfs.delete(cls=result)
+        require(status == 202, "DFS did not delete the filesystem")
+    require(not run("container", "exists", "--name", filesystem)["exists"],
+            "Blob still sees the filesystem deleted through DFS")
+    return {
+        "sdk_version": __version__,
+        "read_bytes": len(received),
+        "read_sha256": hashlib.sha256(received).hexdigest(),
+        "root_directories": [first[0]["name"], next_page[0]["name"]],
+    }
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--blob-url", default="http://127.0.0.1:10000", type=loopback_url)
+    parser.add_argument("--dfs-url", type=loopback_url,
+                        help="also test an HNS-enabled DFS listener using the Azure Data Lake Python SDK")
     parser.add_argument("--admin-url", default="http://127.0.0.1:10005", type=loopback_url)
     parser.add_argument("--expected-version")
     parser.add_argument("--json", action="store_true", help="print machine-readable evidence")
@@ -168,10 +273,7 @@ def main():
             AZURE_EXTENSION_USE_DYNAMIC_INSTALL="no",
             NO_PROXY="127.0.0.1",
             no_proxy="127.0.0.1",
-            AZURE_STORAGE_CONNECTION_STRING=(
-                f"DefaultEndpointsProtocol=http;AccountName={ACCOUNT};AccountKey={key};"
-                f"BlobEndpoint={args.blob_url}/{ACCOUNT};"
-            ),
+            AZURE_STORAGE_CONNECTION_STRING=connection_string(args.blob_url, key),
         )
         version = subprocess.run([az, "version", "--output", "json"], env=env, capture_output=True, text=True, timeout=30)
         require(version.returncode == 0, f"az version: {version.stderr.replace(key, '[redacted]').strip()}")
@@ -179,11 +281,11 @@ def main():
         require(args.expected_version is None or version == args.expected_version,
                 f"expected Azure CLI {args.expected_version}, found {version}")
         wait_ready(args.admin_url)
-        evidence = exercise(az, env, root, key)
+        evidence = exercise(az, env, root, key, args.dfs_url)
     if args.json:
         print(json.dumps({"cli_version": version, **evidence}))
     else:
-        print(f"Azure CLI {version}: Blob lifecycle, guarded overwrite, ETag, range, metadata, and 256 MiB + 1 multipart upload passed.")
+        print(f"Azure CLI {version}: {', '.join(evidence['checks'])} passed.")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,494 @@
+{
+  "service": "file",
+  "api_version": "2023-11-03",
+  "operations": [
+    {
+      "name": "Abort Copy File",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Copies complete synchronously, so every valid request returns 409 NoPendingCopyOperation after the destination and lease checks."
+    },
+    {
+      "name": "Copy File",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Same-instance, same-account sources only, including a share snapshot source; the copy completes synchronously with x-ms-copy-status success and shares the source's extents. The host-style name {account}.file.* of a configured account is treated as local. Blob, external and cross-account sources return NotImplemented or CannotVerifyCopySource."
+    },
+    {
+      "name": "Create Directory",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Case-insensitive, case-preserving names with Azure's name, depth and length rules. File attributes, timestamps (now, preserve or ISO), permission, permission key and metadata are stored and returned with x-ms-file-id and x-ms-file-parent-id."
+    },
+    {
+      "name": "Create File",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Requires x-ms-type: file and x-ms-content-length (up to 4 TiB); replaces an existing file as Azure does, honoring its lease and read-only attribute. Content type, encoding, language, disposition, cache control, content MD5, metadata and SMB properties are stored. Content is sparse and allocates no bytes."
+    },
+    {
+      "name": "Create Hard Link",
+      "state": "unsupported",
+      "authorization": [],
+      "notes": "NFS-only operation; returns 501 NotImplemented."
+    },
+    {
+      "name": "Create Permission",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Stores an SDDL string per share and returns a stable key for it. SDDL is checked only for an owner and DACL shape; it is never evaluated."
+    },
+    {
+      "name": "Create Share",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Quota (1 to 102400 GiB), access tier (TransactionOptimized, Hot, Cool) and metadata are stored and returned. SMB only: other x-ms-enabled-protocols values return NotImplemented. Provisioned IOPS and bandwidth are not modeled."
+    },
+    {
+      "name": "Create Symbolic Link",
+      "state": "unsupported",
+      "authorization": [],
+      "notes": "NFS-only operation; returns 501 NotImplemented."
+    },
+    {
+      "name": "Delete Directory",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Returns DirectoryNotEmpty (409) for a non-empty directory; the share root cannot be deleted."
+    },
+    {
+      "name": "Delete File",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Requires the lease ID when leased and refuses read-only files with ReadOnlyAttribute. Extents are reclaimed once no file or snapshot references them."
+    },
+    {
+      "name": "Delete Share",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Honors x-ms-delete-snapshots (include, include-leased), ShareHasSnapshots and DeleteShareWhenSnapshotLeased, and deletes a single snapshot with sharesnapshot. Deletion is immediate; there is no soft delete."
+    },
+    {
+      "name": "Force Close Handles",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Requires x-ms-handle-id and reports zero handles closed and zero failed."
+    },
+    {
+      "name": "Get Directory Metadata",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Returns the directory's metadata and SMB headers."
+    },
+    {
+      "name": "Get Directory Properties",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Works on the share root and on share snapshots. A file at the path returns ResourceTypeMismatch."
+    },
+    {
+      "name": "Get File",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Full and ranged reads (x-ms-range or Range), x-ms-range-get-content-md5 for ranges up to 4 MiB, holes read as zeros, SAS response-header overrides, share snapshots. A range starting at or after the end returns InvalidRange. Standard If-Match, If-None-Match, If-Modified-Since and If-Unmodified-Since are evaluated although Azure does not document them for Files."
+    },
+    {
+      "name": "Get File Metadata",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Returns the file's metadata."
+    },
+    {
+      "name": "Get File Properties",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "HEAD with the file's size, HTTP properties, SMB properties, lease state, copy properties and metadata."
+    },
+    {
+      "name": "Get File Service Properties",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Returns the stored HourMetrics, MinuteMetrics, CORS rules and SMB multichannel setting, with Azure's defaults for a new account. Metrics are never collected, CORS rules are stored but not applied to requests, and multichannel has no effect."
+    },
+    {
+      "name": "Get Permission",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Returns the stored SDDL for a key. Binary security descriptors (2024-11-04) are not supported."
+    },
+    {
+      "name": "Get Share ACL",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Returns up to five stored access policies."
+    },
+    {
+      "name": "Get Share Metadata",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Returns the same headers as Get Share Properties."
+    },
+    {
+      "name": "Get Share Properties",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Returns quota, access tier, metadata, enabled protocols and lease headers; honors sharesnapshot. Conditional headers are not evaluated."
+    },
+    {
+      "name": "Get Share Stats",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "ShareUsageBytes is the allocated (written) bytes of the live share, so sparse files and cleared ranges do not count. Snapshots are not included."
+    },
+    {
+      "name": "Get Symbolic Link",
+      "state": "unsupported",
+      "authorization": [],
+      "notes": "NFS-only operation; returns 501 NotImplemented."
+    },
+    {
+      "name": "Lease File",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Acquire (infinite only), change, release and break (immediate) with the Available, Leased and Broken states; renew is rejected. Writes, deletes, copies onto the file and renames require the lease ID, and a broken lease clears on the next unleased write. Files in share snapshots cannot be leased."
+    },
+    {
+      "name": "Lease Share",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Acquire, renew, change, release and break with fixed (15 to 60 s) or infinite durations on shares and share snapshots. State is computed lazily from the clock and survives restart. Lease-use mismatches return 412 with the FileShare operation codes from the error list rather than the 409 shown in the outcome table."
+    },
+    {
+      "name": "List Directories and Files",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Single-level listing of files and directories sorted by upper-cased name, with prefix, marker, maxresults and include=Timestamps,ETag,Attributes,PermissionKey. Names containing U+FFFE or U+FFFF are not percent-encoded."
+    },
+    {
+      "name": "List Handles",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Always returns an empty Entries list for existing directories and files because there is no SMB session to hold handles."
+    },
+    {
+      "name": "List Ranges",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Allocated ranges with adjacent ranges merged, an optional x-ms-range window, and prevsharesnapshot diffs reporting Range and ClearRange. Diffs return PreviousSnapshotNotFound, PreviousSnapshotCannotBeNewer and FileGenerationMismatch. A rewrite with identical bytes still counts as changed."
+    },
+    {
+      "name": "List Shares",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Supports prefix, marker, maxresults, include=metadata and include=snapshots; markers are opaque local tokens. include=deleted is accepted and ignored because share soft delete is not modeled."
+    },
+    {
+      "name": "Put Range",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "x-ms-write update (1 byte to 4 MiB) writes a new immutable extent made durable before the metadata commits; clear deallocates the range without writing zeros. Content-MD5 and x-ms-content-crc64 are verified. A range beyond the file length returns InvalidRange. Share quota is enforced on allocated bytes and in-memory mode fails with 507 at the memory limit."
+    },
+    {
+      "name": "Put Range From URL",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Same-instance sources in the same account only, which is what AzCopy's file-to-file copy needs. Like Copy File, the source URL's SAS is not checked."
+    },
+    {
+      "name": "Rename Directory",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "One row update moves the whole subtree. The source is a same-share URL; other shares or accounts return RenameAcrossAccountsAndSharesNotSupported, a destination inside the source returns RenameCycle, and an existing destination returns ResourceAlreadyExists. Open-file conflicts do not occur because handles are not modeled."
+    },
+    {
+      "name": "Rename File",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Honors x-ms-file-rename-replace-if-exists, -ignore-readonly, source and destination lease IDs, content type, metadata and SMB property overrides. Cross-share renames and share snapshots are rejected."
+    },
+    {
+      "name": "Restore Share",
+      "state": "unsupported",
+      "authorization": [],
+      "notes": "Returns 501 NotImplemented; deleted shares cannot be restored."
+    },
+    {
+      "name": "Set Directory Metadata",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Replaces all metadata."
+    },
+    {
+      "name": "Set Directory Properties",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Updates attributes, timestamps and permission; absent headers preserve current values."
+    },
+    {
+      "name": "Set File Metadata",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Replaces all metadata; requires the lease ID when leased."
+    },
+    {
+      "name": "Set File Properties",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "Bearer"
+      ],
+      "notes": "Resizes with x-ms-content-length and updates SMB properties. HTTP properties are replaced as a set only when at least one x-ms-content-* or cache-control header is sent; otherwise they are preserved, so a pure resize keeps the content type."
+    },
+    {
+      "name": "Set File Service Properties",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Validates and stores metrics, at most five CORS rules and the SMB multichannel flag; sections left out of the body keep their stored values. Answers 202. Nothing stored is acted on."
+    },
+    {
+      "name": "Set Share ACL",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Validates the SignedIdentifiers document (five policies, unique IDs of 64 characters or fewer, rcwdl permissions, ISO times). Policies are honored by service SAS tokens that name them with si."
+    },
+    {
+      "name": "Set Share Metadata",
+      "state": "compatible",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Replaces all metadata; requires the lease ID when leased."
+    },
+    {
+      "name": "Set Share Properties",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Updates quota and access tier; requires the lease ID when the share is leased. Azure's quota-downgrade and tier-transition limits are not enforced."
+    },
+    {
+      "name": "Snapshot Share",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Copies the share's rows and shares file content by extent reference. The 200-snapshot limit is not enforced. Snapshot IDs are millisecond timestamps rendered with seven fractional digits."
+    }
+  ]
+}

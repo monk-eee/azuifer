@@ -60,6 +60,13 @@ pub(crate) fn verify(
     let date = header(headers, "x-ms-date")?
         .or(header(headers, "date")?)
         .ok_or(Error::AuthenticationFailed)?;
+    check_skew(date, now)?;
+    let message = canonical(account, method, raw_path, query, headers)?;
+    verify_signature(keys, &message, signature)
+}
+
+/// Rejects a request date more than 15 minutes away from `now`.
+pub(crate) fn check_skew(date: &str, now: SystemTime) -> Result<()> {
     let date = httpdate::parse_http_date(date).map_err(|_| Error::AuthenticationFailed)?;
     if now
         .duration_since(date)
@@ -69,10 +76,15 @@ pub(crate) fn verify(
     {
         return Err(Error::AuthenticationFailed);
     }
+    Ok(())
+}
+
+/// Checks a Base64 HMAC-SHA256 signature of `message` against any account key
+/// in constant time, so either of two rotating keys validates.
+pub(crate) fn verify_signature(keys: &[Vec<u8>], message: &str, signature: &str) -> Result<()> {
     let signature = STANDARD
         .decode(signature)
         .map_err(|_| Error::AuthenticationFailed)?;
-    let message = canonical(account, method, raw_path, query, headers)?;
     let mut valid = false;
     for key in keys {
         let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| Error::Internal)?;
@@ -85,7 +97,7 @@ pub(crate) fn verify(
     Ok(())
 }
 
-fn canonical(
+pub(crate) fn canonical(
     account: &AccountName,
     method: &Method,
     raw_path: &str,
@@ -103,23 +115,7 @@ fn canonical(
         }
     }
     text.push('\n');
-
-    let mut extension_headers = BTreeMap::new();
-    for (name, value) in headers {
-        let name = name.as_str();
-        if name.starts_with("x-ms-") {
-            let value = value.to_str().map_err(|_| Error::InvalidHeader)?;
-            if extension_headers.insert(name, value).is_some() {
-                return Err(Error::InvalidHeader);
-            }
-        }
-    }
-    for (name, value) in extension_headers {
-        text.push_str(name);
-        text.push(':');
-        text.push_str(&fold_whitespace(value));
-        text.push('\n');
-    }
+    text.push_str(&canonical_headers(headers)?);
     text.push('/');
     text.push_str(account.as_str());
     text.push_str(raw_path);
@@ -132,7 +128,30 @@ fn canonical(
     Ok(text)
 }
 
-fn fold_whitespace(value: &str) -> String {
+/// The canonicalized `x-ms-*` header block shared by Shared Key and Shared Key
+/// Lite: lowercase names in order, folded values, one line each.
+pub(crate) fn canonical_headers(headers: &HeaderMap) -> Result<String> {
+    let mut extension_headers = BTreeMap::new();
+    for (name, value) in headers {
+        let name = name.as_str();
+        if name.starts_with("x-ms-") {
+            let value = value.to_str().map_err(|_| Error::InvalidHeader)?;
+            if extension_headers.insert(name, value).is_some() {
+                return Err(Error::InvalidHeader);
+            }
+        }
+    }
+    let mut text = String::new();
+    for (name, value) in extension_headers {
+        text.push_str(name);
+        text.push(':');
+        text.push_str(&fold_whitespace(value));
+        text.push('\n');
+    }
+    Ok(text)
+}
+
+pub(crate) fn fold_whitespace(value: &str) -> String {
     let mut out = String::new();
     let mut quoted = false;
     let mut escaped = false;

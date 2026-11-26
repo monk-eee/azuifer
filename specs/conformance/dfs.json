@@ -1,0 +1,238 @@
+{
+  "service": "dfs",
+  "api_version": "2023-11-03",
+  "operations": [
+    {
+      "name": "List File Systems",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "Lists active filesystems on HNS-enabled accounts with prefix filtering and opaque local continuation tokens."
+    },
+    {
+      "name": "Create File System",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer",
+        "ServiceSAS",
+        "UserDelegationSAS"
+      ],
+      "notes": "Creates the same container visible to Blob, with x-ms-properties stored as container metadata. Encryption options are unavailable."
+    },
+    {
+      "name": "Get File System Properties",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Returns the shared ETag, Last-Modified, the HNS flag, and x-ms-properties. No encryption properties."
+    },
+    {
+      "name": "Set File System Properties",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Stores x-ms-properties as the container's metadata with ETag and date conditions."
+    },
+    {
+      "name": "Delete File System",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Deletes the shared container immediately. No retention or recreation delay."
+    },
+    {
+      "name": "List Paths",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Lists files and directories recursively or one level at a time, optionally scoped to a directory, with owner, group, and permissions, and opaque local continuation tokens in binary name order. upn is accepted but ignored. contentLength is a string and isDirectory is the string \"true\", present only for directories."
+    },
+    {
+      "name": "Create Path",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Creates files and directories with implicit parent directories, conditions, x-ms-properties, ACL, permissions, umask, owner and group headers, and a lease at creation. If-None-Match: * on an existing path answers 409 PathAlreadyExists, which is unverified against Azure. Encryption and expiry headers are unsupported."
+    },
+    {
+      "name": "Rename Path",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Renames files and directories in legacy and posix modes. A directory rename is one metadata transaction, so a concurrent Blob or DFS listing sees the old tree or the new tree. Source and destination conditions and leases apply; an existing destination answers 409 PathAlreadyExists, unverified against Azure."
+    },
+    {
+      "name": "Append Data",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Appends at a position up to 100 MiB per request into staged ranges over immutable extents that Blob and DFS reads do not see until flush. Appending to a missing path creates it, which is unverified against Azure."
+    },
+    {
+      "name": "Flush Data",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Commits staged data at a position with close and retainUncommittedData, and sets content headers. A flushed file reads identically through Blob with the same ETag. A flush rewrites the committed bytes plus the staged ranges into a new extent, except a file's first single-append flush, which links the staged extent."
+    },
+    {
+      "name": "Read File",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Reads the same committed Blob bytes, with ETag conditions, lease checks, and single byte ranges. No range checksums or date conditions."
+    },
+    {
+      "name": "Get Path Properties",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Supports getProperties, getStatus, and getAccessControl. Returns the resource type, ETag, content properties, x-ms-properties, owner, group, permissions, ACL, and lease state. A directory also carries x-ms-meta-hdi_isfolder: true, which Azure's DFS endpoint does not send; AzCopy needs it on path-style endpoints, where Blob calls arrive on the DFS URL (requests with restype or comp go to Blob)."
+    },
+    {
+      "name": "Set Path Properties",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Update Path with setProperties replaces x-ms-properties and the content headers, with conditions and lease checks."
+    },
+    {
+      "name": "Get Access Control",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Returns x-ms-owner, x-ms-group, x-ms-permissions, and x-ms-acl for files and directories; upn is accepted but ignored."
+    },
+    {
+      "name": "Set Access Control",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Sets owner, group, permissions, or ACL on a path. Shared Key and account SAS bypass ACL checks as Azure does; bearer tokens are checked against owner, group, and ACL with the token's oid, and carry no group membership."
+    },
+    {
+      "name": "Set Access Control Recursive",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Sets, modifies, or removes ACL entries across a subtree in bounded batches with a stable continuation token and the documented counters (directoriesSuccessful, filesSuccessful, failureCount, failedEntries). Ownership is checked per entry; each descendant's execute bit is not."
+    },
+    {
+      "name": "Lease Path",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Acquire, renew, release, break, and change over the shared Blob lease state machine."
+    },
+    {
+      "name": "Delete Path",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "Deletes files, empty directories, and with recursive=true whole subtrees in one transaction, paged by continuation; non-empty directories without recursive answer DirectoryNotEmpty. Answers 200, which is unverified against Azure. Staged extents of a deleted file are reclaimed at the next start."
+    }
+  ]
+}

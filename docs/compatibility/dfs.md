@@ -1,0 +1,89 @@
+# Data Lake Storage Gen2 wire compatibility
+
+Blob and DFS share a store on hierarchical namespace (HNS) accounts. A filesystem created on DFS is visible as a Blob container. A committed Blob is readable as a file on DFS with the same bytes and ETag, and a file flushed through DFS is a block blob to Blob with the same bytes and ETag. Directories, including empty directories, are persistent resources visible on both endpoints. A directory rename is one metadata transaction, so a concurrent listing sees the old tree or the new tree.
+
+## Run locally
+
+Enable HNS for a configured account. This example uses the loopback development account:
+
+```sh
+cargo run --locked -- serve --in-memory --services blob,dfs --hns-accounts devstoreaccount1
+```
+
+The path-style DFS endpoint is `http://127.0.0.1:10003/devstoreaccount1`, and the default Blob port is `10000`. The host-style form `http://devstoreaccount1.dfs.localhost:10003/` (any `{account}.dfs.{domain}` host) addresses the same account without the account path segment; Shared Key signs the path exactly as sent after `/{account}`, so path-style signs `/{account}/{account}/{filesystem}` and host-style signs `/{account}/{filesystem}`. Use `--dfs-port` to change the DFS port. Use `--location ./data` instead of `--in-memory` to retain the shared data across restarts. In Docker, publish the DFS port on loopback alongside the Blob and admin ports in the [quickstart](../../README.md#run-locally).
+
+Set `AZUIFER_HNS_ACCOUNTS` or `hns_accounts` in the TOML config as an alternative to `--hns-accounts`. The value is a comma-separated list of configured account names. HNS is off by default, and DFS requests to an account without it get `409 HierarchicalNamespaceNotEnabled`. Both listeners use API version `2023-11-03`. Older versions back to `2009-09-19` are served with that baseline behavior, and `--skip-api-version-check` lets a well-formed newer version use it too without bypassing authentication.
+
+### Data Lake SDKs and the Azure CLI
+
+The Data Lake SDKs and `az storage fs` derive a Blob endpoint from the DFS endpoint by replacing `dfs` with `blob` in the host and keeping the port, and use it for properties, existence checks, metadata and downloads. The DFS listener therefore also serves requests whose host is `{account}.blob.{domain}` as Blob requests ([ADR-0023](../adr.d/0023-serve-blob-calls-addressed-to-the-blob-host-on-the-dfs-listener.md)). Give the Python SDK the host-style URL and an explicit key:
+
+```python
+DataLakeServiceClient("http://devstoreaccount1.dfs.localhost:10003",
+                      credential={"account_name": "devstoreaccount1", "account_key": KEY})
+```
+
+For `az storage fs`, set a connection string whose `BlobEndpoint` is `http://devstoreaccount1.blob.localhost:10003` (the `blob` host on the DFS port); the CLI derives the DFS URL from it. The Python SDK cannot address path-style local endpoints at all, so host-style URLs are required there. `*.localhost` must resolve to the loopback address.
+
+The .NET Data Lake client works with the path-style URL `http://127.0.0.1:10003/devstoreaccount1`. The JavaScript Data Lake client sends its container calls (`restype=container`) to the `dfs` host, which the DFS listener hands to Blob. It treats ports such as 10000 to 10004 as path-style emulator ports, and then builds rename URLs without the account, so give it a host-style URL on another port: start Azuifer with `--dfs-port 20003` and use `http://devstoreaccount1.dfs.localhost:20003`.
+
+### AzCopy
+
+AzCopy 10.34.2 (Windows amd64) ran against `serve --services blob,file,dfs --hns-accounts devstoreaccount1` with an account SAS (`ss=b`, `srt=sco`) made from the public `devstoreaccount1` key. With `--from-to LocalBlobFS`, `BlobFSLocal` and `BlobFSTrash` against `http://127.0.0.1:10003/devstoreaccount1/{filesystem}?{sas}` these pass: a single file and a directory tree up (Create, Append, Flush), `list --location BlobFS`, copy down with matching SHA-256, a `sync` that sends nothing when unchanged, and `remove --recursive`. AzCopy cannot create a filesystem on an IP endpoint, so create it with one `PUT ?resource=filesystem` request.
+
+A path-style endpoint has no `blob` host to move to, so AzCopy sends its Blob calls (the `restype`/`comp` list and the folder test on Get Path Properties) to the DFS URL itself. The DFS listener hands any request with a `restype` or `comp` query parameter to Blob, and HEAD of a directory adds `x-ms-meta-hdi_isfolder: true` to its DFS headers; Azure's DFS endpoint does not send that header. AzCopy's Blob-side `remove` (`BlobTrash`) of a directory tree on an HNS account fails with `409` for the folders (the AzCopy log shows the folder deletes sent before the files; Azure's behavior here has not been checked). Remove through DFS (`BlobFSTrash`), as above. [`tests/azcopy_smoke.py`](../../tests/azcopy_smoke.py) runs the DFS steps with `--skip-blob --skip-files` against an HNS account; the Blob steps need an account without HNS.
+
+## Authentication
+
+DFS accepts the credentials Blob accepts, checked with the shared Blob code and the shared clock, so `--test-clock` moves DFS signature windows, SAS validity and lease expiry together.
+
+| Credential | Behavior |
+| --- | --- |
+| Shared Key, Shared Key Lite | Full access; POSIX ACLs are not checked, as in Azure. |
+| Account SAS (`ss` containing `b`) | Checked for resource type and permission; ACLs are not checked. |
+| Service SAS | `sr=b` (file), `sr=c` (filesystem) and `sr=d` (directory, with `sdd` the depth of the signed directory, signed version 2020-02-10 or later). A listing is authorized against its `directory` parameter. Permission letters: `r` read, `w` write (append, flush, set properties, lease), `c` create, `d` delete, `l` list, `m` rename, `e` properties and ACL reads, `p` set permissions or ACL, `o` set owner or group. Stored access policies work as for Blob. ACLs are not checked. |
+| User-delegation SAS | Signed with a key from Get User Delegation Key. The ACLs of the delegating user (`skoid`) are checked in addition to the SAS permissions. |
+| Bearer (`--oauth basic` or `jwks`) | A token without a `roles` claim is checked against the owner, group and ACLs using its `oid`. In `jwks` mode a token whose roles name a Storage Blob Data role bypasses the ACLs, as an Azure role assignment does. A rejected token is `401 InvalidAuthenticationInfo` with the `WWW-Authenticate` challenge, as on the other services. |
+| None | `403 AuthorizationFailure`. |
+
+POSIX checks need execute on every ancestor directory, plus: read on a file to read it; write on a file to append, flush or set properties; read and execute on a directory to list it; write and execute on the parent to create, delete or rename a child. Setting an ACL, permissions or owner needs ownership of the path (only a role-bearing token or Shared Key may change the owner). The token carries no group membership, so the owning group and named groups never match a bearer caller other than by `oid` equal to the group name.
+
+## Supported requests
+
+| Target | Requests |
+| --- | --- |
+| `/{account}?resource=account` | `GET` lists filesystems. Supports `prefix`, `maxResults`, and opaque `continuation` tokens from `x-ms-continuation`. |
+| `/{account}/{filesystem}?resource=filesystem` | `PUT` creates (with `x-ms-properties`), `PATCH` replaces the properties, `HEAD` reads them with `x-ms-namespace-enabled`, and `DELETE` removes the shared container and its contents. Properties are the container metadata Blob shows. |
+| `/{account}/{filesystem}?resource=filesystem&recursive={true\|false}` | `GET` lists files and directories, optionally under `directory`, with `maxResults`, `continuation` and `upn` (accepted; owners are always the stored identifiers). Each entry has `name`, `etag`, `lastModified`, `isDirectory`, `contentLength`, `owner`, `group` and `permissions`. |
+| `/{account}/{filesystem}/{path}?resource={file\|directory}` | `PUT` creates a file or directory with missing parents. Supports conditions, `x-ms-properties`, content headers, `x-ms-permissions`, `x-ms-umask`, `x-ms-owner`, `x-ms-group`, `x-ms-acl`, and `x-ms-proposed-lease-id` with `x-ms-lease-duration` (files). An existing file is overwritten and keeps its owner and ACL. `If-None-Match: *` on an existing path is `409 PathAlreadyExists`. |
+| `/{account}/{filesystem}/{path}` with `x-ms-rename-source` | `PUT` renames a file or directory (`mode=legacy` or `posix`; both replace a destination file or empty directory of the same type) in one transaction. Supports destination and `x-ms-source-*` conditions, `x-ms-lease-id` for a leased destination, `x-ms-source-lease-id`, and `x-ms-properties` to replace the properties. The destination parent must exist. |
+| `/{account}/{filesystem}/{path}?action=append&position={n}` | `PATCH` stages the body at `position` without publishing it. Positions may arrive out of order and a retried chunk replaces its predecessor. Up to 100 MiB per request, with `Content-MD5` or `x-ms-content-crc64` verification and `x-ms-lease-action` (`acquire`, `auto-renew`, `release`, `acquire-release`). A missing file is created, which is how the SDKs upload without overwriting. |
+| `/{account}/{filesystem}/{path}?action=flush&position={n}` | `PATCH` publishes the staged data that is contiguous with the committed bytes up to `position` (a boundary between appended chunks), with `retainUncommittedData`, content headers, `x-ms-content-md5`, conditions and lease actions. A flush at the committed length publishes only the properties. `If-None-Match: *` passes only for a file no flush has published yet. A wrong position is `400 InvalidFlushPosition`. |
+| `/{account}/{filesystem}/{path}?action=setProperties` | `PATCH` replaces `x-ms-properties` and the content headers it names. |
+| `/{account}/{filesystem}/{path}?action=setAccessControl` | `PATCH` sets owner, group, permissions or an ACL (permissions and ACL are exclusive). Also works on the filesystem root (`/{account}/{filesystem}?action=setAccessControl`). |
+| `/{account}/{filesystem}/{path}?action=setAccessControlRecursive&mode={set\|modify\|remove}` | `PATCH` changes the ACL of a directory and everything below it in batches of `maxRecords` (default and maximum 2000) with `forceFlag` and `continuation`. The response has `directoriesSuccessful`, `filesSuccessful`, `failureCount` and `failedEntries`; `x-ms-continuation` names the last path handled. Paths a bearer caller does not own are failures. Also works on the root. |
+| `/{account}/{filesystem}/{path}` | `GET` reads committed bytes with ETag and date conditions and a single `Range`; `HEAD` returns properties, owner, group, permissions and lease state, and with `action=getAccessControl` also `x-ms-acl` (`getStatus` and `getProperties` are accepted). A file written by Blob has the default owner `$superuser` and mode `rw-r-----` (`rwxr-x---` for a directory). |
+| `/{account}/{filesystem}/{path}?recursive={true\|false}` | `DELETE` removes a file or an empty directory; a non-empty directory needs `recursive=true`. A recursive delete removes up to 1000 entries per request, deepest first, and returns `x-ms-continuation` until the directory itself is gone. The response is `200`. |
+| `/{account}/{filesystem}/{path}` with `x-ms-lease-action` | `POST` acquires, renews, changes, releases or breaks a lease with the shared Blob lease state machine; Blob sees the same lease. Only files hold leases; a directory is `409 ResourceTypeMismatch`. |
+
+On an HNS account, a committed Blob write creates any missing parent directories in the same transaction. Staged blocks do not create visible directories. A file cannot replace a directory or have descendants. Enabling HNS on existing data creates the missing parents without replacing files; startup rejects paths that cannot form a hierarchy. Flat Blob listings show directories; Blob listings with a delimiter still derive prefixes from blob names. A directory's user-defined properties appear as Blob metadata, with `hdi_isfolder`.
+
+## Files, ACLs and defaults
+
+File metadata written by Blob is returned in `x-ms-properties` with base64-encoded values. A Blob lease protects a file from DFS writes, renames and deletes unless the caller supplies the matching lease ID, and a DFS lease protects it from Blob writes. A new path is owned by `$superuser` through Shared Key and SAS, or by the caller's `oid` through a bearer token. Its group is the parent's. Without a default ACL on the parent, the mode is the requested permissions (0666 for files, 0777 for directories) minus the umask (default 0027), giving `rw-r-----` and `rwxr-x---`. With a default ACL on the parent, the new path inherits it, limited by the requested mode and ignoring the umask, and a new directory also inherits it as its default ACL. An ACL with named entries gets a mask (the union of the group and named entries when the request names none), and the group class of `x-ms-permissions` shows the mask. ACL strings are `[default:]user|group|mask|other:id:rwx`, at most 32 access and 32 default entries.
+
+## Known differences from Azure
+
+- Path listings use binary name order, not Azure's slash-first order.
+- `If-None-Match: *` on an existing path is `409 PathAlreadyExists` (the code the Data Lake SDKs map to `ResourceExistsError`); other failed conditions are `412 ConditionNotMet`. Neither is verified against Azure here.
+- Delete Path answers `200`. Soft delete, the filesystem recreation delay, Set Path Expiry, `x-ms-expiry-*`, encryption headers and requested range checksums are not implemented; unknown `x-ms-*` headers are `501 NotImplemented`.
+- Append accepts any position, including one before the committed length, but only data contiguous with the committed bytes ever publishes. An unflushed append that created its file leaves an empty file visible to Blob.
+- A flush copies the committed bytes and staged ranges into a new extent under the metadata lock (a file's first flush of a single append is a hard link), and a rename or recursive delete is one transaction proportional to the subtree.
+- The extents of unflushed data stay on disk after the file is deleted through Blob or its filesystem is deleted, until the next start recovers them.
+- POSIX checks on recursive operations cover the top directory and, for recursive ACL changes, ownership of each entry; they do not check each descendant's execute bit.
+
+## Verify it
+
+The [DFS HTTP tests](../../tests/dfs_http.rs) cover each operation's status, headers, body and resulting state: create, append and flush (in memory and on disk), update, rename, leases, listing, filesystem properties, ACL inheritance and recursive changes with continuation, Shared Key Lite, account, service, directory and user-delegation SAS, bearer tokens against ACLs, the shared clock, API versions, HNS-disabled accounts, request-slot waiting, and a crash during an append. The [cross-protocol tests](../../tests/dfs_cross_http.rs) check Blob write then DFS read, DFS write then Blob read, an atomic rename against concurrent Blob listings, Blob/DFS lease coherence and restart. The older [Blob HTTP tests](../../tests/blob_http.rs) check directory identity across restart and rejected conflicts.
+
+[`tests/dfs_sdk.py`](../../tests/dfs_sdk.py) runs the Python Data Lake SDK against host-style URLs (filesystem, directory and file creation, a chunked multi-MiB upload with concurrency, ranged and full downloads, Blob reads of the same bytes and ETag, directory rename, ACL set, get and recursive changes, paged recursive listing, recursive delete, leases) and the `az storage fs` commands that route to DFS. The [four-version Azure CLI matrix](blob.md#azure-cli) runs `az storage fs directory create` and pages `az storage fs file list` against DFS. These checks do not compare against live Azure; the [DFS operation inventory](../../specs/conformance/dfs.json) tracks the differences.

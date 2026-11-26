@@ -1,50 +1,60 @@
+mod append;
+mod blobs;
 mod blocks;
+mod containers;
+mod copy;
+mod deleted_containers;
+mod dfs_acl;
+mod dfs_data;
+mod dfs_paths;
+mod dfs_tree;
+mod expiry;
+mod immutability;
+mod listing;
+mod namespace;
+mod page_history;
+mod pages;
+mod schema;
+mod service;
+mod snapshots;
+mod tags;
 
+use crate::blob_tags::Tags;
 use crate::checksum::{Checksum, Checksums, Hasher};
+use crate::clock::Clock;
 use crate::domain::{
-    AccountName, BlobInfo, BlobKey, BlobWrite, ByteRange, Condition, ContainerKey, ContentLength,
-    Entity, Error, Page, PageRequest, Result,
+    BlobInfo, BlobKey, ContainerKey, ContentHeaders, ContentLength, CopyInfo, Entity, Error, Result,
 };
+use crate::lease::{LeaseId, LeaseKind, StoredLease};
+use crate::stamp::Ticks;
 use anyhow::Context as _;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::{Connection, OptionalExtension as _, Row, params};
 use std::{
+    collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{Seek as _, SeekFrom, Write},
     ops::Range,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
 };
 use tempfile::NamedTempFile;
 use tokio::io::AsyncWriteExt as _;
 use uuid::Uuid;
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS containers (
-    account TEXT NOT NULL, name TEXT NOT NULL, id BLOB NOT NULL, modified INTEGER NOT NULL,
-    PRIMARY KEY (account, name)
-) STRICT;
-CREATE TABLE IF NOT EXISTS blobs (
-    account TEXT NOT NULL, container TEXT NOT NULL, name TEXT NOT NULL,
-    id BLOB NOT NULL UNIQUE, modified INTEGER NOT NULL, length INTEGER NOT NULL,
-    content_type TEXT NOT NULL, md5 TEXT NOT NULL, metadata TEXT NOT NULL, bytes BLOB,
-    PRIMARY KEY (account, container, name),
-    FOREIGN KEY (account, container) REFERENCES containers (account, name) ON DELETE CASCADE
-) STRICT;
-CREATE TABLE IF NOT EXISTS staged_blocks (
-    account TEXT NOT NULL, container TEXT NOT NULL, name TEXT NOT NULL,
-    block_id TEXT NOT NULL, width INTEGER NOT NULL,
-    id BLOB NOT NULL UNIQUE, length INTEGER NOT NULL, bytes BLOB,
-    PRIMARY KEY (account, container, name, block_id),
-    FOREIGN KEY (account, container) REFERENCES containers (account, name) ON DELETE CASCADE
-) STRICT;
-CREATE TABLE IF NOT EXISTS committed_blocks (
-    account TEXT NOT NULL, container TEXT NOT NULL, name TEXT NOT NULL,
-    position INTEGER NOT NULL, block_id TEXT NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL,
-    PRIMARY KEY (account, container, name, position),
-    FOREIGN KEY (account, container, name) REFERENCES blobs (account, container, name) ON DELETE CASCADE
-) STRICT;";
+pub(crate) use append::Appended;
+pub(crate) use containers::LeaseResult;
+pub(crate) use copy::SourceBytes;
+pub(crate) use deleted_containers::ListedContainer;
+pub(crate) use dfs_acl::{AclMode, RecursiveAcl, RecursiveOutcome};
+pub(crate) use dfs_data::{Append, Flush, LeaseUse};
+pub(crate) use dfs_paths::{
+    AccessUpdate, Caller, CreatePath, Need, PathError, PathView, PropertyUpdate,
+};
+pub(crate) use dfs_tree::Rename;
+pub(crate) use pages::{PageRanges, PageWritten, RangeBody};
+pub(crate) use snapshots::{Deletion, ExtendedListing, Listed, Selected};
+pub(crate) use tags::TaggedBlob;
 
 #[derive(Clone)]
 pub(crate) struct Store(Arc<Inner>);
@@ -52,17 +62,29 @@ pub(crate) struct Store(Arc<Inner>);
 struct Inner {
     db: Mutex<Connection>,
     mode: Mode,
+    clock: Clock,
+    hns_accounts: HashSet<crate::domain::AccountName>,
 }
 
 enum Mode {
-    Disk { extents: PathBuf, _lock: File },
-    Memory { limit: u64 },
+    Disk {
+        extents: PathBuf,
+        _lock: File,
+        /// Extents that snapshots, versions, or soft-deleted blobs still reference.
+        pinned: snapshots::Pinned,
+    },
+    Memory {
+        limit: u64,
+    },
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum ContentSource {
     Blob,
     StagedBlock,
+    /// Bytes held by a history row (`kind` and `state_id`); only the in-memory
+    /// backend keeps block bytes in the row, and page ranges are found by the pair.
+    History(i64, i64),
 }
 
 pub(crate) struct Upload {
@@ -91,17 +113,32 @@ enum UploadedData {
 pub(crate) enum Payload {
     Disk(File),
     Memory(Vec<u8>),
+    /// Sparse content of a page or append blob: extent slices and zero-filled holes.
+    Ranges(RangeBody),
 }
 
 pub(crate) struct Download {
     pub(crate) info: BlobInfo,
     pub(crate) range: Option<Range<u64>>,
     pub(crate) payload: Option<Payload>,
+    /// Header name and Base64 value of the checksum of the returned range.
+    pub(crate) range_checksum: Option<(&'static str, String)>,
+}
+
+pub(crate) enum PathRead {
+    File(Box<Download>),
+    /// A directory and its user-defined properties (Blob metadata).
+    Directory(Entity, crate::domain::Metadata),
 }
 
 impl Store {
-    pub(crate) fn open(location: Option<&Path>, memory_limit: u64) -> anyhow::Result<Self> {
-        let (db, mode) = if let Some(root) = location {
+    pub(crate) fn open(
+        location: Option<&Path>,
+        memory_limit: u64,
+        clock: Clock,
+        hns_accounts: HashSet<crate::domain::AccountName>,
+    ) -> anyhow::Result<Self> {
+        let (mut db, mode) = if let Some(root) = location {
             fs::create_dir_all(root).context("could not create the storage directory")?;
             require_directory(root)?;
             let lock_path = root.join("azuifer.lock");
@@ -139,6 +176,7 @@ impl Store {
                 Mode::Disk {
                     extents,
                     _lock: lock,
+                    pinned: Default::default(),
                 },
             )
         } else {
@@ -150,20 +188,32 @@ impl Store {
             )
         };
         db.pragma_update(None, "foreign_keys", true)?;
-        db.execute_batch(SCHEMA)?;
+        schema::migrate(&mut db).context("could not migrate metadata")?;
+        namespace::restore_parents(&mut db, &hns_accounts, clock.now_millis())?;
+        snapshots::load_pins(&db, &mode).context("could not load retained content")?;
         if let Mode::Disk { extents, .. } = &mode {
             recover(&db, extents).context("could not recover unreferenced content")?;
         }
+        snapshots::purge_at_open(&db, &mode, clock.now_millis())
+            .context("could not purge expired deleted content")?;
         Ok(Self(Arc::new(Inner {
             db: Mutex::new(db),
             mode,
+            clock,
+            hns_accounts,
         })))
     }
 
+    fn hierarchical(&self, key: &ContainerKey) -> bool {
+        self.0.hns_accounts.contains(&key.account)
+    }
+
+    /// Runs a metadata action on the blocking pool. The action receives the time
+    /// read under the metadata lock, so lease evaluation matches the transaction.
     async fn run<T, F>(&self, action: F) -> Result<T>
     where
         T: Send + 'static,
-        F: FnOnce(&mut Connection, &Mode) -> Result<T> + Send + 'static,
+        F: FnOnce(&mut Connection, &Mode, i64) -> Result<T> + Send + 'static,
     {
         let inner = self.0.clone();
         tokio::task::spawn_blocking(move || {
@@ -171,7 +221,9 @@ impl Store {
                 .db
                 .lock()
                 .map_err(|_| internal("poisoned metadata lock"))?;
-            action(&mut db, &inner.mode)
+            let now = inner.clock.now_millis();
+            expiry::sweep(&mut db, &inner.mode, now)?;
+            action(&mut db, &inner.mode, now)
         })
         .await
         .map_err(|_| internal("metadata operation did not complete"))?
@@ -204,208 +256,6 @@ impl Store {
             hash: Hasher::new(),
             sink,
         })
-    }
-
-    pub(crate) async fn create_container(&self, key: ContainerKey) -> Result<Entity> {
-        self.run(move |db, _| {
-            let entity = new_entity()?;
-            let changed = db.execute(
-                "INSERT INTO containers VALUES (?1, ?2, ?3, ?4) ON CONFLICT(account, name) DO NOTHING",
-                params![key.account.as_str(), key.name.as_str(), entity.id, sqlite_int(entity.modified)?],
-            ).map_err(db_error)?;
-            if changed == 0 {
-                return Err(Error::ContainerExists);
-            }
-            Ok(entity)
-        }).await
-    }
-
-    pub(crate) async fn container(&self, key: ContainerKey) -> Result<Entity> {
-        self.run(move |db, _| container(db, &key)).await
-    }
-
-    pub(crate) async fn delete_container(&self, key: ContainerKey) -> Result<()> {
-        self.run(move |db, mode| {
-            let tx = db.transaction().map_err(db_error)?;
-            let values = params![key.account.as_str(), key.name.as_str()];
-            let ids = if matches!(mode, Mode::Disk { .. }) {
-                let mut statement = tx
-                    .prepare("SELECT id FROM blobs WHERE account=?1 AND container=?2
-                              UNION ALL SELECT id FROM staged_blocks WHERE account=?1 AND container=?2")
-                    .map_err(db_error)?;
-                statement
-                    .query_map(values, |row| row.get::<_, Uuid>(0))
-                    .map_err(db_error)?
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .map_err(db_error)?
-            } else {
-                Vec::new()
-            };
-            if tx
-                .execute(
-                    "DELETE FROM containers WHERE account=?1 AND name=?2",
-                    values,
-                )
-                .map_err(db_error)?
-                == 0
-            {
-                return Err(Error::ContainerMissing);
-            }
-            tx.commit().map_err(db_error)?;
-            for id in ids {
-                reclaim(mode, id);
-            }
-            Ok(())
-        })
-        .await
-    }
-
-    pub(crate) async fn list_containers(
-        &self,
-        account: AccountName,
-        page: PageRequest,
-    ) -> Result<Page<Entity>> {
-        self.run(move |db, _| {
-            let mut query = db
-                .prepare(
-                    "SELECT id, modified, name FROM containers
-                 WHERE account=?1 AND name>?2 AND instr(name, ?3)=1 ORDER BY name LIMIT ?4",
-                )
-                .map_err(db_error)?;
-            let rows = query
-                .query_map(
-                    params![account.as_str(), page.after, page.prefix, page.limit + 1],
-                    |row| Ok((row.get(2)?, entity_row(row)?)),
-                )
-                .map_err(db_error)?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(db_error)?;
-            Ok(Page::from_rows(rows, page.limit))
-        })
-        .await
-    }
-
-    pub(crate) async fn list_blobs(
-        &self,
-        key: ContainerKey,
-        page: PageRequest,
-    ) -> Result<Page<BlobInfo>> {
-        self.run(move |db, _| {
-            container(db, &key)?;
-            let mut query = db.prepare(
-                "SELECT id, modified, length, content_type, md5, metadata, name FROM blobs
-                 WHERE account=?1 AND container=?2 AND name>?3 AND instr(name, ?4)=1 ORDER BY name LIMIT ?5"
-            ).map_err(db_error)?;
-            let rows = query.query_map(
-                params![key.account.as_str(), key.name.as_str(), page.after, page.prefix, page.limit + 1],
-                |row| Ok((row.get(6)?, blob_row(row)?)),
-            ).map_err(db_error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
-            Ok(Page::from_rows(rows, page.limit))
-        }).await
-    }
-
-    pub(crate) async fn put_blob(
-        &self,
-        key: BlobKey,
-        options: BlobWrite,
-        upload: Uploaded,
-    ) -> Result<Entity> {
-        self.run(move |db, mode| {
-            let tx = db.transaction().map_err(db_error)?;
-            container(&tx, &key.container)?;
-            let old = blob(&tx, &key)?;
-            options
-                .condition
-                .check(old.as_ref().map(|b| b.entity), false)?;
-            let discard = remove_staged(&tx, &key)?;
-            check_memory_quota(
-                &tx,
-                mode,
-                old.as_ref().map_or(0, |blob| blob.length.0),
-                upload.length.0,
-            )?;
-            let entity = save_blob(
-                &tx,
-                mode,
-                &key,
-                &options,
-                upload.length,
-                upload.data,
-                Some(upload.checksums.md5),
-            )?;
-            tx.commit().map_err(db_error)?;
-            if let Some(old) = old {
-                reclaim(mode, old.entity.id);
-            }
-            for id in discard {
-                reclaim(mode, id);
-            }
-            Ok(entity)
-        })
-        .await
-    }
-
-    pub(crate) async fn read_blob(
-        &self,
-        key: BlobKey,
-        condition: Condition,
-        range: Option<ByteRange>,
-        with_body: bool,
-    ) -> Result<Download> {
-        self.run(move |db, mode| {
-            let info = require_blob(db, &key)?;
-            condition.check(Some(info.entity), true)?;
-            let range = range.map(|range| range.resolve(info.length)).transpose()?;
-            let payload = if with_body {
-                let offset = range.as_ref().map_or(0, |range| range.start);
-                match mode {
-                    Mode::Disk { extents, .. } => Some(Payload::Disk(open_extent(
-                        extents,
-                        info.entity.id,
-                        info.length.0,
-                        offset,
-                    )?)),
-                    Mode::Memory { .. } => {
-                        let size = range
-                            .as_ref()
-                            .map_or(info.length.0, |range| range.end - range.start);
-                        Some(Payload::Memory(read_memory_slice(
-                            db,
-                            ContentSource::Blob,
-                            info.entity.id,
-                            offset,
-                            size,
-                        )?))
-                    }
-                }
-            } else {
-                None
-            };
-            Ok(Download {
-                info,
-                range,
-                payload,
-            })
-        })
-        .await
-    }
-
-    pub(crate) async fn delete_blob(&self, key: BlobKey, condition: Condition) -> Result<()> {
-        self.run(move |db, mode| {
-            let tx = db.transaction().map_err(db_error)?;
-            let old = require_blob(&tx, &key)?;
-            condition.check(Some(old.entity), false)?;
-            let discard = remove_staged(&tx, &key)?;
-            tx.execute("DELETE FROM blobs WHERE id=?1", [old.entity.id])
-                .map_err(db_error)?;
-            tx.commit().map_err(db_error)?;
-            reclaim(mode, old.entity.id);
-            for id in discard {
-                reclaim(mode, id);
-            }
-            Ok(())
-        })
-        .await
     }
 }
 
@@ -510,6 +360,10 @@ fn read_memory_slice(
         ContentSource::StagedBlock => {
             "SELECT COALESCE(substr(bytes, ?2, ?3), bytes) FROM staged_blocks WHERE id=?1"
         }
+        ContentSource::History(..) => {
+            "SELECT COALESCE(substr(bytes, ?2, ?3), bytes) FROM blob_history
+             WHERE content_id=?1 AND bytes IS NOT NULL LIMIT 1"
+        }
     };
     let bytes: Vec<u8> = db
         .query_row(
@@ -548,7 +402,9 @@ fn remove_staged(db: &Connection, key: &BlobKey) -> Result<Vec<Uuid>> {
 fn check_memory_quota(db: &Connection, mode: &Mode, removed: u64, added: u64) -> Result<()> {
     if let Mode::Memory { limit } = mode {
         let stored = db.query_row(
-            "SELECT (SELECT COALESCE(SUM(length),0) FROM blobs) + (SELECT COALESCE(SUM(length),0) FROM staged_blocks)",
+            "SELECT (SELECT COALESCE(SUM(length),0) FROM blobs WHERE blob_type=0) + (SELECT COALESCE(SUM(length),0) FROM staged_blocks) + (SELECT COALESCE(SUM(length),0) FROM blob_extents)
+                    + (SELECT COALESCE(SUM(length),0) FROM blob_history WHERE bytes IS NOT NULL)
+                    + (SELECT COALESCE(SUM(length(bytes)),0) FROM dfs_staged_bytes)",
             [], |row| row_uint(row, 0),
         ).map_err(db_error)?;
         let remaining = stored
@@ -561,39 +417,117 @@ fn check_memory_quota(db: &Connection, mode: &Mode, removed: u64, added: u64) ->
     Ok(())
 }
 
+const BLOB_COLUMNS: &str = "id, modified, COALESCE(etag, id), created, length, content_type, \
+    content_encoding, content_language, content_disposition, cache_control, md5, metadata, \
+    access_tier, access_tier_changed, lease_id, lease_state, lease_duration, lease_expiry, \
+    copy_id, copy_source, copy_completed, blob_type, sequence_number, append_count, sealed";
+
+/// The number of `BLOB_COLUMNS`; a query that selects more starts them at this index.
+const BLOB_COLUMN_COUNT: usize = 25;
+
+/// A blob row with its stored lease, for operations that must check or change it.
+struct BlobRow {
+    info: BlobInfo,
+    lease: StoredLease,
+}
+
+/// Bytes ready to publish as a blob, with the digest computed while receiving them.
+struct Content {
+    length: ContentLength,
+    data: UploadedData,
+    computed_md5: Option<[u8; 16]>,
+}
+
 fn save_blob(
     db: &Connection,
     mode: &Mode,
     key: &BlobKey,
-    options: &BlobWrite,
-    length: ContentLength,
-    data: UploadedData,
-    md5: Option<[u8; 16]>,
+    options: &crate::domain::BlobWrite,
+    content: Content,
+    now: i64,
 ) -> Result<Entity> {
-    let entity = new_entity()?;
+    let Content {
+        length,
+        data,
+        computed_md5,
+    } = content;
+    crate::blob_page::check_tier(crate::blob_page::BlobKind::Block, options.tier)?;
+    let entity = save_row(db, key, options, length, data.bytes(), computed_md5, now)?;
+    data.persist(mode, entity.id)?;
+    Ok(entity)
+}
+
+/// Publishes the blob row and resets its type to a block blob; page and append
+/// callers set their type afterwards. Content persistence is the caller's job.
+fn save_row(
+    db: &Connection,
+    key: &BlobKey,
+    options: &crate::domain::BlobWrite,
+    length: ContentLength,
+    bytes: Option<&[u8]>,
+    computed_md5: Option<[u8; 16]>,
+    now: i64,
+) -> Result<Entity> {
+    let entity = new_entity(now)?;
     let metadata = serde_json::to_string(&options.metadata)
         .map_err(|_| internal("could not encode metadata"))?;
     let [account, container, name] = blob_params(key);
+    let md5 = options.md5.or(computed_md5);
+    let tier = options.tier.map_or("", |tier| tier.name());
+    let (copy_id, copy_source, copy_completed) = options.copy.as_ref().map_or_else(
+        || (String::new(), String::new(), 0),
+        |copy| (copy.id.clone(), copy.source.clone(), entity.modified),
+    );
     db.execute(
-        "INSERT INTO blobs VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+        "INSERT INTO blobs (account, container, name, id, etag, modified, created, length, \
+            content_type, content_encoding, content_language, content_disposition, cache_control, \
+            md5, metadata, bytes, access_tier, access_tier_changed, copy_id, copy_source, copy_completed)
+         VALUES (?1,?2,?3,?4,?4,?5,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
          ON CONFLICT(account,container,name) DO UPDATE SET
-           id=excluded.id, modified=excluded.modified, length=excluded.length,
-           content_type=excluded.content_type, md5=excluded.md5, metadata=excluded.metadata, bytes=excluded.bytes",
-        params![account, container, name, entity.id, sqlite_int(entity.modified)?, sqlite_int(length.0)?,
-                options.content_type, md5.map_or_else(String::new, |md5| STANDARD.encode(md5)), metadata, data.bytes()],
-    ).map_err(db_error)?;
+           id=excluded.id, etag=excluded.etag, modified=excluded.modified, created=excluded.created,
+           length=excluded.length, content_type=excluded.content_type,
+           content_encoding=excluded.content_encoding, content_language=excluded.content_language,
+           content_disposition=excluded.content_disposition, cache_control=excluded.cache_control,
+           md5=excluded.md5, metadata=excluded.metadata, bytes=excluded.bytes,
+           access_tier=excluded.access_tier, access_tier_changed=excluded.access_tier_changed,
+           copy_id=excluded.copy_id, copy_source=excluded.copy_source,
+           copy_completed=excluded.copy_completed,
+           blob_type=0, sequence_number=0, append_count=0, sealed=0",
+        params![
+            account,
+            container,
+            name,
+            entity.id,
+            sqlite_int(entity.modified)?,
+            sqlite_int(length.0)?,
+            options.headers.content_type,
+            options.headers.encoding,
+            options.headers.language,
+            options.headers.disposition,
+            options.headers.cache_control,
+            md5.map_or_else(String::new, |md5| STANDARD.encode(md5)),
+            metadata,
+            bytes,
+            tier,
+            if options.tier.is_some() { sqlite_int(entity.modified)? } else { 0 },
+            copy_id,
+            copy_source,
+            sqlite_int(copy_completed)?,
+        ],
+    )
+    .map_err(db_error)?;
     db.execute(
         "DELETE FROM committed_blocks WHERE account=?1 AND container=?2 AND name=?3",
         blob_params(key),
     )
     .map_err(db_error)?;
-    data.persist(mode, entity.id)?;
+    expiry::clear(db, key)?;
     Ok(entity)
 }
 
 fn container(db: &Connection, key: &ContainerKey) -> Result<Entity> {
     db.query_row(
-        "SELECT id,modified FROM containers WHERE account=?1 AND name=?2",
+        "SELECT id,modified,COALESCE(etag, id) FROM containers WHERE account=?1 AND name=?2",
         params![key.account.as_str(), key.name.as_str()],
         entity_row,
     )
@@ -602,25 +536,48 @@ fn container(db: &Connection, key: &ContainerKey) -> Result<Entity> {
     .ok_or(Error::ContainerMissing)
 }
 
-fn blob(db: &Connection, key: &BlobKey) -> Result<Option<BlobInfo>> {
-    db.query_row(
-        "SELECT id,modified,length,content_type,md5,metadata FROM blobs WHERE account=?1 AND container=?2 AND name=?3",
-        params![key.container.account.as_str(), key.container.name.as_str(), key.path.as_str()], blob_row,
-    ).optional().map_err(db_error)
+fn blob(db: &Connection, key: &BlobKey, now: i64) -> Result<Option<BlobRow>> {
+    let row = db
+        .query_row(
+            &format!(
+                "SELECT {BLOB_COLUMNS}, version_id FROM blobs
+                 WHERE account=?1 AND container=?2 AND name=?3"
+            ),
+            params![
+                key.container.account.as_str(),
+                key.container.name.as_str(),
+                key.path.as_str()
+            ],
+            |row| {
+                let mut blob = blob_row(row, now)?;
+                let version: i64 = row.get(BLOB_COLUMN_COUNT)?;
+                blob.info.entity.version = (version != 0).then_some(Ticks(version));
+                Ok(blob)
+            },
+        )
+        .optional()
+        .map_err(db_error)?;
+    row.map(|row| tags::attach(db, key, row))
+        .transpose()?
+        .map(|row| expiry::attach(db, key, row))
+        .transpose()
 }
 
-fn require_blob(db: &Connection, key: &BlobKey) -> Result<BlobInfo> {
-    if let Some(blob) = blob(db, key)? {
+fn require_blob(db: &Connection, key: &BlobKey, now: i64) -> Result<BlobRow> {
+    if let Some(blob) = blob(db, key, now)? {
         return Ok(blob);
     }
     container(db, &key.container)?;
     Err(Error::BlobMissing)
 }
 
+/// Reads `id, modified, etag` starting at column zero.
 fn entity_row(row: &Row<'_>) -> rusqlite::Result<Entity> {
     Ok(Entity {
         id: row.get(0)?,
         modified: row_uint(row, 1)?,
+        tag: row.get(2)?,
+        version: None,
     })
 }
 
@@ -637,30 +594,120 @@ fn sqlite_int(value: u64) -> Result<i64> {
         .map_err(|_| internal("number is outside the SQLite integer range"))
 }
 
-fn blob_row(row: &Row<'_>) -> rusqlite::Result<BlobInfo> {
-    let json: String = row.get(5)?;
-    let metadata = serde_json::from_str(&json).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(error))
-    })?;
-    let md5: String = row.get(4)?;
-    Ok(BlobInfo {
-        entity: entity_row(row)?,
-        length: ContentLength(row_uint(row, 2)?),
-        content_type: row.get(3)?,
-        md5: (!md5.is_empty()).then_some(md5),
-        metadata,
+fn metadata_column(row: &Row<'_>, column: usize) -> rusqlite::Result<crate::domain::Metadata> {
+    let json: String = row.get(column)?;
+    serde_json::from_str(&json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
     })
 }
 
-fn new_entity() -> Result<Entity> {
-    let modified = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| internal("system clock predates the epoch"))?
-        .as_secs();
-    Ok(Entity {
-        id: Uuid::new_v4(),
-        modified,
+/// Reads the four lease columns starting at `first`.
+fn lease_row(row: &Row<'_>, first: usize) -> rusqlite::Result<StoredLease> {
+    let id: Option<String> = row.get(first)?;
+    let id = id
+        .map(|text| LeaseId::parse(&text))
+        .transpose()
+        .map_err(|_| {
+            rusqlite::Error::InvalidColumnType(
+                first,
+                "lease_id".into(),
+                rusqlite::types::Type::Text,
+            )
+        })?;
+    Ok(StoredLease {
+        id,
+        kind: LeaseKind::from_code(row.get(first + 1)?),
+        duration: row.get(first + 2)?,
+        deadline: row.get(first + 3)?,
     })
+}
+
+fn blob_row(row: &Row<'_>, now: i64) -> rusqlite::Result<BlobRow> {
+    let md5: String = row.get(10)?;
+    let entity = entity_row(row)?;
+    let created = row_uint(row, 3)?;
+    let tier: String = row.get(12)?;
+    let copy_id: String = row.get(18)?;
+    let lease = lease_row(row, 14)?;
+    Ok(BlobRow {
+        info: BlobInfo {
+            entity,
+            created: if created == 0 {
+                entity.modified
+            } else {
+                created
+            },
+            length: ContentLength(row_uint(row, 4)?),
+            headers: ContentHeaders {
+                content_type: row.get(5)?,
+                encoding: row.get(6)?,
+                language: row.get(7)?,
+                disposition: row.get(8)?,
+                cache_control: row.get(9)?,
+            },
+            md5: (!md5.is_empty()).then_some(md5),
+            metadata: metadata_column(row, 11)?,
+            tier: crate::domain::AccessTier::parse(&tier)
+                .ok()
+                .map(|tier| Ok::<_, rusqlite::Error>((tier, row_uint(row, 13)?)))
+                .transpose()?,
+            lease: lease.view(now),
+            copy: if copy_id.is_empty() {
+                None
+            } else {
+                Some(CopyInfo {
+                    id: copy_id,
+                    source: row.get(19)?,
+                    completed: row_uint(row, 20)?,
+                })
+            },
+            uncommitted: false,
+            kind: crate::blob_page::BlobKind::from_stored(
+                row.get(21)?,
+                row.get(22)?,
+                row.get(23)?,
+                row.get(24)?,
+            ),
+            tags: Tags::new(),
+            lifecycle: Default::default(),
+        },
+        lease,
+    })
+}
+
+fn new_entity(now: i64) -> Result<Entity> {
+    let id = Uuid::new_v4();
+    Ok(Entity {
+        id,
+        tag: id,
+        modified: seconds(now)?,
+        version: None,
+    })
+}
+
+fn seconds(now: i64) -> Result<u64> {
+    u64::try_from(now / 1000).map_err(|_| internal("system clock predates the epoch"))
+}
+
+/// Persists a lease change on a blob or container row.
+fn write_lease(db: &Connection, table: &str, key: &[&str], lease: &StoredLease) -> Result<()> {
+    let sql = if table == "blobs" {
+        "UPDATE blobs SET lease_id=?1, lease_state=?2, lease_duration=?3, lease_expiry=?4
+         WHERE account=?5 AND container=?6 AND name=?7"
+    } else {
+        "UPDATE containers SET lease_id=?1, lease_state=?2, lease_duration=?3, lease_expiry=?4
+         WHERE account=?5 AND name=?6"
+    };
+    let id = lease.id.map(LeaseId::text);
+    let kind = lease.kind.code();
+    let mut values: Vec<&dyn rusqlite::ToSql> = vec![&id, &kind, &lease.duration, &lease.deadline];
+    values.extend(key.iter().map(|part| part as &dyn rusqlite::ToSql));
+    db.execute(sql, values.as_slice()).map_err(db_error)?;
+    Ok(())
 }
 
 fn extent(dir: &Path, id: Uuid) -> PathBuf {
@@ -679,7 +726,10 @@ fn recover(db: &Connection, dir: &Path) -> anyhow::Result<()> {
             .and_then(|id| Uuid::parse_str(id).ok())
         {
             !db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM blobs WHERE id=?1 UNION ALL SELECT 1 FROM staged_blocks WHERE id=?1)",
+                "SELECT EXISTS(SELECT 1 FROM blobs WHERE id=?1 UNION ALL SELECT 1 FROM staged_blocks WHERE id=?1 UNION ALL SELECT 1 FROM blob_ranges WHERE extent=?1
+                 UNION ALL SELECT 1 FROM dfs_staged WHERE extent=?1
+                 UNION ALL SELECT 1 FROM history_ranges WHERE extent=?1
+                 UNION ALL SELECT 1 FROM blob_history WHERE content_id=?1)",
                 [id],
                 |row| row.get::<_, bool>(0),
             )?
@@ -694,8 +744,12 @@ fn recover(db: &Connection, dir: &Path) -> anyhow::Result<()> {
 }
 
 fn reclaim(mode: &Mode, id: Uuid) {
-    if let Mode::Disk { extents, .. } = mode
+    if let Mode::Disk {
+        extents, pinned, ..
+    } = mode
+        && !snapshots::is_pinned(pinned, id)
         && let Err(error) = fs::remove_file(extent(extents, id))
+        && error.kind() != std::io::ErrorKind::NotFound
     {
         tracing::warn!(kind = ?error.kind(), "content cleanup deferred until recovery");
     }

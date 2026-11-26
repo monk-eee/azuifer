@@ -50,6 +50,7 @@ def verify_client(emulator_id, version, client_image):
             "--tmpfs", "/data:rw,mode=0770,uid=65532,gid=65532,size=1g",
             "--env", "AZUIFER_ACCOUNT_KEY", emulator_id,
             "serve", "--location", "/data", "--skip-api-version-check",
+            "--services", "blob,dfs", "--hns-accounts", "devstoreaccount1",
             env=env,
         )
         containers.append(emulator)
@@ -62,9 +63,11 @@ def verify_client(emulator_id, version, client_image):
             raise RuntimeError("expected a non-root emulator with no external network and a read-only root")
         client = docker(
             "create", "--network", f"container:{emulator}", "--env", "AZUIFER_ACCOUNT_KEY",
+            "--env", "PYTHONPATH=/usr/lib64/az/lib/python3.12/site-packages",
             "--mount", f"type=bind,source={FIXTURE},target=/tmp/azure_cli.py,readonly",
             "--entrypoint", "python3", client_image,
-            "/tmp/azure_cli.py", "--expected-version", version, "--json",
+            "/tmp/azure_cli.py", "--dfs-url", "http://127.0.0.1:10003",
+            "--expected-version", version, "--json",
             env=env, timeout=420,
         )
         containers.append(client)
@@ -72,6 +75,8 @@ def verify_client(emulator_id, version, client_image):
         evidence = json.loads(docker("start", "--attach", client, timeout=720))
         if evidence["cli_version"] != version:
             raise RuntimeError(f"expected Azure CLI {version}, found {evidence['cli_version']}")
+        if not evidence.get("dfs"):
+            raise RuntimeError("the compatibility fixture did not report DFS evidence")
         result.update(evidence)
     except (*DOCKER_ERRORS, ValueError, KeyError) as error:
         errors.append(str(error))
@@ -108,6 +113,7 @@ def main():
             "emulator_image_id": image_id,
             "platform": platform,
             "blob_api_version": manifest["api_version"],
+            "dfs_api_version": manifest["services"]["dfs"]["api_version"],
             "authorization": "SharedKey",
             "newer_version_fallback": True,
             "azure_differential_verified": False,

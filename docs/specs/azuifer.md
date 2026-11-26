@@ -128,7 +128,7 @@ Return Azure-shaped authentication errors. Do not emit secrets, signatures, SAS 
 
 ## 10. Configuration and CLI
 
-Precedence, highest first: command-line arguments, `AZUIFER_*` environment variables, TOML configuration, defaults. Proposed commands:
+Precedence, highest first: command-line arguments, `AZUIFER_*` environment variables, TOML configuration, defaults. Commands:
 
 | Command | Purpose |
 | --- | --- |
@@ -136,9 +136,9 @@ Precedence, highest first: command-line arguments, `AZUIFER_*` environment varia
 | `azuifer serve --in-memory` | Keep storage state in memory only. |
 | `azuifer serve --location ./data` | Select a local persistent storage directory. |
 | `azuifer serve --services blob,dfs,file` | Start only the selected services. |
-| `azuifer status` | Show local instance status. |
-| `azuifer doctor` | Diagnose local configuration or runtime problems. |
-| `azuifer reset` | Reset local emulator state. |
+| `azuifer status` | Show the status of a running instance from its admin `/healthz` and `/status` (`--admin-url`, `--json`, `--ready`). |
+| `azuifer doctor` | Check configuration, port availability, data directory writability and lock, SQLite WAL support, free disk, and container hints. Exits non-zero on a failed check. |
+| `azuifer reset --yes` | Delete the emulator state under `--location`. Refuses while another process holds the directory lock. |
 | `azuifer conformance export` | Export conformance data. |
 | `azuifer config validate` | Validate local configuration. |
 
@@ -149,6 +149,8 @@ Strict protocol behavior is the default. A named compatibility mode may allow se
 Use OpenTelemetry for traces of requests, authentication, metadata transactions, content operations, and copy. Collect metrics for rate, latency, statuses, bytes, queue depth, active leases, SQLite contention, garbage collection, and backend failures. Emit structured logs with request IDs and trace correlation.
 
 Support opt-in OTLP/gRPC, OTLP/HTTP, Prometheus, and structured console/file output. There is no unsolicited product telemetry; diagnostics are not transmitted to external collectors without explicit configuration. Redact sensitive values before export.
+
+Implemented surface: `--otlp-endpoint` (`AZUIFER_OTLP_ENDPOINT`, plain `http://` collectors) with `--otlp-protocol grpc|http` exports one server span per request, with `authenticate` and `storage` child spans on Blob, and request, latency, status, byte, and active-request metrics. `--prometheus` serves the same request metrics at `GET /metrics` on the admin listener. `--log-format json|text` and `--log-file` select the log output. Span attributes pass through a redactor that masks configured account keys, `sig=` and similar query values, and Authorization credentials. Queue depth, active leases, SQLite contention, garbage collection, and backend failure metrics are not yet emitted.
 
 ## 12. Security requirements
 

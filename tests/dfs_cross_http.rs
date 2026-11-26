@@ -1,0 +1,552 @@
+//! Blob/DFS interoperability on the shared namespace (ADR-0003, ADR-0020): Blob writes
+//! read through DFS and DFS writes read through Blob with the same bytes and ETag, a
+//! directory rename is atomic for concurrent Blob listings, and leases and restarts stay
+//! coherent across both protocols. DFS operation details are in `dfs_http.rs`.
+
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use hmac::{Hmac, Mac as _};
+use reqwest::{
+    Method, Url,
+    blocking::{Client, Response},
+};
+use sha2::Sha256;
+use std::{
+    collections::BTreeMap,
+    io::{BufRead as _, BufReader},
+    path::Path,
+    process::{Child, Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread,
+    time::{Duration, Instant, SystemTime},
+};
+
+const ACCOUNT: &str = "testaccount";
+const VERSION: &str = "2023-11-03";
+const KEY: [u8; 32] = [41; 32];
+const LAKE: &str = "/testaccount/lake";
+
+struct Emulator {
+    child: Child,
+    blob: String,
+    dfs: String,
+    client: Client,
+}
+
+impl Drop for Emulator {
+    fn drop(&mut self) {
+        drop(self.child.stdin.take());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Emulator {
+    fn start(location: Option<&Path>) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_azuifer"));
+        for (name, _) in std::env::vars_os() {
+            if name
+                .to_string_lossy()
+                .to_ascii_uppercase()
+                .starts_with("AZUIFER_")
+            {
+                command.env_remove(name);
+            }
+        }
+        command
+            .env("AZUIFER_ACCOUNT_NAME", ACCOUNT)
+            .env("AZUIFER_ACCOUNT_KEY", STANDARD.encode(KEY))
+            .args([
+                "serve",
+                "--port",
+                "0",
+                "--admin-port",
+                "0",
+                "--services",
+                "blob,dfs",
+                "--hns-accounts",
+                ACCOUNT,
+                "--shutdown-on-stdin-eof",
+            ]);
+        match location {
+            Some(location) => command.arg("--location").arg(location),
+            None => command.arg("--in-memory"),
+        };
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("start Azuifer");
+        let stdout = child.stdout.take().expect("piped startup addresses");
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let mut urls = BTreeMap::new();
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if let Some((name, url)) = line.split_once("_url=") {
+                    urls.insert(name.to_owned(), url.to_owned());
+                    if name == "admin" {
+                        break;
+                    }
+                }
+            }
+            sender.send(urls).ok();
+        });
+        let mut urls = receiver
+            .recv_timeout(Duration::from_secs(20))
+            .expect("server bound its ports");
+        Self {
+            child,
+            blob: urls.remove("blob").expect("blob listener"),
+            dfs: urls.remove("dfs").expect("dfs listener"),
+            client: Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap(),
+        }
+    }
+
+    fn send(
+        &self,
+        base: &str,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Response {
+        let method = Method::from_bytes(method.as_bytes()).unwrap();
+        let url = Url::parse(&format!("{base}{path}")).unwrap();
+        let has_body = matches!(method.as_str(), "PUT" | "PATCH" | "POST");
+        let mut request = self.client.request(method.clone(), url.clone());
+        for (name, value) in shared_key(
+            method.as_str(),
+            &url,
+            headers,
+            has_body.then_some(body.len()),
+        ) {
+            request = request.header(name, value);
+        }
+        if has_body {
+            request = request.body(body.to_vec());
+        }
+        request.send().expect("HTTP request completed")
+    }
+
+    fn dfs(&self, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Response {
+        self.send(&self.dfs, method, path, headers, body)
+    }
+
+    fn blob(&self, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Response {
+        self.send(&self.blob, method, path, headers, body)
+    }
+
+    fn filesystem(&self) {
+        assert_eq!(
+            self.dfs("PUT", &format!("{LAKE}?resource=filesystem"), &[], b"")
+                .status(),
+            201
+        );
+    }
+
+    fn put_blob(&self, name: &str, headers: &[(&str, &str)], body: &[u8]) -> Response {
+        let mut all = vec![("x-ms-blob-type", "BlockBlob")];
+        all.extend_from_slice(headers);
+        let response = self.blob("PUT", &format!("{LAKE}/{name}"), &all, body);
+        assert_eq!(response.status(), 201, "put {name}");
+        response
+    }
+
+    fn dfs_file(&self, name: &str, content: &[u8]) -> Response {
+        let url = format!("{LAKE}/{name}");
+        assert_eq!(
+            self.dfs("PUT", &format!("{url}?resource=file"), &[], b"")
+                .status(),
+            201
+        );
+        assert_eq!(
+            self.dfs(
+                "PATCH",
+                &format!("{url}?action=append&position=0"),
+                &[],
+                content
+            )
+            .status(),
+            202
+        );
+        let flushed = self.dfs(
+            "PATCH",
+            &format!("{url}?action=flush&position={}", content.len()),
+            &[],
+            b"",
+        );
+        assert_eq!(flushed.status(), 200);
+        flushed
+    }
+}
+
+fn shared_key(
+    method: &str,
+    url: &Url,
+    extra: &[(&str, &str)],
+    length: Option<usize>,
+) -> BTreeMap<String, String> {
+    let mut headers: BTreeMap<String, String> = BTreeMap::from([
+        (
+            "x-ms-date".into(),
+            httpdate::fmt_http_date(SystemTime::now()),
+        ),
+        ("x-ms-version".into(), VERSION.into()),
+    ]);
+    if let Some(length) = length {
+        headers.insert("content-length".into(), length.to_string());
+    }
+    for (name, value) in extra {
+        headers.insert((*name).into(), (*value).into());
+    }
+    let value = |name| headers.get(name).map_or("", String::as_str);
+    let lines = [
+        method,
+        value("content-encoding"),
+        value("content-language"),
+        if length.is_none_or(|length| length == 0) {
+            ""
+        } else {
+            value("content-length")
+        },
+        value("content-md5"),
+        value("content-type"),
+        "",
+        value("if-modified-since"),
+        value("if-match"),
+        value("if-none-match"),
+        value("if-unmodified-since"),
+        value("range"),
+    ];
+    let extensions: String = headers
+        .iter()
+        .filter(|(name, _)| name.starts_with("x-ms-"))
+        .map(|(name, value)| format!("{name}:{value}\n"))
+        .collect();
+    let query: BTreeMap<_, _> = url
+        .query_pairs()
+        .map(|(name, value)| (name.to_ascii_lowercase(), value))
+        .collect();
+    let query: String = query
+        .iter()
+        .map(|(name, value)| format!("\n{name}:{value}"))
+        .collect();
+    let message = format!(
+        "{}\n{extensions}/{ACCOUNT}{}{query}",
+        lines.join("\n"),
+        url.path()
+    );
+    let mut mac = Hmac::<Sha256>::new_from_slice(&KEY).unwrap();
+    mac.update(message.as_bytes());
+    headers.insert(
+        "authorization".into(),
+        format!(
+            "SharedKey {ACCOUNT}:{}",
+            STANDARD.encode(mac.finalize().into_bytes())
+        ),
+    );
+    headers
+}
+
+fn etag(response: &Response) -> String {
+    response.headers()["etag"].to_str().unwrap().to_owned()
+}
+
+fn header(response: &Response, name: &str) -> String {
+    response
+        .headers()
+        .get(name)
+        .unwrap_or_else(|| panic!("missing {name}"))
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn dfs_error(response: Response, status: u16, code: &str) {
+    assert_eq!(response.status().as_u16(), status, "{code}");
+    assert_eq!(response.headers()["x-ms-error-code"], code);
+}
+
+#[test]
+fn blob_writes_read_through_dfs_and_dfs_writes_read_through_blob() {
+    let server = Emulator::start(None);
+    server.filesystem();
+    let written = server.put_blob(
+        "a/b.txt",
+        &[("content-type", "text/plain"), ("x-ms-meta-origin", "blob")],
+        b"from blob",
+    );
+    let as_file = server.dfs("GET", &format!("{LAKE}/a/b.txt"), &[], b"");
+    assert_eq!(etag(&as_file), etag(&written));
+    assert_eq!(header(&as_file, "content-type"), "text/plain");
+    assert_eq!(header(&as_file, "x-ms-properties"), "origin=YmxvYg==");
+    assert_eq!(header(&as_file, "x-ms-resource-type"), "file");
+    assert_eq!(as_file.bytes().unwrap().as_ref(), b"from blob");
+    let parent = server.dfs("HEAD", &format!("{LAKE}/a"), &[], b"");
+    assert_eq!(header(&parent, "x-ms-resource-type"), "directory");
+
+    let flushed = server.dfs_file("c/d.bin", &[7u8; 5000]);
+    let as_blob = server.blob("GET", &format!("{LAKE}/c/d.bin"), &[], b"");
+    assert_eq!(etag(&as_blob), etag(&flushed));
+    assert_eq!(header(&as_blob, "x-ms-blob-type"), "BlockBlob");
+    assert_eq!(header(&as_blob, "content-length"), "5000");
+    assert_eq!(as_blob.bytes().unwrap().as_ref(), &[7u8; 5000][..]);
+    let listing = server
+        .blob(
+            "GET",
+            &format!("{LAKE}?restype=container&comp=list"),
+            &[],
+            b"",
+        )
+        .text()
+        .unwrap();
+    for name in ["a", "a/b.txt", "c", "c/d.bin"] {
+        assert!(
+            listing.contains(&format!("<Name>{name}</Name>")),
+            "{name}: {listing}"
+        );
+    }
+    assert!(listing.contains("<Content-Length>5000</Content-Length>"));
+
+    // Blob property and content changes show through DFS with the new ETag.
+    let metadata = server.blob(
+        "PUT",
+        &format!("{LAKE}/c/d.bin?comp=metadata"),
+        &[("x-ms-meta-stage", "two")],
+        b"",
+    );
+    assert_eq!(metadata.status(), 200);
+    let after = server.dfs("HEAD", &format!("{LAKE}/c/d.bin"), &[], b"");
+    assert_eq!(etag(&after), etag(&metadata));
+    assert_eq!(header(&after, "x-ms-properties"), "stage=dHdv");
+    server.put_blob("c/d.bin", &[], b"replaced by blob");
+    assert_eq!(
+        server
+            .dfs("GET", &format!("{LAKE}/c/d.bin"), &[], b"")
+            .bytes()
+            .unwrap()
+            .as_ref(),
+        b"replaced by blob"
+    );
+}
+
+#[test]
+fn a_blob_write_discards_unflushed_dfs_data() {
+    let server = Emulator::start(None);
+    server.filesystem();
+    let file = format!("{LAKE}/raced.txt");
+    server.dfs("PUT", &format!("{file}?resource=file"), &[], b"");
+    server.dfs(
+        "PATCH",
+        &format!("{file}?action=append&position=0"),
+        &[],
+        b"dfs",
+    );
+    server.put_blob("raced.txt", &[], b"blob");
+    dfs_error(
+        server.dfs(
+            "PATCH",
+            &format!("{file}?action=flush&position=3"),
+            &[],
+            b"",
+        ),
+        400,
+        "InvalidFlushPosition",
+    );
+    assert_eq!(
+        server.dfs("GET", &file, &[], b"").bytes().unwrap().as_ref(),
+        b"blob"
+    );
+    // The file takes new appends from the Blob content onward.
+    server.dfs(
+        "PATCH",
+        &format!("{file}?action=append&position=4"),
+        &[],
+        b"+dfs",
+    );
+    assert_eq!(
+        server
+            .dfs(
+                "PATCH",
+                &format!("{file}?action=flush&position=8"),
+                &[],
+                b""
+            )
+            .status(),
+        200
+    );
+    assert_eq!(
+        server.dfs("GET", &file, &[], b"").bytes().unwrap().as_ref(),
+        b"blob+dfs"
+    );
+}
+
+#[test]
+fn a_directory_rename_is_never_partly_visible_to_blob_listings() {
+    const FILES: usize = 150;
+    let server = Emulator::start(None);
+    server.filesystem();
+    for index in 0..FILES {
+        server.put_blob(&format!("tree/part/f{index:03}"), &[], b"x");
+    }
+    let done = AtomicBool::new(false);
+    let (old_tree, new_tree) = ("tree/part/f", "moved/part/f");
+    thread::scope(|scope| {
+        let renamer = scope.spawn(|| {
+            let mut flips = 0;
+            while !done.load(Ordering::Relaxed) {
+                for (from, to) in [("tree", "moved"), ("moved", "tree")] {
+                    let source = format!("/lake/{from}");
+                    let renamed = server.dfs(
+                        "PUT",
+                        &format!("{LAKE}/{to}?mode=posix"),
+                        &[("x-ms-rename-source", &source)],
+                        b"",
+                    );
+                    assert_eq!(renamed.status(), 201);
+                    flips += 1;
+                }
+            }
+            flips
+        });
+        for _ in 0..40 {
+            let listing = server
+                .blob(
+                    "GET",
+                    &format!("{LAKE}?restype=container&comp=list&maxresults=5000"),
+                    &[],
+                    b"",
+                )
+                .text()
+                .unwrap();
+            let before = listing.matches(&format!("<Name>{old_tree}")).count();
+            let after = listing.matches(&format!("<Name>{new_tree}")).count();
+            assert!(
+                (before, after) == (FILES, 0) || (before, after) == (0, FILES),
+                "partial move: {before} under the old name, {after} under the new"
+            );
+        }
+        done.store(true, Ordering::Relaxed);
+        let flips = renamer.join().unwrap();
+        assert!(flips >= 2, "the listing raced {flips} renames");
+    });
+}
+
+#[test]
+fn blob_leases_protect_files_from_dfs_operations() {
+    let server = Emulator::start(None);
+    server.filesystem();
+    server.put_blob("held.txt", &[], b"leased");
+    let file = format!("{LAKE}/held.txt");
+    let lease = server.blob(
+        "PUT",
+        &format!("{file}?comp=lease"),
+        &[
+            ("x-ms-lease-action", "acquire"),
+            ("x-ms-lease-duration", "-1"),
+        ],
+        b"",
+    );
+    let id = header(&lease, "x-ms-lease-id");
+    dfs_error(
+        server.dfs(
+            "PATCH",
+            &format!("{file}?action=append&position=6"),
+            &[],
+            b"!",
+        ),
+        412,
+        "LeaseIdMissing",
+    );
+    dfs_error(server.dfs("DELETE", &file, &[], b""), 412, "LeaseIdMissing");
+    dfs_error(
+        server.dfs(
+            "PUT",
+            &format!("{LAKE}/renamed.txt"),
+            &[("x-ms-rename-source", "/lake/held.txt")],
+            b"",
+        ),
+        412,
+        "LeaseIdMissing",
+    );
+    let appended = server.dfs(
+        "PATCH",
+        &format!("{file}?action=append&position=6"),
+        &[("x-ms-lease-id", &id)],
+        b"!",
+    );
+    assert_eq!(appended.status(), 202);
+    let flushed = server.dfs(
+        "PATCH",
+        &format!("{file}?action=flush&position=7"),
+        &[("x-ms-lease-id", &id)],
+        b"",
+    );
+    assert_eq!(flushed.status(), 200);
+    let blob_view = server.blob("GET", &file, &[("x-ms-lease-id", &id)], b"");
+    assert_eq!(etag(&blob_view), etag(&flushed));
+    assert_eq!(header(&blob_view, "x-ms-lease-state"), "leased");
+    assert_eq!(blob_view.bytes().unwrap().as_ref(), b"leased!");
+    // A Blob write needs the lease too.
+    let blocked = server.blob("PUT", &file, &[("x-ms-blob-type", "BlockBlob")], b"x");
+    assert_eq!(blocked.status(), 412);
+}
+
+#[test]
+fn shared_state_survives_a_restart_through_both_protocols() {
+    let location = tempfile::tempdir().unwrap();
+    let (blob_tag, dfs_tag);
+    {
+        let server = Emulator::start(Some(location.path()));
+        server.filesystem();
+        blob_tag = etag(&server.put_blob("dir/blob.txt", &[], b"blob data"));
+        dfs_tag = etag(&server.dfs_file("dir/dfs.txt", b"dfs data"));
+        server.dfs(
+            "PATCH",
+            &format!("{LAKE}/dir?action=setAccessControl"),
+            &[("x-ms-permissions", "0700"), ("x-ms-owner", "someone")],
+            b"",
+        );
+        let renamed = server.dfs(
+            "PUT",
+            &format!("{LAKE}/renamed"),
+            &[("x-ms-rename-source", "/lake/dir")],
+            b"",
+        );
+        assert_eq!(renamed.status(), 201);
+    }
+    let server = Emulator::start(Some(location.path()));
+    for (name, tag, bytes) in [
+        ("renamed/blob.txt", &blob_tag, &b"blob data"[..]),
+        ("renamed/dfs.txt", &dfs_tag, &b"dfs data"[..]),
+    ] {
+        let as_blob = server.blob("GET", &format!("{LAKE}/{name}"), &[], b"");
+        let as_file = server.dfs("GET", &format!("{LAKE}/{name}"), &[], b"");
+        assert_eq!(etag(&as_blob), *tag, "{name}");
+        assert_eq!(etag(&as_file), *tag, "{name}");
+        assert_eq!(as_blob.bytes().unwrap().as_ref(), bytes);
+        assert_eq!(as_file.bytes().unwrap().as_ref(), bytes);
+    }
+    let directory = server.dfs("HEAD", &format!("{LAKE}/renamed"), &[], b"");
+    assert_eq!(header(&directory, "x-ms-owner"), "someone");
+    assert_eq!(header(&directory, "x-ms-permissions"), "rwx------");
+    assert_eq!(
+        server
+            .dfs("HEAD", &format!("{LAKE}/dir"), &[], b"")
+            .status(),
+        404
+    );
+}

@@ -58,6 +58,70 @@ jobs:
           name: azure-cli-compatibility
           path: dist/azure-cli-compatibility.json
           if-no-files-found: error
+  dotnet-sdk:
+    name: .NET Azure SDK compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: cargo build --locked
+      - name: Run the .NET SDK scenarios against all five services
+        run: |
+          ./target/debug/azuifer serve --in-memory --memory-limit 1073741824 \
+            --skip-api-version-check --services blob,queue,table,file,dfs \
+            --hns-accounts devstoreaccount1 > azuifer.log 2>&1 &
+          for _ in $(seq 1 60); do
+            curl -fs http://127.0.0.1:10005/readyz && break
+            sleep 1
+          done
+          dotnet run --project tests/dotnet_sdk
+      - name: Show the server log on failure
+        if: failure()
+        run: tail -n 100 azuifer.log
+  js-sdk:
+    name: JavaScript Azure SDK compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: cargo build --locked
+      - run: npm ci
+        working-directory: tests/js_sdk
+      - name: Run the JavaScript SDK scenarios against all five services
+        run: |
+          echo "127.0.0.1 devstoreaccount1.dfs.localhost devstoreaccount1.blob.localhost" | sudo tee -a /etc/hosts
+          ../../target/debug/azuifer serve --in-memory --memory-limit 1073741824 \
+            --skip-api-version-check --services blob,queue,table,file,dfs \
+            --hns-accounts devstoreaccount1 --dfs-port 20003 > azuifer.log 2>&1 &
+          for _ in $(seq 1 60); do
+            curl -fs http://127.0.0.1:10005/readyz && break
+            sleep 1
+          done
+          node probe.js
+        working-directory: tests/js_sdk
+      - name: Show the server log on failure
+        if: failure()
+        run: tail -n 100 tests/js_sdk/azuifer.log
+  java-sdk:
+    name: Java Azure SDK compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: cargo build --locked
+      - name: Run the Java SDK scenarios against all five services
+        run: |
+          sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
+          echo "127.0.0.1 devstoreaccount1.file.localhost" | sudo tee -a /etc/hosts
+          ../../target/debug/azuifer serve --in-memory --memory-limit 1073741824 \
+            --skip-api-version-check --services blob,queue,table,file,dfs \
+            --hns-accounts devstoreaccount1 --file-port 80 > azuifer.log 2>&1 &
+          for _ in $(seq 1 60); do
+            curl -fs http://127.0.0.1:10005/readyz && break
+            sleep 1
+          done
+          mvn -q -B compile exec:java
+        working-directory: tests/java_sdk
+      - name: Show the server log on failure
+        if: failure()
+        run: tail -n 100 tests/java_sdk/azuifer.log
   dependencies:
     runs-on: ubuntu-latest
     steps:
