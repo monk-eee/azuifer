@@ -249,6 +249,28 @@ impl Emulator {
         )
     }
 
+    /// Sends only the headers of an append that declares `length` bytes and reads the
+    /// answer. A body this large cannot be sent portably: the server answers before it
+    /// reads the body, and some platforms reset the connection under the writer.
+    fn oversize_append(&self, path: &str, length: usize) -> String {
+        let target = format!("{path}?comp=appendblock");
+        let url = Url::parse(&format!("{}{target}", self.blob)).unwrap();
+        let headers = signed(&Method::PUT, &url, &[], Some(length));
+        let mut head = format!("PUT {target} HTTP/1.1\r\nhost: {}\r\n", url.authority());
+        for (name, value) in headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        head.push_str("connection: close\r\n\r\n");
+        let mut stream = TcpStream::connect(url.authority()).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        stream.write_all(head.as_bytes()).unwrap();
+        let mut answer = String::new();
+        let _ = std::io::Read::read_to_string(&mut stream, &mut answer);
+        answer
+    }
+
     fn page_ranges(&self, path: &str, query: &str, extra: &[(&str, &str)]) -> Response {
         self.request(
             Method::GET,
@@ -1193,11 +1215,9 @@ fn append_conditions_checksums_and_limits_are_enforced() {
     error(server.append(APPEND, b"", &[]), 400, "InvalidHeaderValue");
     let four_mib = 4 * 1024 * 1024;
     // Version 2022-11-02 raised the Append Block limit to 100 MiB.
-    error(
-        server.append(APPEND, &vec![1u8; 100 * 1024 * 1024 + 1], &[]),
-        413,
-        "RequestBodyTooLarge",
-    );
+    let refusal = server.oversize_append(APPEND, 100 * 1024 * 1024 + 1);
+    assert!(refusal.starts_with("HTTP/1.1 413"), "{refusal}");
+    assert!(refusal.contains("RequestBodyTooLarge"), "{refusal}");
     assert_eq!(body(server.read(APPEND, None)), b"12345abc");
     let big = server.append(APPEND, &vec![1u8; four_mib], &[]);
     assert_eq!(big.status(), 201);
