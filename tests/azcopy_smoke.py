@@ -13,6 +13,9 @@ Then, with an AzCopy v10 binary you downloaded yourself:
 
 Pass --blob-sas/--file-sas to use your own SAS tokens instead of the SDK; the default
 account and key are the public development-storage fixture, valid on loopback only.
+The DFS steps need an account with the namespace on (--hns-accounts devstoreaccount1) and
+the Blob steps need one without it, so run them as two passes against two servers:
+--skip-dfs, then --skip-blob --skip-files. The DFS pass uses --dfs-url (default port 10003).
 AzCopy cannot take an account key, so every step authenticates with SAS. AzCopy infers
 the service from the host name and does not recognise a bare IP endpoint, so the
 script always passes --from-to (and `azcopy make` cannot be used). Containers and
@@ -347,17 +350,49 @@ def smoke_files(azcopy, base, sas, data, tree, work):
         http("DELETE", f"{base}/{name}?restype=share&{sas}")
 
 
+def smoke_dfs(azcopy, base, sas, data, tree, work):
+    filesystem = f"azcopysmoke{uuid.uuid4().hex[:8]}"
+    url = lambda path="": f"{base}/{filesystem}{path}?{sas}"
+    status, _ = http("PUT", f"{base}/{filesystem}?resource=filesystem&{sas}")
+    step("dfs: create filesystem (HTTP; azcopy make rejects IP endpoints)", status == 201, status)
+    count = len(tree_hashes(tree))
+
+    ok = job_ok(azcopy.run("copy", str(data / "single.bin"), url("/single.bin"), "--from-to", "LocalBlobFS"))
+    step("dfs: copy single file up (Create, Append, Flush)", ok)
+    result = azcopy.run("copy", str(tree), url(), "--from-to", "LocalBlobFS", "--recursive")
+    step("dfs: copy directory tree up", job_ok(result), result[1][-400:])
+    code, output = azcopy.run("list", url(), "--location", "BlobFS", "--running-tally")
+    entries = re.search(r"File count: (\d+)", output)
+    step("dfs: list", code == 0 and entries is not None and int(entries.group(1)) >= count + 1,
+         f"got {entries and entries.group(1)}: {output[-300:]}")
+    down = work / "dfs-down"
+    down.mkdir()
+    result = azcopy.run("copy", url("/tree"), str(down), "--from-to", "BlobFSLocal", "--recursive")
+    step("dfs: copy down and match SHA-256", job_ok(result) and tree_hashes(down / "tree") == tree_hashes(tree),
+         result[1][-400:])
+    result = azcopy.run("sync", str(tree), url("/tree"), "--from-to", "LocalBlobFS", "--recursive")
+    step("dfs: sync up transfers nothing when unchanged",
+         job_ok(result) and transferred(result[1]) == 0, f"transferred {transferred(result[1])} bytes: {result[1][-300:]}")
+    result = azcopy.run("remove", url("/tree"), "--from-to", "BlobFSTrash", "--recursive")
+    code, output = azcopy.run("list", url(), "--location", "BlobFS")
+    step("dfs: remove --recursive", job_ok(result) and "big.bin" not in output, result[1][-400:])
+    http("DELETE", f"{base}/{filesystem}?resource=filesystem&{sas}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--azcopy", required=True, help="path to the AzCopy v10 binary")
     parser.add_argument("--blob-url", default=f"http://127.0.0.1:10000/{ACCOUNT}")
     parser.add_argument("--file-url", default=f"http://127.0.0.1:10004/{ACCOUNT}")
+    parser.add_argument("--dfs-url", default=f"http://127.0.0.1:10003/{ACCOUNT}")
     parser.add_argument("--blob-sas", help="account SAS query string for Blob (default: generated)")
     parser.add_argument("--file-sas", help="account SAS query string for Files (default: generated)")
     parser.add_argument("--account", default=ACCOUNT)
     parser.add_argument("--key", default=PUBLIC_DEV_KEY)
     parser.add_argument("--big-mib", type=int, default=20, help="size of the large file (default 20)")
+    parser.add_argument("--skip-blob", action="store_true")
     parser.add_argument("--skip-files", action="store_true")
+    parser.add_argument("--skip-dfs", action="store_true")
     options = parser.parse_args()
 
     blob_sas, file_sas = options.blob_sas, options.file_sas
@@ -374,9 +409,14 @@ def main():
         tree = make_data(data, options.big_mib)
         files_tree = work / "files-data" / "tree"
         shutil.copytree(tree, files_tree)
-        smoke_blob(azcopy, options.blob_url, blob_sas, data, tree, work)
+        if not options.skip_blob:
+            smoke_blob(azcopy, options.blob_url, blob_sas, data, tree, work)
         if not options.skip_files:
             smoke_files(azcopy, options.file_url, file_sas, data, files_tree, work)
+        if not options.skip_dfs:
+            dfs_tree = work / "dfs-data" / "tree"
+            shutil.copytree(tree, dfs_tree)
+            smoke_dfs(azcopy, options.dfs_url, blob_sas, data, dfs_tree, work)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     failed = [name for name, ok in RESULTS if not ok]

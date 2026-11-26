@@ -2304,6 +2304,61 @@ fn accounts_without_a_hierarchical_namespace_reject_every_dfs_operation() {
 }
 
 #[test]
+fn azcopy_style_clients_reach_blob_listing_and_folder_markers_on_the_dfs_port() {
+    let server = Emulator::start(&[]);
+    server.filesystem();
+    server.directory("tree");
+    server.file("tree/one.txt", b"one");
+
+    let head = server.dfs("HEAD", &format!("{LAKE}/tree"), &[], b"");
+    assert_eq!(head.status(), 200);
+    assert_eq!(header(&head, "x-ms-resource-type"), "directory");
+    assert_eq!(header(&head, "x-ms-meta-hdi_isfolder"), "true");
+    let file = server.dfs("HEAD", &format!("{LAKE}/tree/one.txt"), &[], b"");
+    assert!(file.headers().get("x-ms-meta-hdi_isfolder").is_none());
+
+    // A path-style URL has no blob host, so the Blob list arrives on the DFS URL.
+    let listing = server.dfs(
+        "GET",
+        &format!("{LAKE}?restype=container&comp=list&prefix=tree/"),
+        &[],
+        b"",
+    );
+    assert_eq!(listing.status(), 200);
+    assert!(
+        listing
+            .text()
+            .unwrap()
+            .contains("<Name>tree/one.txt</Name>")
+    );
+
+    // AzCopy sends an empty x-ms-content-md5 when it has no hash.
+    let created = server.dfs(
+        "PUT",
+        &format!("{LAKE}/tree/two.txt?resource=file"),
+        &[],
+        b"",
+    );
+    assert_eq!(created.status(), 201);
+    let appended = server.dfs(
+        "PATCH",
+        &format!("{LAKE}/tree/two.txt?action=append&position=0"),
+        &[],
+        b"two",
+    );
+    assert_eq!(appended.status(), 202);
+    let flushed = server.dfs(
+        "PATCH",
+        &format!(
+            "{LAKE}/tree/two.txt?action=flush&position=3&close=true&retainUncommittedData=false"
+        ),
+        &[("x-ms-content-md5", "")],
+        b"",
+    );
+    assert_eq!(flushed.status(), 200);
+}
+
+#[test]
 fn dfs_waits_for_a_request_slot_instead_of_failing_when_all_are_busy() {
     let server = Emulator::start(&[]);
     server.filesystem();

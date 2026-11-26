@@ -685,7 +685,9 @@ impl Input<'_> {
                     ],
                 )?;
                 boolean(self.param("close"))?;
+                // AzCopy sends an empty x-ms-content-md5 when it has no hash to offer.
                 let md5 = header(self.headers, "x-ms-content-md5")?
+                    .filter(|value| !value.is_empty())
                     .map(|value| {
                         STANDARD
                             .decode(value)

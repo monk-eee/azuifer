@@ -127,6 +127,9 @@ pub(super) fn path_view(view: PathView, body: bool, kind: View) -> Result<Respon
             let mut response = wire::directory_response(StatusCode::OK, entity)?;
             let headers = response.headers_mut();
             headers.insert("x-ms-resource-type", HeaderValue::from_static("directory"));
+            // Clients given a path-style (IP) endpoint cannot move to a `blob` host, so
+            // AzCopy asks this listener for the Blob view and tests for a folder by metadata.
+            headers.insert("x-ms-meta-hdi_isfolder", HeaderValue::from_static("true"));
             properties_header(headers, &directory_properties)?;
             attribute_headers(headers, &attributes, with_acl)?;
             Ok(response)

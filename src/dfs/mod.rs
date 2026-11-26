@@ -81,8 +81,20 @@ fn is_blob_host(request: &Request) -> bool {
     crate::address::host_account("blob", host).is_some()
 }
 
+/// Whether a path-style request uses a Blob-only query parameter. The Data Lake clients
+/// cannot derive a `blob` host from an IP endpoint, so AzCopy lists a filesystem through
+/// the Blob API on the DFS URL itself; DFS operations never use `restype` or `comp`.
+fn is_blob_query(request: &Request) -> bool {
+    request.uri().query().is_some_and(|query| {
+        query.split('&').any(|pair| {
+            let name = pair.split('=').next().unwrap_or_default();
+            name == "restype" || name == "comp"
+        })
+    })
+}
+
 async fn dispatch(State(app): State<Arc<App>>, request: Request) -> Response {
-    if is_blob_host(&request) {
+    if is_blob_host(&request) || is_blob_query(&request) {
         return crate::server::dispatch(State(app.blob.clone()), request).await;
     }
     let request_id = Uuid::new_v4().simple().to_string();

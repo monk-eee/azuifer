@@ -154,7 +154,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Supports getProperties, getStatus, and getAccessControl. Returns the resource type, ETag, content properties, x-ms-properties, owner, group, permissions, ACL, and lease state."
+      "notes": "Supports getProperties, getStatus, and getAccessControl. Returns the resource type, ETag, content properties, x-ms-properties, owner, group, permissions, ACL, and lease state. A directory also carries x-ms-meta-hdi_isfolder: true, which Azure's DFS endpoint does not send; AzCopy needs it on path-style endpoints, where Blob calls arrive on the DFS URL (requests with restype or comp go to Blob)."
     },
     {
       "name": "Set Path Properties",

@@ -25,6 +25,12 @@ DataLakeServiceClient("http://devstoreaccount1.dfs.localhost:10003",
 
 For `az storage fs`, set a connection string whose `BlobEndpoint` is `http://devstoreaccount1.blob.localhost:10003` (the `blob` host on the DFS port); the CLI derives the DFS URL from it. The Python SDK cannot address path-style local endpoints at all, so host-style URLs are required there. `*.localhost` must resolve to the loopback address.
 
+### AzCopy
+
+AzCopy 10.34.2 (Windows amd64) ran against `serve --services blob,file,dfs --hns-accounts devstoreaccount1` with an account SAS (`ss=b`, `srt=sco`) made from the public `devstoreaccount1` key. With `--from-to LocalBlobFS`, `BlobFSLocal` and `BlobFSTrash` against `http://127.0.0.1:10003/devstoreaccount1/{filesystem}?{sas}` these pass: a single file and a directory tree up (Create, Append, Flush), `list --location BlobFS`, copy down with matching SHA-256, a `sync` that sends nothing when unchanged, and `remove --recursive`. AzCopy cannot create a filesystem on an IP endpoint, so create it with one `PUT ?resource=filesystem` request.
+
+A path-style endpoint has no `blob` host to move to, so AzCopy sends its Blob calls (the `restype`/`comp` list and the folder test on Get Path Properties) to the DFS URL itself. The DFS listener hands any request with a `restype` or `comp` query parameter to Blob, and HEAD of a directory adds `x-ms-meta-hdi_isfolder: true` to its DFS headers; Azure's DFS endpoint does not send that header. AzCopy's Blob-side `remove` (`BlobTrash`) of a directory tree on an HNS account fails with `409` for the folders (the AzCopy log shows the folder deletes sent before the files; Azure's behavior here has not been checked). Remove through DFS (`BlobFSTrash`), as above. [`tests/azcopy_smoke.py`](../../tests/azcopy_smoke.py) runs the DFS steps with `--skip-blob --skip-files` against an HNS account; the Blob steps need an account without HNS.
+
 ## Authentication
 
 DFS accepts the credentials Blob accepts, checked with the shared Blob code and the shared clock, so `--test-clock` moves DFS signature windows, SAS validity and lease expiry together.
