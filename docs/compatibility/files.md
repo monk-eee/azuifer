@@ -17,7 +17,8 @@ Clients keep their storage client and set only the file endpoint, for example th
 | Directories | Create, Get Properties, Set Properties, Get/Set Metadata, Delete, List Directories and Files, Rename, List Handles, Force Close Handles |
 | Files | Create, Get, Get Properties, Set Properties, Get/Set Metadata, Delete, Put Range (update and clear), Put Range From URL (a file on this instance and account), List Ranges (including `prevsharesnapshot` diffs), Copy, Abort Copy, Lease, Rename, List/Force Close Handles |
 | Service | Get/Set File Service Properties: metrics, CORS rules and the SMB multichannel flag are validated and stored per account and returned on request, but never acted on |
-| Recognised, answered with `501 NotImplemented` | Restore Share, and the NFS hard link and symbolic link operations |
+| Soft delete | Restore Share and `include=deleted` in List Shares, when `--share-retention-days` (`AZUIFER_SHARE_RETENTION_DAYS`, 0 to 365, default 0) is above zero: Delete Share then keeps the share and its snapshots hidden for that many days on the injected clock ([ADR-0026](../adr.d/0026-keep-deleted-shares-under-a-hidden-name.md)). Azure keeps this setting in the management plane, and the restore version here is the deletion time in milliseconds |
+| Recognised, answered with `501 NotImplemented` | The NFS hard link and symbolic link operations |
 
 Share, directory and file URIs are `/{account}/{share}/{path}`. Resources are selected by `restype` and `comp` exactly as in the Microsoft reference; an unknown combination returns `InvalidQueryParameterValue` and a known one with the wrong verb returns `UnsupportedHttpVerb`.
 

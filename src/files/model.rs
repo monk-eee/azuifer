@@ -247,6 +247,16 @@ pub(crate) struct ShareInfo {
     pub(crate) access_tier_changed: i64,
     pub(crate) metadata: Metadata,
     pub(crate) lease: Option<Lease>,
+    /// Set when the share was listed as a soft-deleted one.
+    pub(crate) deleted: Option<DeletedShare>,
+}
+
+/// A soft-deleted share as listed: its restore version and how long it stays restorable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DeletedShare {
+    pub(crate) version: String,
+    pub(crate) deleted_at: i64,
+    pub(crate) remaining_days: u32,
 }
 
 /// One `SignedIdentifier` of a share's stored access policies.

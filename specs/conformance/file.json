@@ -117,7 +117,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Honors x-ms-delete-snapshots (include, include-leased), ShareHasSnapshots and DeleteShareWhenSnapshotLeased, and deletes a single snapshot with sharesnapshot. Deletion is immediate; there is no soft delete."
+      "notes": "Honors x-ms-delete-snapshots (include, include-leased), ShareHasSnapshots and DeleteShareWhenSnapshotLeased, and deletes a single snapshot with sharesnapshot. Deletion is immediate; there is no soft delete. With --share-retention-days above zero a deleted share is kept, restorable, for that many days on the injected clock."
     },
     {
       "name": "Force Close Handles",
@@ -331,7 +331,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Supports prefix, marker, maxresults, include=metadata and include=snapshots; markers are opaque local tokens. include=deleted is accepted and ignored because share soft delete is not modeled."
+      "notes": "Supports prefix, marker, maxresults, include=metadata and include=snapshots; markers are opaque local tokens. include=deleted is accepted and ignored because share soft delete is not modeled. include=deleted adds soft-deleted shares with Deleted, Version, DeletedTime and RemainingRetentionDays."
     },
     {
       "name": "Put Range",
@@ -383,9 +383,14 @@
     },
     {
       "name": "Restore Share",
-      "state": "unsupported",
-      "authorization": [],
-      "notes": "Returns 501 NotImplemented; deleted shares cannot be restored."
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "Bearer"
+      ],
+      "notes": "PUT /{share}?restype=share&comp=undelete with x-ms-deleted-share-name and x-ms-deleted-share-version restores a soft-deleted share, with its snapshots, under the name in the path, which must be free (409 ShareAlreadyExists); an unknown name or version is 404 ShareNotFound. Soft delete is off unless the operator sets --share-retention-days (Azure keeps this setting in the management plane), and the version is the deletion time in milliseconds rather than Azure's opaque string."
     },
     {
       "name": "Set Directory Metadata",

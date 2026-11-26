@@ -43,6 +43,7 @@ pub(crate) struct ListSharesRequest {
     pub(crate) after: Option<(String, i64)>,
     pub(crate) limit: u32,
     pub(crate) snapshots: bool,
+    pub(crate) deleted: bool,
 }
 
 /// Finds a share or snapshot, reporting a missing snapshot separately from a missing share.
@@ -66,6 +67,22 @@ pub(super) fn load_share(db: &Connection, target: &ShareRef) -> Result<ShareRow>
     } else {
         Error::ShareNotFound
     })
+}
+
+/// The live share of this exact name, if any.
+pub(super) fn load_share_by_name(
+    db: &Connection,
+    account: &str,
+    name: &str,
+) -> Result<Option<ShareInfo>> {
+    db.query_row(
+        &format!("SELECT {SHARE_COLUMNS} FROM shares WHERE account=?1 AND name=?2 AND snapshot=0"),
+        params![account, name],
+        share_row,
+    )
+    .optional()
+    .map(|row| row.map(|row| row.info))
+    .map_err(db_error)
 }
 
 /// Loads a live share for an operation that snapshots do not support.
@@ -141,12 +158,17 @@ impl Store {
         account: AccountName,
         request: ListSharesRequest,
     ) -> Result<(Vec<ShareInfo>, Option<(String, i64)>)> {
-        self.run(move |db, _| {
-            let (after_name, after_snapshot) = request.after.unwrap_or_default();
+        self.run(move |db, env| {
+            let now = env.clock.now_millis();
+            if request.deleted {
+                super::soft_delete::sweep(db, env, now)?;
+            }
+            let (after_name, after_snapshot) = request.after.clone().unwrap_or_default();
             let mut query = db
                 .prepare(&format!(
                     "SELECT {SHARE_COLUMNS} FROM shares
                      WHERE account=?1 AND instr(name, ?2)=1 AND (?3 OR snapshot=0)
+                       AND substr(name, 1, 9) <> '$deleted/'
                        AND (name > ?4 OR (name = ?4 AND snapshot > ?5))
                      ORDER BY name, snapshot LIMIT ?6"
                 ))
@@ -167,12 +189,29 @@ impl Store {
                 .map(|row| row.map(|row| row.info))
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(db_error)?;
+            let key = |share: &ShareInfo| match &share.deleted {
+                Some(deleted) => {
+                    super::soft_delete::DELETED_KEY_BASE
+                        + deleted.version.parse::<i64>().unwrap_or(0)
+                }
+                None => share.snapshot.unwrap_or(0),
+            };
+            if request.deleted {
+                let after = (after_name.as_str(), after_snapshot);
+                let deleted =
+                    super::soft_delete::listed(db, account.as_str(), &request.prefix, now)?;
+                rows.extend(
+                    deleted
+                        .into_iter()
+                        .filter(|(info, sort)| (info.name.as_str(), *sort) > after)
+                        .map(|(info, _)| info),
+                );
+                rows.sort_by(|a, b| (&a.name, key(a)).cmp(&(&b.name, key(b))));
+            }
             let mut next = None;
             if rows.len() > request.limit as usize {
                 rows.truncate(request.limit as usize);
-                next = rows
-                    .last()
-                    .map(|last| (last.name.clone(), last.snapshot.unwrap_or(0)));
+                next = rows.last().map(|last| (last.name.clone(), key(last)));
             }
             Ok((rows, next))
         })
@@ -368,6 +407,7 @@ impl Store {
     ) -> Result<()> {
         self.run(move |db, env| {
             let now = env.clock.now_millis();
+            super::soft_delete::sweep(db, env, now)?;
             let tx = db.transaction().map_err(db_error)?;
             let row = load_share(&tx, &target)?;
             lease::check_use(
@@ -410,6 +450,18 @@ impl Store {
                     }
                     doomed.push(id);
                 }
+            }
+            let days = super::soft_delete::retention_days(env);
+            if target.snapshot.is_none() && days > 0 {
+                super::soft_delete::keep(
+                    &tx,
+                    target.account.as_str(),
+                    target.share.as_str(),
+                    now,
+                    days,
+                )?;
+                tx.commit().map_err(db_error)?;
+                return Ok(());
             }
             let mut reclaim = content::Reclaim::default();
             for id in &doomed {

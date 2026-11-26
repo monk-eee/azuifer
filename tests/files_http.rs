@@ -1881,6 +1881,94 @@ fn file_service_properties_round_trip_and_survive_restart() {
     assert!(kept.contains("<HourMetrics><Version>1.0</Version><Enabled>true</Enabled>"));
 }
 #[test]
+fn a_deleted_share_is_listed_and_restorable_when_retention_is_on() {
+    let emulator = Emulator::start(None, &["--share-retention-days", "3"]);
+    share(&emulator, "gone");
+    file(&emulator, "gone", "f.txt", 10);
+    expect(
+        emulator.send(
+            "DELETE",
+            &format!("/{ACCOUNT}/gone?restype=share"),
+            &[],
+            b"",
+        ),
+        202,
+    );
+    expect_error(
+        emulator.send("GET", &format!("/{ACCOUNT}/gone?restype=share"), &[], b""),
+        404,
+        "ShareNotFound",
+    );
+    let live = emulator.send("GET", &format!("/{ACCOUNT}?comp=list"), &[], b"");
+    assert!(!live.text().contains("<Name>gone</Name>"));
+    let listing = emulator.send(
+        "GET",
+        &format!("/{ACCOUNT}?comp=list&include=deleted"),
+        &[],
+        b"",
+    );
+    assert_eq!(listing.status, 200);
+    assert!(
+        listing
+            .text()
+            .contains("<Name>gone</Name><Deleted>true</Deleted><Version>")
+    );
+    assert!(
+        listing
+            .text()
+            .contains("<RemainingRetentionDays>3</RemainingRetentionDays>")
+    );
+    let version = listing
+        .text()
+        .split("<Version>")
+        .nth(1)
+        .and_then(|rest| rest.split("</Version>").next())
+        .unwrap()
+        .to_owned();
+
+    let restore = |target: &str, name: &str, version: &str| {
+        emulator.send(
+            "PUT",
+            &format!("/{ACCOUNT}/{target}?restype=share&comp=undelete"),
+            &[
+                ("x-ms-deleted-share-name", name),
+                ("x-ms-deleted-share-version", version),
+            ],
+            b"",
+        )
+    };
+    expect_error(restore("elsewhere", "gone", "1"), 404, "ShareNotFound");
+    expect_error(
+        emulator.send(
+            "PUT",
+            &format!("/{ACCOUNT}/elsewhere?restype=share&comp=undelete"),
+            &[],
+            b"",
+        ),
+        400,
+        "MissingRequiredHeader",
+    );
+    share(&emulator, "taken");
+    expect_error(
+        restore("taken", "gone", &version),
+        409,
+        "ShareAlreadyExists",
+    );
+    let restored = restore("elsewhere", "gone", &version);
+    assert_eq!(restored.status, 201);
+    assert!(!restored.header("etag").is_empty());
+    let read = get(&emulator, "elsewhere", "f.txt", None);
+    assert_eq!(read.status, 200);
+    assert_eq!(read.body.len(), 10);
+    let after = emulator.send(
+        "GET",
+        &format!("/{ACCOUNT}?comp=list&include=deleted"),
+        &[],
+        b"",
+    );
+    assert!(!after.text().contains("<Deleted>"));
+}
+#[test]
 fn unsupported_operations_return_a_stable_error() {
     let emulator = Emulator::start(None, &[]);
     share(&emulator, "later");

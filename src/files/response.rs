@@ -196,6 +196,10 @@ pub(super) fn list_shares(
     for share in shares {
         xml.open("Share");
         xml.element("Name", &share.name);
+        if let Some(deleted) = &share.deleted {
+            xml.element("Deleted", "true");
+            xml.element("Version", &deleted.version);
+        }
         if let Some(snapshot) = share.snapshot {
             xml.element("Snapshot", &time::iso(snapshot));
         }
@@ -215,6 +219,13 @@ pub(super) fn list_shares(
             xml.element("LeaseDuration", duration);
         }
         xml.element("EnabledProtocols", "SMB");
+        if let Some(deleted) = &share.deleted {
+            xml.element("DeletedTime", &time::http_date(deleted.deleted_at));
+            xml.element(
+                "RemainingRetentionDays",
+                &deleted.remaining_days.to_string(),
+            );
+        }
         xml.close("Properties");
         if request.metadata {
             xml.open("Metadata");
