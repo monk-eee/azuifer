@@ -127,7 +127,13 @@ CREATE TABLE IF NOT EXISTS versioned_accounts (account TEXT NOT NULL PRIMARY KEY
 /// Each migration is keyed by the `PRAGMA user_version` it leaves behind. Numbers
 /// need not be consecutive: branches that add migrations in parallel reserve their
 /// own number, and a database applies every migration above its version.
-const MIGRATIONS: &[(i64, &str)] = &[(1, V1), (2, super::namespace::SCHEMA), (3, V3), (4, V4)];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, V1),
+    (2, super::namespace::SCHEMA),
+    (3, V3),
+    (4, V4),
+    (5, super::dfs_paths::SCHEMA),
+];
 
 pub(super) fn migrate(db: &mut Connection) -> rusqlite::Result<()> {
     db.execute_batch(BASE)?;
@@ -171,7 +177,7 @@ mod tests {
         let version: i64 = db
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
     }
 
     #[test]
@@ -238,11 +244,12 @@ mod tests {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch(BASE).unwrap();
         db.execute_batch(V1).unwrap();
+        db.execute_batch(super::super::namespace::SCHEMA).unwrap();
         db.execute_batch("PRAGMA user_version = 2").unwrap();
         migrate(&mut db).unwrap();
         let version: i64 = db
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
     }
 }

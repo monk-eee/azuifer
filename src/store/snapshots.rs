@@ -905,7 +905,7 @@ impl Store {
     }
 }
 
-fn delete_current(
+pub(super) fn delete_current(
     db: &Connection,
     mode: &Mode,
     key: &BlobKey,

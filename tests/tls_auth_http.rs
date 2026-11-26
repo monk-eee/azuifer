@@ -517,11 +517,6 @@ fn bearer_is_rejected_with_the_azure_error_unless_oauth_is_enabled() {
     let token = basic_token();
     for (service, url, headers) in list_requests(&server) {
         let response = send_list(&trusting, &url, &headers, Some(&token));
-        if service == "dfs" {
-            assert_eq!(response.status(), 403, "dfs");
-            assert_eq!(error_code(&response), "AuthorizationFailure");
-            continue;
-        }
         assert_eq!(response.status(), 401, "{service}");
         assert_eq!(
             error_code(&response),
@@ -673,10 +668,7 @@ fn reduced_validation_rejects_malformed_expired_and_foreign_tokens() {
             unsigned(&json!({"iss": ISSUER_V1, "aud": STORAGE})),
         ),
     ];
-    for (service, url, headers) in list_requests(&server)
-        .into_iter()
-        .filter(|(service, ..)| *service != "dfs")
-    {
+    for (service, url, headers) in list_requests(&server) {
         for (name, token) in &bad {
             let response = send_list(&trusting, &url, &headers, Some(token));
             assert_eq!(response.status(), 401, "{service}: {name}");

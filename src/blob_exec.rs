@@ -203,7 +203,9 @@ pub(crate) async fn execute(
             PathRead::File(download) => {
                 respond::download_response(*download, ctx.credentials.overrides())
             }
-            PathRead::Directory(entity) => wire::directory_response(StatusCode::OK, entity),
+            PathRead::Directory(entity, metadata) => {
+                wire::blob_directory_response(StatusCode::OK, entity, metadata)
+            }
         },
         Operation::BlobMetadata(key, guard) => {
             let download = store
@@ -219,7 +221,9 @@ pub(crate) async fn execute(
                 .await?;
             match download {
                 PathRead::File(download) => respond::blob_metadata_response(*download),
-                PathRead::Directory(entity) => wire::directory_response(StatusCode::OK, entity),
+                PathRead::Directory(entity, metadata) => {
+                    wire::blob_directory_response(StatusCode::OK, entity, metadata)
+                }
             }
         }
         Operation::SetBlobProperties(key, headers, md5, replace, guard, change) => {

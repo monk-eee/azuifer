@@ -244,7 +244,9 @@ impl Store {
                 if options.range.is_some() {
                     return Err(Error::InvalidRange(0));
                 }
-                return Ok(PathRead::Directory(entity));
+                let metadata =
+                    namespace::directory_metadata(db, &key.container, key.path.as_str())?;
+                return Ok(PathRead::Directory(entity, metadata));
             }
             let row = require_blob(db, &key, now)?;
             read_row(db, mode, now, row, &key, &options, ContentSource::Blob)

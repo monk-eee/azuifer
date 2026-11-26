@@ -8,7 +8,7 @@ use axum::{
     response::Response,
 };
 use futures_util::{StreamExt as _, TryStreamExt as _};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 use tokio::{io::AsyncReadExt as _, sync::OwnedSemaphorePermit};
 use tokio_util::io::ReaderStream;
 
@@ -24,22 +24,6 @@ pub(crate) fn set(headers: &mut HeaderMap, name: &'static str, value: &str) -> R
         Error::Internal
     })?;
     headers.insert(name, value);
-    Ok(())
-}
-
-pub(crate) fn stamp_response(
-    response: &mut Response,
-    version: &HeaderValue,
-    request_id: &str,
-    head: bool,
-) -> Result<()> {
-    let headers = response.headers_mut();
-    headers.insert("x-ms-version", version.clone());
-    set(headers, "x-ms-request-id", request_id)?;
-    set(headers, "date", &httpdate::fmt_http_date(SystemTime::now()))?;
-    if head {
-        *response.body_mut() = Body::empty();
-    }
     Ok(())
 }
 
@@ -69,6 +53,19 @@ pub(crate) fn directory_response(status: StatusCode, entity: Entity) -> Result<R
     let headers = response.headers_mut();
     headers.insert("x-ms-resource-type", HeaderValue::from_static("directory"));
     headers.insert("content-length", HeaderValue::from_static("0"));
+    Ok(response)
+}
+
+/// A directory as the Blob API shows it: the user-defined properties as metadata,
+/// plus the `hdi_isfolder` marker Data Lake directories carry.
+pub(crate) fn blob_directory_response(
+    status: StatusCode,
+    entity: Entity,
+    mut metadata: Metadata,
+) -> Result<Response> {
+    let mut response = directory_response(status, entity)?;
+    metadata.insert("hdi_isfolder".to_owned(), "true".to_owned());
+    crate::respond::metadata_headers(response.headers_mut(), metadata)?;
     Ok(response)
 }
 

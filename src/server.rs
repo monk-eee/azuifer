@@ -122,7 +122,20 @@ pub(crate) async fn serve(config: Config, shutdown_on_stdin_eof: bool) -> anyhow
                         clock.clone(),
                     )?
                 } else {
-                    dfs::router(config.clone(), store.clone(), permits.clone())?
+                    let blob = blob_app(
+                        config.clone(),
+                        address,
+                        store.clone(),
+                        permits.clone(),
+                        clock.clone(),
+                    )?;
+                    dfs::router(
+                        config.clone(),
+                        store.clone(),
+                        permits.clone(),
+                        clock.clone(),
+                        blob,
+                    )?
                 }
             }
             Service::Queue => queue::router(config.clone(), address, clock.clone()).await?,
@@ -192,17 +205,29 @@ fn blob_router(
     permits: Arc<Semaphore>,
     clock: Clock,
 ) -> anyhow::Result<Router> {
+    let app = blob_app(config, address, store, permits, clock)?;
+    Ok(Router::new().fallback(dispatch).with_state(app))
+}
+
+/// The Blob service state, which the DFS listener also serves for `{account}.blob.{domain}`
+/// hosts: the Data Lake SDKs derive that host from the DFS URL for their Blob calls.
+fn blob_app(
+    config: Arc<Config>,
+    address: SocketAddr,
+    store: Store,
+    permits: Arc<Semaphore>,
+    clock: Clock,
+) -> anyhow::Result<Arc<App>> {
     let version = HeaderValue::from_str(config.api_version.as_str())
         .context("invalid HTTP version in the protocol manifest")?;
-    let app = Arc::new(App {
+    Ok(Arc::new(App {
         config,
         version,
         store,
         address,
         permits,
         clock,
-    });
-    Ok(Router::new().fallback(dispatch).with_state(app))
+    }))
 }
 
 async fn wait_for_shutdown(shutdown_on_stdin_eof: bool) -> std::io::Result<()> {
@@ -237,7 +262,7 @@ async fn wait_for_signal() -> std::io::Result<()> {
     tokio::signal::ctrl_c().await
 }
 
-async fn dispatch(State(app): State<Arc<App>>, request: Request) -> Response {
+pub(crate) async fn dispatch(State(app): State<Arc<App>>, request: Request) -> Response {
     let request_id = Uuid::new_v4().simple().to_string();
     let (parts, body) = request.into_parts();
     let head = parts.method == Method::HEAD;

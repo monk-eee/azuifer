@@ -3,6 +3,10 @@ mod blobs;
 mod blocks;
 mod containers;
 mod copy;
+mod dfs_acl;
+mod dfs_data;
+mod dfs_paths;
+mod dfs_tree;
 mod listing;
 mod namespace;
 mod pages;
@@ -37,6 +41,12 @@ use uuid::Uuid;
 pub(crate) use append::Appended;
 pub(crate) use containers::LeaseResult;
 pub(crate) use copy::SourceBytes;
+pub(crate) use dfs_acl::{AclMode, RecursiveAcl, RecursiveOutcome};
+pub(crate) use dfs_data::{Append, Flush, LeaseUse};
+pub(crate) use dfs_paths::{
+    AccessUpdate, Caller, CreatePath, Need, PathError, PathView, PropertyUpdate,
+};
+pub(crate) use dfs_tree::Rename;
 pub(crate) use pages::{PageRanges, PageWritten, RangeBody};
 pub(crate) use snapshots::{Deletion, ExtendedListing, Listed, Selected};
 pub(crate) use tags::TaggedBlob;
@@ -111,7 +121,8 @@ pub(crate) struct Download {
 
 pub(crate) enum PathRead {
     File(Box<Download>),
-    Directory(Entity),
+    /// A directory and its user-defined properties (Blob metadata).
+    Directory(Entity, crate::domain::Metadata),
 }
 
 impl Store {
@@ -384,7 +395,8 @@ fn check_memory_quota(db: &Connection, mode: &Mode, removed: u64, added: u64) ->
     if let Mode::Memory { limit } = mode {
         let stored = db.query_row(
             "SELECT (SELECT COALESCE(SUM(length),0) FROM blobs WHERE blob_type=0) + (SELECT COALESCE(SUM(length),0) FROM staged_blocks) + (SELECT COALESCE(SUM(length),0) FROM blob_extents)
-                    + (SELECT COALESCE(SUM(length),0) FROM blob_history WHERE bytes IS NOT NULL)",
+                    + (SELECT COALESCE(SUM(length),0) FROM blob_history WHERE bytes IS NOT NULL)
+                    + (SELECT COALESCE(SUM(length(bytes)),0) FROM dfs_staged_bytes)",
             [], |row| row_uint(row, 0),
         ).map_err(db_error)?;
         let remaining = stored
@@ -702,6 +714,7 @@ fn recover(db: &Connection, dir: &Path) -> anyhow::Result<()> {
         {
             !db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM blobs WHERE id=?1 UNION ALL SELECT 1 FROM staged_blocks WHERE id=?1 UNION ALL SELECT 1 FROM blob_ranges WHERE extent=?1
+                 UNION ALL SELECT 1 FROM dfs_staged WHERE extent=?1
                  UNION ALL SELECT 1 FROM blob_history WHERE content_id=?1)",
                 [id],
                 |row| row.get::<_, bool>(0),

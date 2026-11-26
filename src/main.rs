@@ -25,6 +25,7 @@ mod jwt;
 mod lease;
 mod metrics;
 mod oauth;
+mod posix;
 mod protocol;
 mod queue;
 mod ranges;

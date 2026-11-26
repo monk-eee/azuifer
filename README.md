@@ -92,12 +92,12 @@ Stop the container with `docker stop azuifer-quickstart` when you're done.
 | Queue | Queues, metadata, ACLs, service properties, and messages with visibility timeouts, pop receipts, and TTL |
 | Table | Tables, ACLs, every entity operation, OData `$filter` and `$select`, paging, ETag concurrency, and atomic entity-group batches |
 | Azure Files | Shares, snapshots, directories, files, ranges, rename, copy, leases, and permissions |
-| Data Lake (DFS) | Filesystems, directories, path listing, reading Blob-written files, and deleting files or empty directories on HNS-enabled accounts |
-| Authentication | Shared Key, Shared Key Lite, account and service SAS, user-delegation SAS for Blob, and bearer tokens (`--oauth`), over HTTP or HTTPS (`--tls-generate`, PEM, or PFX), at path-style or host-style endpoints. DFS currently accepts Shared Key only |
+| Data Lake (DFS) | Filesystems and their properties; files and directories with append and flush, reads, atomic rename, recursive delete, leases, POSIX owner, group, permissions and ACLs (default-ACL inheritance, recursive changes) on HNS-enabled accounts, sharing Blob's data and ETags |
+| Authentication | Shared Key, Shared Key Lite, account and service SAS (including DFS directory SAS), user-delegation SAS, and bearer tokens (`--oauth`), over HTTP or HTTPS (`--tls-generate`, PEM, or PFX), at path-style or host-style endpoints. DFS checks bearer callers against POSIX ACLs |
 | Storage | In-memory or SQLite metadata with persistent payloads, per service |
 | Operations | `status`, `doctor`, and `reset` commands, Prometheus metrics, opt-in OpenTelemetry export, and a Compose example |
 
-Each service guide lists the supported operations, limits, and known differences: [Blob](docs/compatibility/blob.md), [Queue](docs/compatibility/queue.md), [Table](docs/compatibility/table.md), [Azure Files](docs/compatibility/files.md), and [Data Lake](docs/compatibility/dfs.md). Blob and DFS see the same data and ETags on hierarchical namespace (HNS) accounts. The [product specification](docs/specs/azuifer.md) tracks the full set of operations, and DFS append, flush, rename, and ACLs are still to come.
+Each service guide lists the supported operations, limits, and known differences: [Blob](docs/compatibility/blob.md), [Queue](docs/compatibility/queue.md), [Table](docs/compatibility/table.md), [Azure Files](docs/compatibility/files.md), and [Data Lake](docs/compatibility/dfs.md). Blob and DFS see the same data and ETags on hierarchical namespace (HNS) accounts. The [product specification](docs/specs/azuifer.md) tracks the full set of operations.
 
 ## Verify compatibility
 

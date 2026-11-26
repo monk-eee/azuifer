@@ -193,7 +193,7 @@ pub(crate) fn host(parts: &Parts) -> Option<&str> {
     address::request_host(parts)
 }
 
-fn parse_target(path: &str) -> Result<Target> {
+pub(crate) fn parse_target(path: &str) -> Result<Target> {
     let mut segments = path
         .strip_prefix('/')
         .ok_or(Error::InvalidName)?
@@ -944,7 +944,7 @@ fn range_checksum(headers: &HeaderMap) -> Result<Option<RangeChecksum>> {
     }
 }
 
-fn lease_action(headers: &HeaderMap) -> Result<LeaseAction> {
+pub(crate) fn lease_action(headers: &HeaderMap) -> Result<LeaseAction> {
     let current = || lease_id(headers, "x-ms-lease-id")?.ok_or(Error::MissingHeader);
     match header(headers, "x-ms-lease-action")?.ok_or(Error::MissingHeader)? {
         "acquire" => Ok(LeaseAction::Acquire {
@@ -971,7 +971,7 @@ fn lease_action(headers: &HeaderMap) -> Result<LeaseAction> {
     }
 }
 
-fn upload_options(headers: &HeaderMap, limit: u64) -> Result<UploadOptions> {
+pub(crate) fn upload_options(headers: &HeaderMap, limit: u64) -> Result<UploadOptions> {
     let length: u64 = header(headers, "content-length")?
         .ok_or(Error::MissingLength)?
         .parse()
@@ -1219,94 +1219,7 @@ pub(crate) fn check(
     Ok(())
 }
 
-pub(crate) type Resource = Target;
-
-/// A request that passed Shared Key authentication, for services that are not
-/// Blob (DFS). Blob authenticates through `parse` and `blob_auth` instead.
-pub(crate) struct AuthenticatedRequest {
-    pub(crate) requested_version: ApiVersion,
-    pub(crate) resource: Resource,
-    pub(crate) query: Query,
-}
-
-pub(crate) fn authenticate(parts: &Parts, config: &Config) -> Result<AuthenticatedRequest> {
-    let headers = &parts.headers;
-    if headers.len() > 100
-        || headers
-            .iter()
-            .map(|(name, value)| name.as_str().len() + value.len())
-            .sum::<usize>()
-            > 32768
-    {
-        return Err(Error::InvalidHeader);
-    }
-    let requested_version =
-        ApiVersion::parse(header(headers, "x-ms-version")?.ok_or(Error::InvalidVersion)?)?;
-    if !requested_version.is_served(&config.api_version, config.skip_api_version_check) {
-        return Err(Error::InvalidVersion);
-    }
-    let query = parse_query(parts.uri.query())?;
-    if query.contains_key("sig") {
-        return Err(Error::Unsupported);
-    }
-    // DFS accepts `{account}.dfs.{domain}`; the signature covers the path as sent.
-    let (logical, _) = address::resolve("dfs", parts);
-    let resource = parse_target(&logical)?;
-    let account = resource.account();
-    let keys = config
-        .accounts
-        .get(account)
-        .ok_or(Error::AuthenticationFailed)?;
-    if let Some(token) = header(headers, "authorization")?.and_then(crate::oauth::bearer) {
-        authenticate_bearer(parts, config, account, token)?;
-    } else {
-        crate::auth::verify(
-            account,
-            keys,
-            &parts.method,
-            parts.uri.path(),
-            &query,
-            headers,
-            SystemTime::now(),
-        )?;
-    }
-    check_hns_path(&resource, config)?;
-    Ok(AuthenticatedRequest {
-        requested_version,
-        resource,
-        query,
-    })
-}
-
-/// DFS reports every bearer failure as AuthorizationFailure.
-fn authenticate_bearer(
-    parts: &Parts,
-    config: &Config,
-    account: &AccountName,
-    token: &str,
-) -> Result<()> {
-    let principal = config
-        .oauth
-        .authenticate(
-            token,
-            &crate::oauth::Request {
-                account: account.as_str(),
-                host: host(parts),
-                now: SystemTime::now(),
-            },
-        )
-        .map_err(|_| Error::AuthenticationFailed)?;
-    if principal.permits(
-        crate::config::Service::Dfs,
-        crate::oauth::is_write(&parts.method),
-    ) {
-        Ok(())
-    } else {
-        Err(Error::AuthenticationFailed)
-    }
-}
-
-fn check_hns_path(target: &Target, config: &Config) -> Result<()> {
+pub(crate) fn check_hns_path(target: &Target, config: &Config) -> Result<()> {
     if let Target::Blob(key) = target
         && config.hns_accounts.contains(&key.container.account)
     {

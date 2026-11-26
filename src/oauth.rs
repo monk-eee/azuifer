@@ -348,6 +348,12 @@ async fn fetch(url: &reqwest::Url) -> Result<Vec<u8>> {
 }
 
 impl Principal {
+    /// Whether the token names data roles (`jwks` mode); DFS lets such a token bypass
+    /// the POSIX ACLs, as an Azure role assignment does.
+    pub(crate) fn has_roles(&self) -> bool {
+        self.roles.is_some()
+    }
+
     /// Whether the token's roles allow `service` and, if `write`, changes. Tokens
     /// without a `roles` claim (and every `basic` token) are allowed everything.
     ///

@@ -1626,14 +1626,19 @@ fn dfs_filesystems_and_blob_bytes_share_the_same_persistent_store() {
         404,
         "PathNotFound",
     );
-    let unsupported = server.dfs(
+    let access = server.dfs(
         Method::HEAD,
         &format!("{BLOB}?action=getAccessControl"),
         &[],
         b"",
     );
-    assert_eq!(unsupported.status(), 501);
-    assert_eq!(unsupported.headers()["x-ms-error-code"], "NotImplemented");
+    assert_eq!(access.status(), 200);
+    assert_eq!(access.headers()["x-ms-owner"], "$superuser");
+    assert_eq!(access.headers()["x-ms-permissions"], "rw-r-----");
+    assert_eq!(
+        access.headers()["x-ms-acl"],
+        "user::rw-,group::r--,other::---"
+    );
     drop(server);
     let server = start("blob,dfs");
     assert_eq!(
@@ -1698,8 +1703,8 @@ fn dfs_directory_lifecycle_shares_identity_and_pages_the_tree() {
             &[("if-none-match", "*")],
             b"",
         ),
-        412,
-        "ConditionNotMet",
+        409,
+        "PathAlreadyExists",
     );
     let body = b"visible on both endpoints";
     let file = emulator.put(BLOB, &[], body);
@@ -1803,7 +1808,7 @@ fn dfs_directory_lifecycle_shares_identity_and_pages_the_tree() {
                 b""
             )
             .status(),
-        202,
+        200,
     );
     assert_eq!(
         emulator.request(Method::HEAD, EMPTY, &[], b"").status(),
@@ -1924,7 +1929,7 @@ fn dfs_cannot_delete_a_file_protected_by_a_blob_lease() {
         emulator
             .dfs(Method::DELETE, BLOB, &[("x-ms-lease-id", lease)], b"")
             .status(),
-        202,
+        200,
     );
     assert_eq!(emulator.request(Method::HEAD, BLOB, &[], b"").status(), 404);
 }

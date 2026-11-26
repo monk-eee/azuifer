@@ -63,6 +63,8 @@ pub(crate) struct Overrides {
 pub(crate) enum Scope {
     Blob,
     Container,
+    /// A DFS directory (`sr=d`); `sdd` is the depth of the signed directory.
+    Directory,
 }
 
 #[derive(Clone, Debug)]
@@ -142,6 +144,7 @@ impl Token {
             let scope = match sas.field("sr") {
                 "b" => Scope::Blob,
                 "c" => Scope::Container,
+                "d" if version >= "2020-02-10" => Scope::Directory,
                 "bs" | "bv" if version >= "2018-11-09" => Scope::Blob,
                 _ if version < "2018-11-09" => {
                     if resource.blob.is_some() {
@@ -153,7 +156,7 @@ impl Token {
                 _ => return Err(Error::AuthenticationFailed),
             };
             let container = resource.container.ok_or(Error::ResourceTypeMismatch)?;
-            if scope == Scope::Blob && resource.blob.is_none() {
+            if scope != Scope::Container && resource.blob.is_none() {
                 return Err(Error::ResourceTypeMismatch);
             }
             // A snapshot or version SAS is signed over the timestamp it names.
@@ -168,6 +171,13 @@ impl Token {
             let canonical = match (scope, resource.blob) {
                 (Scope::Blob, Some(blob)) => {
                     format!("/blob/{}/{container}/{blob}", resource.account.as_str())
+                }
+                (Scope::Directory, Some(blob)) => {
+                    let directory = signed_directory(blob, sas.field("sdd"))?;
+                    format!(
+                        "/blob/{}/{container}/{directory}",
+                        resource.account.as_str()
+                    )
                 }
                 _ => format!("/blob/{}/{container}", resource.account.as_str()),
             };
@@ -226,6 +236,12 @@ impl Token {
             Kind::Service { identifier, .. } => identifier.as_deref(),
             Kind::Account => None,
         }
+    }
+
+    /// The object id of the user whose delegation key signed the token, if it is a
+    /// user-delegation SAS.
+    pub(crate) fn delegated_oid(&self) -> Option<&str> {
+        self.key_window.map(|_| self.sas.field("skoid"))
     }
 
     /// Checks window, permissions, resource type, source address, and protocol.
@@ -299,6 +315,16 @@ impl Token {
         }
         Ok(())
     }
+}
+
+/// The directory a directory SAS signs: the first `sdd` components of the requested path.
+fn signed_directory(path: &str, depth: &str) -> Result<String> {
+    let depth: usize = depth.parse().map_err(|_| Error::AuthenticationFailed)?;
+    let parts: Vec<&str> = path.split('/').take(depth).collect();
+    if parts.len() < depth {
+        return Err(Error::AuthenticationFailed);
+    }
+    Ok(parts.join("/"))
 }
 
 fn ip_in_range(range: &str, client: IpAddr) -> bool {
@@ -501,6 +527,46 @@ mod tests {
         assert_eq!(
             token.authorize(&need('o', "w"), None, &late),
             Err(Error::AuthenticationFailed)
+        );
+    }
+
+    #[test]
+    fn a_directory_sas_signs_the_first_sdd_components_of_the_requested_path() {
+        assert_eq!(signed_directory("a/b/c.txt", "2").as_deref(), Ok("a/b"));
+        assert_eq!(signed_directory("a/b", "2").as_deref(), Ok("a/b"));
+        assert_eq!(signed_directory("a", "2"), Err(Error::AuthenticationFailed));
+        assert_eq!(signed_directory("a", "x"), Err(Error::AuthenticationFailed));
+        let pairs = [
+            ("sv", "2023-11-03"),
+            ("sr", "d"),
+            ("sdd", "1"),
+            ("sp", "rl"),
+            ("se", "2030-01-01T00:00:00Z"),
+        ];
+        let signed = "rl\n\n2030-01-01T00:00:00Z\n/blob/testaccount/box/dir\n\n\n\n2023-11-03\nd\n\n\n\n\n\n\n";
+        let query = query(&pairs, signed);
+        let account = account();
+        let resource = |blob| Resource {
+            account: &account,
+            container: Some("box"),
+            blob: Some(blob),
+        };
+        for blob in ["dir", "dir/nested/file.txt"] {
+            assert!(
+                Token::verify(&query, &resource(blob), &[KEY.to_vec()], &Keys::default())
+                    .unwrap()
+                    .is_some(),
+                "{blob}"
+            );
+        }
+        assert!(
+            Token::verify(
+                &query,
+                &resource("other/file"),
+                &[KEY.to_vec()],
+                &Keys::default()
+            )
+            .is_err()
         );
     }
 
