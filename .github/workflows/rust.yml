@@ -77,6 +77,29 @@ jobs:
       - name: Show the server log on failure
         if: failure()
         run: tail -n 100 azuifer.log
+  js-sdk:
+    name: JavaScript Azure SDK compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: cargo build --locked
+      - run: npm ci
+        working-directory: tests/js_sdk
+      - name: Run the JavaScript SDK scenarios against all five services
+        run: |
+          echo "127.0.0.1 devstoreaccount1.dfs.localhost devstoreaccount1.blob.localhost" | sudo tee -a /etc/hosts
+          ../../target/debug/azuifer serve --in-memory --memory-limit 1073741824 \
+            --skip-api-version-check --services blob,queue,table,file,dfs \
+            --hns-accounts devstoreaccount1 --dfs-port 20003 > azuifer.log 2>&1 &
+          for _ in $(seq 1 60); do
+            curl -fs http://127.0.0.1:10005/readyz && break
+            sleep 1
+          done
+          node probe.js
+        working-directory: tests/js_sdk
+      - name: Show the server log on failure
+        if: failure()
+        run: tail -n 100 tests/js_sdk/azuifer.log
   dependencies:
     runs-on: ubuntu-latest
     steps:

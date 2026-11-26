@@ -25,6 +25,8 @@ DataLakeServiceClient("http://devstoreaccount1.dfs.localhost:10003",
 
 For `az storage fs`, set a connection string whose `BlobEndpoint` is `http://devstoreaccount1.blob.localhost:10003` (the `blob` host on the DFS port); the CLI derives the DFS URL from it. The Python SDK cannot address path-style local endpoints at all, so host-style URLs are required there. `*.localhost` must resolve to the loopback address.
 
+The .NET Data Lake client works with the path-style URL `http://127.0.0.1:10003/devstoreaccount1`. The JavaScript Data Lake client sends its container calls (`restype=container`) to the `dfs` host, which the DFS listener hands to Blob. It treats ports such as 10000 to 10004 as path-style emulator ports, and then builds rename URLs without the account, so give it a host-style URL on another port: start Azuifer with `--dfs-port 20003` and use `http://devstoreaccount1.dfs.localhost:20003`.
+
 ### AzCopy
 
 AzCopy 10.34.2 (Windows amd64) ran against `serve --services blob,file,dfs --hns-accounts devstoreaccount1` with an account SAS (`ss=b`, `srt=sco`) made from the public `devstoreaccount1` key. With `--from-to LocalBlobFS`, `BlobFSLocal` and `BlobFSTrash` against `http://127.0.0.1:10003/devstoreaccount1/{filesystem}?{sas}` these pass: a single file and a directory tree up (Create, Append, Flush), `list --location BlobFS`, copy down with matching SHA-256, a `sync` that sends nothing when unchanged, and `remove --recursive`. AzCopy cannot create a filesystem on an IP endpoint, so create it with one `PUT ?resource=filesystem` request.

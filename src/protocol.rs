@@ -442,8 +442,9 @@ impl Request<'_> {
                 self.check(&["comp", "where", "marker", "maxresults"], &[], false)?;
                 Operation::FindBlobs(account, None, self.filter()?, self.listing()?)
             }
-            (&Method::POST, None, Some("batch")) => {
-                self.check(&["comp"], &[], false)?;
+            // The JS SDK sends a service-level batch with restype=container.
+            (&Method::POST, None | Some("container"), Some("batch")) => {
+                self.check(&["comp", "restype"], &[], false)?;
                 Operation::SubmitBatch(None, self.batch()?)
             }
             _ => return Err(Error::Unsupported),

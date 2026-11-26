@@ -93,8 +93,35 @@ fn is_blob_query(request: &Request) -> bool {
     })
 }
 
-async fn dispatch(State(app): State<Arc<App>>, request: Request) -> Response {
-    if is_blob_host(&request) || is_blob_query(&request) {
+/// Rewrites a host-style `{account}.dfs.{domain}` Host header to the `blob` host.
+fn rewrite_dfs_host(request: &mut Request) {
+    let Some(host) = request
+        .headers()
+        .get("host")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return;
+    };
+    if crate::address::host_account("dfs", Some(host)).is_none() {
+        return;
+    }
+    let mut labels = host.splitn(3, '.');
+    let (Some(account), Some(_), Some(rest)) = (labels.next(), labels.next(), labels.next()) else {
+        return;
+    };
+    if let Ok(value) = HeaderValue::from_str(&format!("{account}.blob.{rest}")) {
+        request.headers_mut().insert("host", value);
+    }
+}
+
+async fn dispatch(State(app): State<Arc<App>>, mut request: Request) -> Response {
+    if is_blob_host(&request) {
+        return crate::server::dispatch(State(app.blob.clone()), request).await;
+    }
+    if is_blob_query(&request) {
+        // The JS Data Lake SDK sends Blob calls to the `dfs` host; the Blob service
+        // resolves the account from a `blob` host.
+        rewrite_dfs_host(&mut request);
         return crate::server::dispatch(State(app.blob.clone()), request).await;
     }
     let request_id = Uuid::new_v4().simple().to_string();
@@ -426,4 +453,46 @@ fn recursive_response(outcome: crate::store::RecursiveOutcome) -> Result<Respons
         .map(|path| Continuation::after(&path).render())
         .unwrap_or_default();
     respond::list_response(body, &next)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(host: &str, target: &str) -> Request {
+        axum::http::Request::builder()
+            .uri(target)
+            .header("host", host)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[test]
+    fn blob_calls_on_the_dfs_host_are_moved_to_the_blob_host() {
+        let mut blob = request("acct1.dfs.localhost:10003", "/fs?restype=container");
+        assert!(is_blob_query(&blob));
+        rewrite_dfs_host(&mut blob);
+        assert_eq!(blob.headers()["host"], "acct1.blob.localhost:10003");
+        assert!(is_blob_host(&blob));
+
+        let mut path_style = request("127.0.0.1:10003", "/acct1/fs?restype=container");
+        rewrite_dfs_host(&mut path_style);
+        assert_eq!(path_style.headers()["host"], "127.0.0.1:10003");
+    }
+
+    #[test]
+    fn dfs_requests_are_not_mistaken_for_blob_calls() {
+        assert!(!is_blob_query(&request(
+            "h",
+            "/fs/p?action=append&position=0"
+        )));
+        assert!(!is_blob_query(&request(
+            "h",
+            "/fs?resource=filesystem&recursive=true"
+        )));
+        assert!(is_blob_query(&request(
+            "h",
+            "/fs?comp=list&restype=container"
+        )));
+    }
 }
