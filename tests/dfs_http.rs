@@ -1376,6 +1376,31 @@ fn rename_moves_files_and_directories_and_rejects_conflicts() {
 }
 
 #[test]
+fn rename_accepts_a_source_that_names_the_account_too() {
+    // The Go Data Lake client sends `/{account}/{filesystem}/{path}` against path-style URLs.
+    let server = Emulator::start(&[]);
+    server.filesystem();
+    server.file("src/a.txt", b"alpha");
+    server.directory("dst");
+    let source = format!("/{ACCOUNT}/lake/src/a.txt");
+    let moved = server.dfs(
+        "PUT",
+        &format!("{LAKE}/dst/a.txt?mode=legacy"),
+        &[("x-ms-rename-source", source.as_str())],
+        b"",
+    );
+    assert_eq!(moved.status(), 201);
+    let read = server.dfs("GET", &format!("{LAKE}/dst/a.txt"), &[], b"");
+    assert_eq!(read.bytes().unwrap().as_ref(), b"alpha");
+    let elsewhere = server.dfs(
+        "PUT",
+        &format!("{LAKE}/dst/b.txt?mode=legacy"),
+        &[("x-ms-rename-source", "/otheraccount/lake/dst/a.txt")],
+        b"",
+    );
+    assert_eq!(elsewhere.status(), 400);
+}
+#[test]
 fn rename_honors_leases_on_the_source_the_destination_and_descendants() {
     let server = Emulator::start(&[]);
     server.filesystem();
