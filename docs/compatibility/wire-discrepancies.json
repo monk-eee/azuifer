@@ -774,9 +774,150 @@
         }
       ],
       "status": "observed"
+    },
+    {
+      "id": "WD-036",
+      "service": "blob",
+      "operation": "Put Page From URL",
+      "category": "live_vs_docs",
+      "summary": "A private source does not require SAS when the supplied source Bearer credential authorizes the copy.",
+      "expected_by_docs_or_sdk": "The x-ms-copy-source row says the source must be public or authorized with SAS. The same page separately documents Bearer in x-ms-copy-source-authorization.",
+      "observed_behavior": "At 2023-11-03 Azure accepts a private same-account Blob URL with neither public access nor a SAS query when it receives a valid x-ms-copy-source-authorization Bearer header. The write returns 201 and a read confirms the selected bytes.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/3c20a0dc9f09889a7964959c2b74751172169bc1/docs-ref-conceptual/storageservices/put-page-from-url.md#request-headers",
+          "detail": "The live result contradicts the narrower x-ms-copy-source row and agrees with the separate source-authorization header row."
+        },
+        {
+          "kind": "live",
+          "reference": "bfed10e38e7f969c71d0adbc7fdf284f225c8b00:tests/contracts/cassettes/blob-write-from-url.json#put_page",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=201 with the page sequence number. The corresponding read_page verifies the exact sparse layout."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-037",
+      "service": "blob",
+      "operation": "Put Page From URL",
+      "category": "undocumented_live",
+      "summary": "An aligned range past the copy source's EOF returns 416 CannotVerifyCopySource.",
+      "expected_by_docs_or_sdk": "Learn documents range alignment and limits, but the operation page does not specify the response for an aligned range wholly past the end of the source.",
+      "observed_behavior": "The destination range is valid but the requested source range starts after EOF. Azure returns 416 with CannotVerifyCopySource in the header and correlated XML.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/3c20a0dc9f09889a7964959c2b74751172169bc1/docs-ref-conceptual/storageservices/put-page-from-url.md#remarks",
+          "detail": "The remarks cover page size, alignment and the maximum range but not this source EOF response."
+        },
+        {
+          "kind": "live",
+          "reference": "bfed10e38e7f969c71d0adbc7fdf284f225c8b00:tests/contracts/cassettes/blob-write-from-url.json#reject_source_range",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=416, error_header=cannot_verify_copy_source and body.correlation=matches."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-038",
+      "service": "blob",
+      "operation": "Get Blob",
+      "category": "undocumented_live",
+      "summary": "User delegation SAS failures distinguish token time bounds from key expiry in AuthenticationErrorDetail.",
+      "expected_by_docs_or_sdk": "Learn documents the two validity windows and rejection after key expiry, but does not specify the XML detail shapes or that the version header is absent.",
+      "observed_behavior": "At 2023-11-03 an expired SAS or one with a future signed start returns 403 AuthenticationFailed with token-window details. A SAS still within its own window after the signing key expires returns 403 with key-window details. These responses include a correlated request ID and omit x-ms-version.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/bd8259af7294185bfc7341bbf69e0f41f2f89556/docs-ref-conceptual/storageservices/create-user-delegation-sas.md",
+          "detail": "The validity-window section specifies rejection after key expiry without describing the response details."
+        },
+        {
+          "kind": "live",
+          "reference": "bfed10e38e7f969c71d0adbc7fdf284f225c8b00:tests/contracts/cassettes/blob-user-delegation-sas-windows.json#expired",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "user_delegation_sas",
+          "detail": "status=403, api_version=missing and body.detail=sas_time. future_start records the same shape."
+        },
+        {
+          "kind": "live",
+          "reference": "bfed10e38e7f969c71d0adbc7fdf284f225c8b00:tests/contracts/cassettes/blob-user-delegation-sas-windows.json#expired_key",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "user_delegation_sas",
+          "detail": "status=403, api_version=missing and body.detail=key_expired. Setup confirms the same SAS reads before the key expires."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-039",
+      "service": "blob",
+      "operation": "Rename Container",
+      "category": "undocumented_live",
+      "summary": "The flat Blob endpoint returns an invalid query value for comp=rename.",
+      "expected_by_docs_or_sdk": "The Learn container operation index does not list a rename operation or specify the rejection shape for this query.",
+      "observed_behavior": "A Bearer PUT with restype=container and comp=rename on a synthetic flat container returns 400 InvalidQueryParameterValue. The correlated XML names comp and echoes rename. This is not a DFS path rename.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/ede20618bc9a933eedfaa72d22c76ef581326087/docs-ref-conceptual/storageservices/Operations-on-Containers.md",
+          "detail": "The container operations list does not include Rename Container."
+        },
+        {
+          "kind": "live",
+          "reference": "bfed10e38e7f969c71d0adbc7fdf284f225c8b00:tests/contracts/cassettes/blob-container-rename-boundary.json#reject_rename",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=400, error_header=invalid_query_parameter_value and body.detail=rename."
+        }
+      ],
+      "status": "observed"
     }
   ],
   "observations": [
+    {
+      "id": "WD-040",
+      "service": "blob",
+      "operation": "Incremental Copy Blob",
+      "category": "documented_match",
+      "summary": "Incremental copy starts pending; clients download the destination snapshot, not the base.",
+      "expected_by_docs_or_sdk": "Learn specifies 202 pending on initiation, completion via Get Blob Properties, and downloads through the destination snapshot rather than the base.",
+      "observed_behavior": "Azure starts both measured copies with 202 pending. A successful HEAD gives the accepted copy ID and destination snapshot. Direct base GET returns 409 OperationNotAllowedOnIncrementalCopyBlob, and GET of the copied snapshot returns the full source bytes.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/4fd1ed5817470b7b270c0984e55a3f770473d747/docs-ref-conceptual/storageservices/Incremental-Copy-Blob.md",
+          "detail": "Response headers specify pending, and remarks explain destination snapshots and the direct-download restriction."
+        },
+        {
+          "kind": "live",
+          "reference": "bfed10e38e7f969c71d0adbc7fdf284f225c8b00:tests/contracts/cassettes/blob-incremental-copy.json#start_copy",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=202. The copy status is pending and the response has a copy ID."
+        },
+        {
+          "kind": "live",
+          "reference": "bfed10e38e7f969c71d0adbc7fdf284f225c8b00:tests/contracts/cassettes/blob-incremental-copy.json#reject_base_read",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=409 and error_header=operation_not_allowed_on_incremental_copy_blob; read_snapshot records exact bytes at 200."
+        }
+      ],
+      "status": "documented_match"
+    },
     {
       "id": "WD-035",
       "service": "queue",

@@ -42,7 +42,7 @@ fn rejected_source_bearer_does_not_use_destination_credentials() -> Result<()> {
 }
 
 impl Probe<'_> {
-    pub(super) fn from_url(&mut self) -> Result<()> {
+    pub(super) fn write_from_url(&mut self) -> Result<()> {
         let mut bytes = [b'a'; 2 * PAGE];
         bytes[PAGE..].fill(b'b');
         self.seed_block(BLOB, &bytes)?;

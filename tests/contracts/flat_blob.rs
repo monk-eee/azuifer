@@ -575,7 +575,7 @@ pub(super) fn observe(
             exchanges: Vec::new(),
         };
         match case {
-            Case::FromUrl => probe.from_url()?,
+            Case::FromUrl => probe.write_from_url()?,
             Case::IncrementalCopy => probe.incremental_copy()?,
             Case::SasWindows => probe.sas_windows()?,
             Case::RenameBoundary => probe.rename_boundary()?,
