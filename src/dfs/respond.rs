@@ -140,9 +140,13 @@ pub(super) fn path_view(view: PathView, body: bool, kind: View) -> Result<Respon
         }
         PathRead::File(download) => {
             let (lease, content) = (download.info.lease, download.info.headers.clone());
+            let range_checksum = download.range_checksum.clone();
             let (mut response, metadata) = wire::download_response(*download)?;
             let headers = response.headers_mut();
             headers.insert("x-ms-resource-type", HeaderValue::from_static("file"));
+            if let Some((name, value)) = range_checksum {
+                set(headers, name, &value)?;
+            }
             for (name, value) in [
                 ("content-encoding", &content.encoding),
                 ("content-language", &content.language),

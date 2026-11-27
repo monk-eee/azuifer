@@ -16,7 +16,7 @@ use std::{
     path::Path,
     process::{Child, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     thread,
@@ -32,7 +32,9 @@ struct Emulator {
     child: Child,
     blob: String,
     dfs: String,
+    admin: String,
     client: Client,
+    offset: AtomicU64,
 }
 
 impl Drop for Emulator {
@@ -52,6 +54,15 @@ impl Drop for Emulator {
 
 impl Emulator {
     fn start(location: Option<&Path>) -> Self {
+        Self::launch(location, &[])
+    }
+
+    /// An in-memory emulator whose Blob and DFS listeners share a clock the test advances.
+    fn start_with_clock() -> Self {
+        Self::launch(None, &["--test-clock"])
+    }
+
+    fn launch(location: Option<&Path>, extra: &[&str]) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_azuifer"));
         for (name, _) in std::env::vars_os() {
             if name
@@ -81,6 +92,7 @@ impl Emulator {
             Some(location) => command.arg("--location").arg(location),
             None => command.arg("--in-memory"),
         };
+        command.args(extra);
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -107,12 +119,27 @@ impl Emulator {
             child,
             blob: urls.remove("blob").expect("blob listener"),
             dfs: urls.remove("dfs").expect("dfs listener"),
+            admin: urls.remove("admin").expect("admin listener"),
             client: Client::builder()
                 .no_proxy()
                 .timeout(Duration::from_secs(30))
                 .build()
                 .unwrap(),
+            offset: AtomicU64::new(0),
         }
+    }
+
+    fn advance(&self, seconds: u64) {
+        let response = self
+            .client
+            .post(format!(
+                "{}/_azuifer/clock/advance?seconds={seconds}",
+                self.admin
+            ))
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        self.offset.fetch_add(seconds, Ordering::Relaxed);
     }
 
     fn send(
@@ -132,6 +159,7 @@ impl Emulator {
             &url,
             headers,
             has_body.then_some(body.len()),
+            SystemTime::now() + Duration::from_secs(self.offset.load(Ordering::Relaxed)),
         ) {
             request = request.header(name, value);
         }
@@ -198,12 +226,10 @@ fn shared_key(
     url: &Url,
     extra: &[(&str, &str)],
     length: Option<usize>,
+    now: SystemTime,
 ) -> BTreeMap<String, String> {
     let mut headers: BTreeMap<String, String> = BTreeMap::from([
-        (
-            "x-ms-date".into(),
-            httpdate::fmt_http_date(SystemTime::now()),
-        ),
+        ("x-ms-date".into(), httpdate::fmt_http_date(now)),
         ("x-ms-version".into(), VERSION.into()),
     ]);
     if let Some(length) = length {
@@ -340,6 +366,185 @@ fn blob_writes_read_through_dfs_and_dfs_writes_read_through_blob() {
             .unwrap()
             .as_ref(),
         b"replaced by blob"
+    );
+}
+
+#[test]
+fn dfs_reads_a_blob_with_the_same_range_checksum_and_date_conditions_as_blob() {
+    let server = Emulator::start(None);
+    server.filesystem();
+    let written = server.put_blob("r/data.bin", &[], b"0123456789");
+    let modified = header(&written, "last-modified");
+    let file = format!("{LAKE}/r/data.bin");
+    let range = [("range", "bytes=2-5")];
+    let with_md5 = [
+        ("range", "bytes=2-5"),
+        ("x-ms-range-get-content-md5", "true"),
+    ];
+
+    let blob = server.blob("GET", &file, &with_md5, b"");
+    let dfs = server.dfs("GET", &file, &with_md5, b"");
+    assert_eq!((blob.status().as_u16(), dfs.status().as_u16()), (206, 206));
+    let checksum = header(&dfs, "content-md5");
+    assert_eq!(checksum, header(&blob, "content-md5"));
+    assert_eq!(checksum.len(), 24, "base64 of a 16 byte MD5");
+    assert_eq!(header(&dfs, "content-range"), "bytes 2-5/10");
+    assert_eq!(dfs.bytes().unwrap().as_ref(), b"2345");
+
+    let plain = server.dfs("GET", &file, &range, b"");
+    assert_eq!(plain.status(), 206);
+    assert!(!plain.headers().contains_key("content-md5"));
+
+    // A whole-file read carries no range checksum unless asked, and asking needs a range.
+    dfs_error(
+        server.dfs("GET", &file, &[("x-ms-range-get-content-md5", "true")], b""),
+        400,
+        "InvalidHeaderValue",
+    );
+    // A range of more than 4 MiB cannot have a checksum.
+    server.put_blob("r/large.bin", &[], &vec![1u8; 4 * 1024 * 1024 + 1]);
+    dfs_error(
+        server.dfs(
+            "GET",
+            &format!("{LAKE}/r/large.bin"),
+            &[
+                ("range", "bytes=0-4194304"),
+                ("x-ms-range-get-content-md5", "true"),
+            ],
+            b"",
+        ),
+        400,
+        "InvalidHeaderValue",
+    );
+
+    // Date conditions answer alike on both protocols.
+    let long_ago = "Mon, 01 Jan 2001 00:00:00 GMT";
+    let far_future = "Fri, 01 Jan 2100 00:00:00 GMT";
+    for (condition, value, status) in [
+        ("if-modified-since", modified.as_str(), 304),
+        ("if-modified-since", long_ago, 200),
+        ("if-unmodified-since", long_ago, 412),
+        ("if-unmodified-since", far_future, 200),
+    ] {
+        let headers = [(condition, value)];
+        let blob = server.blob("GET", &file, &headers, b"").status();
+        let dfs = server.dfs("GET", &file, &headers, b"");
+        assert_eq!(blob.as_u16(), status, "blob {condition} {value}");
+        assert_eq!(dfs.status().as_u16(), status, "dfs {condition} {value}");
+        if status == 412 {
+            assert_eq!(dfs.headers()["x-ms-error-code"], "ConditionNotMet");
+        }
+    }
+}
+
+#[test]
+fn dfs_create_path_expiry_is_seen_by_blob_and_expires_on_the_shared_clock() {
+    let server = Emulator::start_with_clock();
+    server.filesystem();
+    let create = |name: &str, headers: &[(&str, &str)], content: &[u8]| {
+        let url = format!("{LAKE}/{name}");
+        let created = server.dfs("PUT", &format!("{url}?resource=file"), headers, b"");
+        assert_eq!(created.status(), 201, "create {name}");
+        let appended = server.dfs(
+            "PATCH",
+            &format!("{url}?action=append&position=0"),
+            &[],
+            content,
+        );
+        assert_eq!(appended.status(), 202);
+        let flushed = server.dfs(
+            "PATCH",
+            &format!("{url}?action=flush&position={}", content.len()),
+            &[],
+            b"",
+        );
+        assert_eq!(flushed.status(), 200);
+    };
+    let absolute = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(300));
+    create(
+        "ttl/relative.txt",
+        &[
+            ("x-ms-expiry-option", "RelativeToNow"),
+            ("x-ms-expiry-time", "60000"),
+        ],
+        b"relative",
+    );
+    create(
+        "ttl/absolute.txt",
+        &[
+            ("x-ms-expiry-option", "Absolute"),
+            ("x-ms-expiry-time", &absolute),
+        ],
+        b"absolute",
+    );
+    create(
+        "ttl/never.txt",
+        &[("x-ms-expiry-option", "NeverExpire")],
+        b"never",
+    );
+    create("ttl/plain.txt", &[], b"plain");
+
+    // Blob sees the deadline DFS set, and the content flushed afterwards keeps it.
+    let relative = server.blob("HEAD", &format!("{LAKE}/ttl/relative.txt"), &[], b"");
+    assert_eq!(relative.status(), 200);
+    assert_eq!(header(&relative, "content-length"), "8");
+    let deadline = header(&relative, "x-ms-expiry-time");
+    let absolute_head = server.blob("HEAD", &format!("{LAKE}/ttl/absolute.txt"), &[], b"");
+    assert_eq!(header(&absolute_head, "x-ms-expiry-time"), absolute);
+    for name in ["never", "plain"] {
+        let head = server.blob("HEAD", &format!("{LAKE}/ttl/{name}.txt"), &[], b"");
+        assert!(!head.headers().contains_key("x-ms-expiry-time"), "{name}");
+    }
+
+    // A rename keeps the deadline with the file.
+    let moved = server.dfs(
+        "PUT",
+        &format!("{LAKE}/ttl/moved.txt"),
+        &[("x-ms-rename-source", "/lake/ttl/relative.txt")],
+        b"",
+    );
+    assert_eq!(moved.status(), 201);
+    let moved_head = server.blob("HEAD", &format!("{LAKE}/ttl/moved.txt"), &[], b"");
+    assert_eq!(header(&moved_head, "x-ms-expiry-time"), deadline);
+
+    // Inside the deadline everything is still there through both protocols.
+    server.advance(30);
+    for name in ["moved", "absolute", "never", "plain"] {
+        let path = format!("{LAKE}/ttl/{name}.txt");
+        assert_eq!(server.dfs("HEAD", &path, &[], b"").status(), 200, "{name}");
+        assert_eq!(server.blob("HEAD", &path, &[], b"").status(), 200, "{name}");
+    }
+
+    // Past it the relative file is gone from both, and only that one.
+    server.advance(40);
+    let path = format!("{LAKE}/ttl/moved.txt");
+    dfs_error(server.dfs("HEAD", &path, &[], b""), 404, "PathNotFound");
+    dfs_error(server.blob("HEAD", &path, &[], b""), 404, "BlobNotFound");
+    dfs_error(server.blob("GET", &path, &[], b""), 404, "BlobNotFound");
+    let listing = server
+        .blob(
+            "GET",
+            &format!("{LAKE}?restype=container&comp=list&prefix=ttl/"),
+            &[],
+            b"",
+        )
+        .text()
+        .unwrap();
+    assert!(!listing.contains("moved.txt"), "{listing}");
+    assert!(!listing.contains("relative.txt"), "{listing}");
+    for name in ["absolute", "never", "plain"] {
+        assert!(listing.contains(&format!("ttl/{name}.txt")), "{listing}");
+    }
+
+    // The absolute deadline passes five minutes after creation.
+    server.advance(300);
+    let path = format!("{LAKE}/ttl/absolute.txt");
+    dfs_error(server.dfs("HEAD", &path, &[], b""), 404, "PathNotFound");
+    assert_eq!(
+        server
+            .dfs("HEAD", &format!("{LAKE}/ttl/never.txt"), &[], b"")
+            .status(),
+        200
     );
 }
 

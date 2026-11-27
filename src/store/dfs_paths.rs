@@ -13,6 +13,8 @@ use super::{
     require_blob, save_blob, snapshots, staging_file, write_lease,
 };
 use crate::{
+    blob_expiry::ExpiryOption,
+    blob_lifecycle::Lifecycle,
     blob_tags::Tags,
     checksum::Hasher,
     conditions::Guard,
@@ -428,6 +430,8 @@ pub(crate) struct CreatePath {
     pub(crate) default_owner: Option<String>,
     /// Acquire a lease on the new file, as `x-ms-proposed-lease-id` asks.
     pub(crate) lease: Option<(LeaseDuration, Option<LeaseId>)>,
+    /// The deadline of a new file, as `x-ms-expiry-option` asks (ADR-0030).
+    pub(crate) expiry: Option<ExpiryOption>,
 }
 
 pub(crate) struct Created {
@@ -810,8 +814,14 @@ pub(super) fn create_file(
         creation,
         lease,
         default_owner,
+        expiry,
         ..
     } = request;
+    // A new file has no creation time to measure from, so only `now` matters here.
+    let deadline = expiry
+        .map(|option| option.deadline(u64::try_from(now / 1000).unwrap_or(0), now))
+        .transpose()?
+        .flatten();
     container(tx, &key.container)?;
     let name = key.path.as_str();
     if namespace::directory(tx, &key.container, name)?.is_some() {
@@ -865,6 +875,13 @@ pub(super) fn create_file(
     let entity = save_blob(tx, mode, &key, &options, content, now)?;
     let entity = snapshots::finish_write(tx, &key, entity, version, Some(&options.tags))?;
     save_attributes(tx, &key.container, name, PathKind::File, &attributes)?;
+    if deadline.is_some() {
+        let lifecycle = Lifecycle {
+            expires: deadline,
+            ..Lifecycle::default()
+        };
+        super::expiry::write(tx, &key, &lifecycle)?;
+    }
     if pending {
         tx.execute(
             "UPDATE blobs SET dfs_pending=id WHERE account=?1 AND container=?2 AND name=?3",

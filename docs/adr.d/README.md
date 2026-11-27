@@ -33,6 +33,7 @@ The [product specification](../specs/azuifer.md) describes the target. An ADR re
 | [ADR-0027: Query Blob Contents with a small SQL subset and an Avro response](0027-query-blob-contents-with-a-small-sql-subset.md) | Proposed |
 | [ADR-0028: Address the root container by a single path segment](0028-address-the-root-container-by-a-single-path-segment.md) | Proposed |
 | [ADR-0029: Serve NFS file shares: POSIX properties, hard links, and symbolic links](0029-serve-nfs-file-shares-with-posix-properties-and-links.md) | Proposed |
+| [ADR-0030: Read Path range checksums and Create Path expiry on the shared object identity](0030-read-path-range-checksums-and-create-path-expiry.md) | Proposed |
 
 Search the index before drafting a record. If a change needs a new decision, use the [template](template.md), pick the next four-digit number, and add the proposed record to the index. Keep separate decisions in separate records.
 
