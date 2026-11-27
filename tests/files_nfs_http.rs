@@ -53,6 +53,10 @@ impl Reply {
 
 impl Emulator {
     fn start(location: Option<&Path>) -> Self {
+        Self::start_with(location, &[])
+    }
+
+    fn start_with(location: Option<&Path>, extra: &[&str]) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_azuifer"));
         for (name, _) in std::env::vars_os() {
             if name
@@ -81,6 +85,7 @@ impl Emulator {
             Some(location) => command.arg("--location").arg(location),
             None => command.arg("--in-memory"),
         };
+        command.args(extra);
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1667,6 +1672,216 @@ fn a_share_snapshot_keeps_hard_links_and_symbolic_links() {
         ),
         202,
     );
+}
+
+#[test]
+fn ranges_and_aborted_copies_work_on_nfs_files() {
+    let emulator = Emulator::start(None);
+    nfs_share(&emulator, "rng");
+    file(&emulator, "rng", "src.bin", 1024, &[]);
+    put(&emulator, "rng", "src.bin", 0, b"aaaa");
+    put(&emulator, "rng", "src.bin", 512, b"bbbb");
+
+    let ranges = |path: &str| {
+        let reply = expect(
+            emulator.send(
+                "GET",
+                &format!("/{ACCOUNT}/rng/{path}?comp=rangelist"),
+                &[],
+                b"",
+            ),
+            200,
+        );
+        (tags(&reply, "Start"), tags(&reply, "End"))
+    };
+    assert_eq!(
+        ranges("src.bin"),
+        (
+            vec!["0".to_owned(), "512".to_owned()],
+            vec!["3".to_owned(), "515".to_owned()]
+        )
+    );
+
+    // Put Range From URL copies a window of another file of the share.
+    file(&emulator, "rng", "dst.bin", 4, &[]);
+    let source = format!("{}/{ACCOUNT}/rng/src.bin", emulator.base);
+    let from_url = |target: &str, source_url: &str| {
+        emulator.send(
+            "PUT",
+            &format!("/{ACCOUNT}/rng/{target}?comp=range"),
+            &[
+                ("x-ms-copy-source", source_url),
+                ("x-ms-source-range", "bytes=512-515"),
+                ("x-ms-range", "bytes=0-3"),
+                ("x-ms-write", "update"),
+            ],
+            b"",
+        )
+    };
+    expect(from_url("dst.bin", &source), 201);
+    assert_eq!(read(&emulator, "rng", "dst.bin"), b"bbbb");
+
+    // A symbolic link is neither the source nor the target of a ranged write.
+    expect(symbolic_link(&emulator, "rng", "link", "src.bin"), 201);
+    let refused = "XNfs4FileTypeUnsupportedException";
+    expect_error(
+        from_url("dst.bin", &format!("{}/{ACCOUNT}/rng/link", emulator.base)),
+        400,
+        refused,
+    );
+    expect_error(from_url("link", &source), 400, refused);
+
+    // Copies finish at once, so there is never one to abort.
+    expect_error(
+        emulator.send(
+            "PUT",
+            &format!(
+                "/{ACCOUNT}/rng/dst.bin?comp=copy&copyid=00000000-0000-0000-0000-000000000000"
+            ),
+            &[("x-ms-copy-action", "abort")],
+            b"",
+        ),
+        409,
+        "NoPendingCopyOperation",
+    );
+
+    // Clearing a range deallocates it.
+    expect(
+        emulator.send(
+            "PUT",
+            &format!("/{ACCOUNT}/rng/src.bin?comp=range"),
+            &[("x-ms-range", "bytes=0-3"), ("x-ms-write", "clear")],
+            b"",
+        ),
+        201,
+    );
+    assert_eq!(
+        ranges("src.bin"),
+        (vec!["512".to_owned()], vec!["515".to_owned()])
+    );
+    assert_eq!(
+        usage(&emulator, "rng"),
+        "8",
+        "4 bytes in src.bin and 4 in dst.bin"
+    );
+}
+
+#[test]
+fn metadata_and_soft_delete_keep_the_protocol() {
+    let emulator = Emulator::start_with(None, &["--share-retention-days", "1"]);
+    expect(
+        emulator.send(
+            "PUT",
+            &format!("/{ACCOUNT}/meta?restype=share"),
+            &[
+                ("x-ms-enabled-protocols", "NFS"),
+                ("x-ms-root-squash", "RootSquash"),
+            ],
+            b"",
+        ),
+        201,
+    );
+    expect(
+        emulator.send(
+            "PUT",
+            &format!("/{ACCOUNT}/meta?restype=share&comp=metadata"),
+            &[("x-ms-meta-owner", "ada")],
+            b"",
+        ),
+        200,
+    );
+    let share = expect(
+        emulator.send(
+            "GET",
+            &format!("/{ACCOUNT}/meta?restype=share&comp=metadata"),
+            &[],
+            b"",
+        ),
+        200,
+    );
+    assert_eq!(share.header("x-ms-meta-owner"), "ada");
+    assert_eq!(share.header("x-ms-enabled-protocols"), "NFS");
+    assert_eq!(share.header("x-ms-root-squash"), "RootSquash");
+
+    directory(&emulator, "meta", "d", &[]);
+    expect(
+        emulator.send(
+            "PUT",
+            &format!("/{ACCOUNT}/meta/d?restype=directory&comp=metadata"),
+            &[("x-ms-meta-k", "v")],
+            b"",
+        ),
+        200,
+    );
+    let dir = expect(
+        emulator.send(
+            "GET",
+            &format!("/{ACCOUNT}/meta/d?restype=directory&comp=metadata"),
+            &[],
+            b"",
+        ),
+        200,
+    );
+    assert_eq!(dir.header("x-ms-meta-k"), "v");
+    assert_eq!(dir.header("x-ms-mode"), "0755");
+    assert_eq!(dir.header("x-ms-file-file-type"), "Directory");
+
+    file(&emulator, "meta", "d/f.txt", 3, &[("x-ms-mode", "0600")]);
+    put(&emulator, "meta", "d/f.txt", 0, b"abc");
+    expect(hard_link(&emulator, "meta", "d/g.txt", "d/f.txt"), 201);
+
+    // A deleted share comes back under any name with its protocol, settings, modes and links.
+    expect(
+        emulator.send(
+            "DELETE",
+            &format!("/{ACCOUNT}/meta?restype=share"),
+            &[],
+            b"",
+        ),
+        202,
+    );
+    expect_error(
+        emulator.send("HEAD", &format!("/{ACCOUNT}/meta?restype=share"), &[], b""),
+        404,
+        "ShareNotFound",
+    );
+    let deleted = expect(
+        emulator.send(
+            "GET",
+            &format!("/{ACCOUNT}?comp=list&include=deleted"),
+            &[],
+            b"",
+        ),
+        200,
+    );
+    let version = tags(&deleted, "Version").remove(0);
+    expect(
+        emulator.send(
+            "PUT",
+            &format!("/{ACCOUNT}/restored?restype=share&comp=undelete"),
+            &[
+                ("x-ms-deleted-share-name", "meta"),
+                ("x-ms-deleted-share-version", &version),
+            ],
+            b"",
+        ),
+        201,
+    );
+    let restored = expect(
+        emulator.send(
+            "HEAD",
+            &format!("/{ACCOUNT}/restored?restype=share"),
+            &[],
+            b"",
+        ),
+        200,
+    );
+    assert_eq!(restored.header("x-ms-enabled-protocols"), "NFS");
+    assert_eq!(restored.header("x-ms-root-squash"), "RootSquash");
+    let back = properties(&emulator, "restored", "d/f.txt");
+    assert_eq!(back.header("x-ms-mode"), "0600");
+    assert_eq!(back.header("x-ms-link-count"), "2");
+    assert_eq!(read(&emulator, "restored", "d/g.txt"), b"abc");
 }
 
 #[test]

@@ -156,8 +156,9 @@ def workflow(server):
     check("Set File Properties changes the mode and keeps the owner",
           (fprops.file_mode, fprops.owner) == ("0600", "7"))
     check("the SMB attribute and permission properties are absent on an NFS file",
-          not getattr(fprops, "file_attributes", None) or str(fprops.file_attributes) in ("None", ""),
-          repr(getattr(fprops, "file_attributes", None)))
+          getattr(fprops, "file_attributes", None) is None
+          and getattr(fprops, "permission_key", None) is None,
+          repr((getattr(fprops, "file_attributes", None), getattr(fprops, "permission_key", None))))
     names = [item.name for item in nfs.get_directory_client("data").list_directories_and_files()]
     check("the directory lists its file", names == ["original.txt"], repr(names))
 
