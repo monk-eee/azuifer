@@ -1,0 +1,176 @@
+{
+  "schema_version": 2,
+  "source": "azure",
+  "case": "blob-sparse-page-writes",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "create_page",
+      "request": {
+        "method": "put",
+        "operation": "put_page_blob",
+        "body_bytes": 0,
+        "page_size": 1024,
+        "sequence": 3
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "valid",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "write_page",
+      "request": {
+        "method": "put",
+        "operation": "update_page",
+        "body_bytes": 512,
+        "page_range": [
+          512,
+          1023
+        ],
+        "sequence_equal": 3
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "changed",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      },
+      "details": {
+        "kind": "sequence",
+        "number": 3
+      }
+    },
+    {
+      "step": "read_sparse_pages",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 1024,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      },
+      "details": {
+        "kind": "sequence",
+        "number": 3
+      }
+    },
+    {
+      "step": "reject_page_sequence",
+      "request": {
+        "method": "put",
+        "operation": "update_page",
+        "body_bytes": 512,
+        "page_range": [
+          512,
+          1023
+        ],
+        "sequence_equal": 4
+      },
+      "status": 412,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "sequence_number_condition_not_met",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "sequence_number_condition_not_met",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "read_pages_after_rejection",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 1024,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      },
+      "details": {
+        "kind": "sequence",
+        "number": 3
+      }
+    },
+    {
+      "step": "clear_page",
+      "request": {
+        "method": "put",
+        "operation": "clear_page",
+        "body_bytes": 0,
+        "page_range": [
+          512,
+          1023
+        ]
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "changed",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      },
+      "details": {
+        "kind": "sequence",
+        "number": 3
+      }
+    },
+    {
+      "step": "read_cleared_pages",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 1024,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      },
+      "details": {
+        "kind": "sequence",
+        "number": 3
+      }
+    }
+  ]
+}

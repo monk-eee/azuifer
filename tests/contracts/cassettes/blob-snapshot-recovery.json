@@ -1,0 +1,162 @@
+{
+  "schema_version": 2,
+  "source": "azure",
+  "case": "blob-snapshot-recovery",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "seed",
+      "request": {
+        "method": "put",
+        "operation": "put_block_blob",
+        "body_bytes": 25
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "valid",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "create_snapshot",
+      "request": {
+        "method": "put",
+        "operation": "create_snapshot",
+        "body_bytes": 0
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      },
+      "details": {
+        "kind": "snapshot",
+        "timestamp": "matches"
+      }
+    },
+    {
+      "step": "overwrite",
+      "request": {
+        "method": "put",
+        "operation": "put_block_blob",
+        "body_bytes": 28,
+        "if_match": "matches"
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "changed",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "reject_delete_with_snapshots",
+      "request": {
+        "method": "delete",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 409,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "snapshots_present",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "snapshots_present",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "read_snapshot",
+      "request": {
+        "method": "get",
+        "operation": "read_snapshot",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 25,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      }
+    },
+    {
+      "step": "read_replacement",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 28,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      }
+    },
+    {
+      "step": "restore_snapshot",
+      "request": {
+        "method": "put",
+        "operation": "put_block_blob",
+        "body_bytes": 25,
+        "if_match": "matches"
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "changed",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "read_restored",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 25,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      }
+    }
+  ]
+}

@@ -50,6 +50,7 @@ pub(crate) enum Error {
     BlobArchived,
     MissingHeader,
     LeaseIdMissing,
+    LeaseIdMissingBlob,
     LeaseLost,
     LeaseAlreadyPresent,
     LeaseMismatchBlob,

@@ -162,14 +162,19 @@ fn project(
     })
 }
 
-#[test]
-fn replay_get_user_delegation_key_against_azure_cassette() -> Result<()> {
+pub(super) fn reviewed_key() -> Result<KeyCassette> {
     let expected: KeyCassette =
         serde_json::from_slice(AZURE_FIXTURE).map_err(|_| anyhow!("invalid Azure key cassette"))?;
     ensure!(
         expected.source == Source::Azure,
         "replay requires the observed Azure fixture"
     );
+    Ok(expected)
+}
+
+#[test]
+fn replay_get_user_delegation_key_against_azure_cassette() -> Result<()> {
+    let expected = reviewed_key()?;
     let local = with_local(|client, endpoint, bearer| {
         observe(client, endpoint, bearer, Source::Synthetic)
     })?;
@@ -304,14 +309,19 @@ impl WindowCassette {
     }
 }
 
-#[test]
-fn replay_delegation_window_errors_against_azure_cassette() -> Result<()> {
+pub(super) fn reviewed_windows() -> Result<WindowCassette> {
     let expected: WindowCassette = serde_json::from_slice(AZURE_WINDOW_FIXTURE)
         .map_err(|_| anyhow!("invalid Azure window cassette"))?;
     ensure!(
         expected.source == Source::Azure,
         "replay requires the observed Azure fixture"
     );
+    Ok(expected)
+}
+
+#[test]
+fn replay_delegation_window_errors_against_azure_cassette() -> Result<()> {
+    let expected = reviewed_windows()?;
     let local = with_local(|client, endpoint, bearer| {
         observe_invalid_windows(client, endpoint, bearer, Source::Synthetic)
     })?;

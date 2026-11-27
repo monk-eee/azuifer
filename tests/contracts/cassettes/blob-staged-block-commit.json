@@ -1,29 +1,48 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "source": "azure",
   "case": "blob-staged-block-commit",
   "api_version": "2023-11-03",
   "responses": [
     {
       "step": "stage_first",
+      "request": {
+        "method": "put",
+        "operation": "stage_block",
+        "body_bytes": 6
+      },
       "status": 201,
       "api_version": "matches",
       "request_id": "matches",
       "etag": "missing",
       "error_header": "missing",
-      "body": {"kind": "empty"}
+      "body": {
+        "kind": "empty"
+      }
     },
     {
       "step": "stage_second",
+      "request": {
+        "method": "put",
+        "operation": "stage_block",
+        "body_bytes": 7
+      },
       "status": 201,
       "api_version": "matches",
       "request_id": "matches",
       "etag": "missing",
       "error_header": "missing",
-      "body": {"kind": "empty"}
+      "body": {
+        "kind": "empty"
+      }
     },
     {
       "step": "read_uncommitted",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
       "status": 404,
       "api_version": "matches",
       "request_id": "matches",
@@ -40,15 +59,27 @@
     },
     {
       "step": "commit",
+      "request": {
+        "method": "put",
+        "operation": "commit_block_list",
+        "body_bytes": 65
+      },
       "status": 201,
       "api_version": "matches",
       "request_id": "matches",
       "etag": "valid",
       "error_header": "missing",
-      "body": {"kind": "empty"}
+      "body": {
+        "kind": "empty"
+      }
     },
     {
       "step": "read_committed",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
       "status": 200,
       "api_version": "matches",
       "request_id": "matches",
@@ -65,6 +96,11 @@
     },
     {
       "step": "reject_unknown_block",
+      "request": {
+        "method": "put",
+        "operation": "commit_block_list",
+        "body_bytes": 44
+      },
       "status": 400,
       "api_version": "matches",
       "request_id": "matches",
@@ -81,6 +117,11 @@
     },
     {
       "step": "read_after_rejected_commit",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
       "status": 200,
       "api_version": "matches",
       "request_id": "matches",

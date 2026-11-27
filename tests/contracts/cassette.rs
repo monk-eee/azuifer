@@ -72,6 +72,11 @@ pub(super) enum ErrorCode {
     BlobAlreadyExists,
     ConditionNotMet,
     InvalidBlockList,
+    LeaseIdMissing,
+    LeaseMismatchBlob,
+    SnapshotsPresent,
+    AppendPositionConditionNotMet,
+    SequenceNumberConditionNotMet,
     ContainerNotFound,
     InvalidInput,
     InvalidXmlDocument,
@@ -90,6 +95,11 @@ impl ErrorCode {
             Some("BlobAlreadyExists") => Self::BlobAlreadyExists,
             Some("ConditionNotMet") => Self::ConditionNotMet,
             Some("InvalidBlockList") => Self::InvalidBlockList,
+            Some("LeaseIdMissing") => Self::LeaseIdMissing,
+            Some("LeaseIdMismatchWithBlobOperation") => Self::LeaseMismatchBlob,
+            Some("SnapshotsPresent") => Self::SnapshotsPresent,
+            Some("AppendPositionConditionNotMet") => Self::AppendPositionConditionNotMet,
+            Some("SequenceNumberConditionNotMet") => Self::SequenceNumberConditionNotMet,
             Some("ContainerNotFound") => Self::ContainerNotFound,
             Some("InvalidInput") => Self::InvalidInput,
             Some("InvalidXmlDocument") => Self::InvalidXmlDocument,
@@ -172,6 +182,15 @@ impl Cassette {
         ensure!(
             value.exchanges.each_ref().map(|exchange| exchange.step) == STEPS,
             "unexpected cassette step order"
+        );
+        Ok(value)
+    }
+
+    pub(super) fn load_azure(bytes: &[u8]) -> Result<Self> {
+        let value = Self::load(bytes)?;
+        ensure!(
+            value.source == Source::Azure,
+            "expected a recorded Azure SAS cassette"
         );
         Ok(value)
     }
@@ -344,19 +363,24 @@ pub(super) fn error_message<'a>(message: &'a str, request_id: Option<&str>) -> (
         (Some(id), Some(time), None)
             if request_id
                 .is_some_and(|expected| id.trim().strip_prefix("RequestId:") == Some(expected))
-                && time.trim().strip_prefix("Time:").is_some_and(|value| {
-                    value.ends_with('Z')
-                        && value.contains('T')
-                        && value
-                            .bytes()
-                            .all(|b| b.is_ascii_digit() || b"-:.TZ".contains(&b))
-                }) =>
+                && time
+                    .trim()
+                    .strip_prefix("Time:")
+                    .is_some_and(is_utc_timestamp) =>
         {
             Header::Matches
         }
         _ => Header::Different,
     };
     (prefix, correlation)
+}
+
+pub(super) fn is_utc_timestamp(value: &str) -> bool {
+    value.ends_with('Z')
+        && value.contains('T')
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b"-:.TZ".contains(&b))
 }
 
 // These two Azure envelopes contain only text leaves. Never include a parse error's input.

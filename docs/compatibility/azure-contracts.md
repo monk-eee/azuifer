@@ -1,14 +1,20 @@
 # Azure contract cassettes
 
-The [Rust harness](../../tests/contracts/mod.rs) runs the same requests against Azure and the built Azuifer binary over HTTPS. Each case pins API version `2023-11-03`.
+The [Rust harness](../../tests/contracts/mod.rs) runs the same requests against Azure and the built Azuifer binary over HTTPS. Each case pins API version `2023-11-03`. The reviewed Azure cassette is the baseline. A live check compares each service with it independently: Azure drift, Azuifer drift, or both can fail the check. Matching each other is not enough.
 
 | Case | What it compares |
 | --- | --- |
-| Get User Delegation Key | HTTP status, selected headers, the XML fields, the requested validity window, and the decoded key length. The cassette omits the key and identifiers. |
-| Invalid delegation key windows | Missing expiry, a future expiry before the requested start, and a malformed start. Checks the Azure error code, the rejected node, the value's relation to the input, and error-message correlation. |
-| Read-only Blob user-delegation SAS | HEAD, byte-range GET, a denied DELETE, and a final GET that must return the original bytes and ETag. The XML denial includes a timestamp and the request ID from the response header. |
-| Conditional Blob overwrite (Entra bearer) | Rejects a create on an existing blob and a write using a stale ETag. A write with the current ETag publishes new bytes, metadata, and ETag. The rejected writes leave the visible state unchanged. |
-| Staged block commit (Entra bearer) | Stages two blocks, observes the uncommitted blob is not readable, and commits them in reverse staging order. A block list naming a missing block is rejected without changing the committed bytes, metadata, or ETag. |
+| [Get User Delegation Key](../../tests/contracts/cassettes/blob-get-user-delegation-key.json) | HTTP status, selected headers, the XML fields, the requested validity window, and the decoded key length. The cassette omits the key and identifiers. |
+| [Invalid delegation key windows](../../tests/contracts/cassettes/blob-delegation-key-invalid-windows.json) | Missing expiry, a future expiry before the requested start, and a malformed start. Checks the Azure error code, the rejected node, the value's relation to the input, and error-message correlation. |
+| [Read-only Blob user-delegation SAS](../../tests/contracts/cassettes/blob-user-delegation-sas-read-only.json) | HEAD, byte-range GET, a denied DELETE, and a final GET that must return the original bytes and ETag. The XML denial includes a timestamp and the request ID from the response header. |
+| [Conditional Blob overwrite](../../tests/contracts/cassettes/blob-conditional-overwrite.json) | Rejects a create on an existing blob and a stale ETag. A write with the current ETag publishes new bytes, metadata, and ETag. Rejected writes leave the visible state unchanged. |
+| [Staged block commit](../../tests/contracts/cassettes/blob-staged-block-commit.json) | Stages two blocks, observes the uncommitted blob is not readable, and commits them in reverse staging order. A block list naming a missing block is rejected without changing the committed bytes, metadata, or ETag. |
+| [Blob lease guard](../../tests/contracts/cassettes/blob-lease-guard.json) | Acquires an infinite lease, rejects writes with absent and wrong IDs, and accepts a write with the correct ID. Verifies bytes, metadata, ETag and lease state before and after release. |
+| [Snapshot recovery](../../tests/contracts/cassettes/blob-snapshot-recovery.json) | A base blob with a snapshot rejects DELETE without a snapshots option. An overwrite leaves the snapshot's bytes, metadata and ETag intact. A conditional PUT restores the snapshot bytes and metadata to the base blob; this tests client-driven recovery, not Copy Blob. |
+| [Append position](../../tests/contracts/cassettes/blob-append-position.json) | The stale-position append is rejected without changing bytes or ETag. Valid appends report their offsets and committed block counts and preserve byte order. |
+| [Sparse page writes](../../tests/contracts/cassettes/blob-sparse-page-writes.json) | A write to the second 512-byte page leaves zeroes in the first. A failed sequence guard preserves the bytes and ETag. Clearing the written page returns it to zeroes without changing the blob length or sequence number. |
+
+The six mutation cases use Entra bearer authentication. Their cassettes record the request method, operation, payload length and selected guards alongside the observed response. ETags and lease IDs are represented by their relationship to the scenario, never by their value.
 
 ## Replay without Azure
 
@@ -16,9 +22,9 @@ The [Rust harness](../../tests/contracts/mod.rs) runs the same requests against 
 cargo test --locked --test tls_auth_http replay_
 ```
 
-The regular Rust CI suite replays the sanitized Azure recordings: [key issuance](../../tests/contracts/cassettes/blob-get-user-delegation-key.json), [invalid delegation key windows](../../tests/contracts/cassettes/blob-delegation-key-invalid-windows.json), [read-only SAS](../../tests/contracts/cassettes/blob-user-delegation-sas-read-only.json), [conditional overwrite](../../tests/contracts/cassettes/blob-conditional-overwrite.json), and [staged block commit](../../tests/contracts/cassettes/blob-staged-block-commit.json). Set `AZUIFER_CONTRACT_REPLAY_FILE` to replay a different saved read-only SAS cassette without running any Azure commands.
+The regular Rust CI suite replays the reviewed recordings against Azuifer, without Azure credentials. To replay a saved read-only SAS candidate instead, set `AZUIFER_CONTRACT_REPLAY_FILE` and explicitly run `cargo test --locked --test tls_auth_http replay_saved_blob_sas_contract -- --ignored`. This does not change the CI baseline.
 
-## Record from a dedicated Azure test account
+## Check for drift against real Azure
 
 Sign in to Azure CLI locally. Use a disposable public-cloud storage account tagged `azuifer-contract-tests=true` with management-plane read access. Get User Delegation Key needs the delegation-key action at account scope or above. The SAS and mutation cases also need **Storage Blob Data Contributor** at the account scope or equivalent permissions to create, read, and delete their test containers and upload blobs. Do not use a production or customer-data account.
 
@@ -32,20 +38,16 @@ Set these variables in the local environment, not in the repository:
 
 ```sh
 cargo test --locked --test tls_auth_http \
-  contracts::live::record_live_delegation_key_contract -- --ignored --exact --nocapture
-
-cargo test --locked --test tls_auth_http \
-  contracts::live::record_live_delegation_window_contract -- --ignored --exact --nocapture
-
-cargo test --locked --test tls_auth_http \
-  contracts::live::record_live_blob_sas_contract -- --ignored --exact --nocapture
-
-cargo test --locked --test tls_auth_http \
-  contracts::live::record_live_blob_mutation -- --ignored --nocapture --test-threads=1
+  contracts::live::check_live_ -- --ignored --nocapture --test-threads=1
 ```
 
 All live tests check the account and tag before requesting a Storage access token. The delegation cases use short validity windows and do not create containers or blobs. The SAS and mutation cases each create a randomly named container for synthetic data and delete it afterward. The tests do not list account keys, change account settings, or access existing containers. The recorder reports cleanup failures; an interrupted run may leave an `azuifer-contract-` container.
 
-The recorder writes only the allowlisted contract model to `dist/azure-contracts/` (ignored by Git). It never writes request URLs, Azure resource identifiers, access tokens, SAS parameters, delegation keys, raw headers, or arbitrary bodies. For example, an ETag is recorded as matching the seeded object's ETag, not as the original value. The Azure result is saved before comparison so a mismatch can be inspected and replayed. A failed setup or an Azure response that cannot be tied to the seeded blob does not produce a cassette.
+## Capture and review a new baseline
 
-Review the normalized fields and provenance before adding an Azure fixture to source control. A passing cassette is evidence only for those operations, that API version and auth mode, and the fields checked by the scenario. It does not change an operation's conformance rating or replace live reruns as Azure evolves.
+1. Define a synthetic scenario with a pinned API version, auth mode, and any required account features. Follow the [mutation probes](../../tests/contracts/mutations.rs) for setup, request construction, typed projection, and cleanup. Check a read after each important mutation or rejection so success cannot hide the wrong state.
+2. Set `AZUIFER_CONTRACT_CAPTURE=1` and run the live command (or filter to the new case). Capture mode only observes Azure and writes a uniquely named candidate under `dist/azure-contracts/` (ignored by Git). It does not check Azuifer or update the baseline. Unset the variable to resume live comparisons.
+3. Review the candidate before copying it into [the cassette directory](../../tests/contracts/cassettes/). If the baseline changes, review the Git diff and explain why. Commit only the typed projection: no URLs, resource identifiers, credentials, SAS parameters, delegation keys, raw headers, or arbitrary bodies. A failed setup cannot produce a record for that workflow.
+4. Run offline replay against the reviewed record, then rerun the live check. A regression should fail against the reviewed record before fixing Azuifer; never change the record just to make the emulator pass.
+
+A passing cassette proves only the exchanges, API version, auth mode, account features, and fields that the case checked. It does not certify other operations, Blob versioning or soft delete, or parity across services.

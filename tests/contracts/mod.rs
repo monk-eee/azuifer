@@ -85,7 +85,11 @@ fn request(client: &Client, method: Method, url: Url) -> RequestBuilder {
 }
 
 fn send(request: RequestBuilder, phase: &'static str) -> Result<Response> {
-    request.send().map_err(|error| {
+    sent(request.send(), phase)
+}
+
+fn sent(response: reqwest::Result<Response>, phase: &'static str) -> Result<Response> {
+    response.map_err(|error| {
         let kind = if error.is_timeout() {
             "timeout"
         } else if error.is_connect() {
@@ -243,6 +247,10 @@ fn observe_local() -> Result<Cassette> {
     })
 }
 
+fn reviewed_sas() -> Result<Cassette> {
+    Cassette::load_azure(SAS_CASSETTE)
+}
+
 fn with_local<T>(observe: impl FnOnce(&Client, &Url, &str) -> Result<T>) -> Result<T> {
     let server = Server::start(
         &[
@@ -262,14 +270,17 @@ fn with_local<T>(observe: impl FnOnce(&Client, &Url, &str) -> Result<T>) -> Resu
 
 #[test]
 fn replay_blob_sas_contract() -> Result<()> {
-    let expected =
-        match std::env::var_os("AZUIFER_CONTRACT_REPLAY_FILE") {
-            Some(path) => Cassette::load(&read_bounded(File::open(path).map_err(|error| {
-                anyhow!("could not open replay cassette ({:?})", error.kind())
-            })?)?)?,
-            None => Cassette::load(SAS_CASSETTE)?,
-        };
-    expected.compare(&observe_local()?)
+    reviewed_sas()?.compare(&observe_local()?)
+}
+
+#[test]
+#[ignore = "optional saved SAS cassette: set AZUIFER_CONTRACT_REPLAY_FILE"]
+fn replay_saved_blob_sas_contract() -> Result<()> {
+    let path = std::env::var_os("AZUIFER_CONTRACT_REPLAY_FILE")
+        .context("AZUIFER_CONTRACT_REPLAY_FILE must select a saved SAS cassette")?;
+    let file = File::open(path)
+        .map_err(|error| anyhow!("could not open replay cassette ({:?})", error.kind()))?;
+    Cassette::load(&read_bounded(file)?)?.compare(&observe_local()?)
 }
 
 #[test]

@@ -1,0 +1,208 @@
+{
+  "schema_version": 2,
+  "source": "azure",
+  "case": "blob-lease-guard",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "seed",
+      "request": {
+        "method": "put",
+        "operation": "put_block_blob",
+        "body_bytes": 25
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "valid",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "acquire_lease",
+      "request": {
+        "method": "put",
+        "operation": "acquire_lease",
+        "body_bytes": 0,
+        "lease_id": "matches",
+        "lease_seconds": -1
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      },
+      "details": {
+        "kind": "lease_id",
+        "id": "matches"
+      }
+    },
+    {
+      "step": "reject_missing_lease",
+      "request": {
+        "method": "put",
+        "operation": "put_block_blob",
+        "body_bytes": 31
+      },
+      "status": 412,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "lease_id_missing",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "lease_id_missing",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "reject_wrong_lease",
+      "request": {
+        "method": "put",
+        "operation": "put_block_blob",
+        "body_bytes": 31,
+        "lease_id": "different"
+      },
+      "status": 412,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "lease_mismatch_blob",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "lease_mismatch_blob",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "read_leased_original",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 25,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      },
+      "details": {
+        "kind": "lease_state",
+        "status": "matches",
+        "state": "matches",
+        "duration": "matches"
+      }
+    },
+    {
+      "step": "overwrite",
+      "request": {
+        "method": "put",
+        "operation": "put_block_blob",
+        "body_bytes": 28,
+        "lease_id": "matches"
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "changed",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "read_leased_replacement",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 28,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      },
+      "details": {
+        "kind": "lease_state",
+        "status": "matches",
+        "state": "matches",
+        "duration": "matches"
+      }
+    },
+    {
+      "step": "release_lease",
+      "request": {
+        "method": "put",
+        "operation": "release_lease",
+        "body_bytes": 0,
+        "lease_id": "matches"
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      },
+      "details": {
+        "kind": "lease_id",
+        "id": "missing"
+      }
+    },
+    {
+      "step": "read_released",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 28,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      },
+      "details": {
+        "kind": "lease_state",
+        "status": "matches",
+        "state": "matches",
+        "duration": "missing"
+      }
+    }
+  ]
+}

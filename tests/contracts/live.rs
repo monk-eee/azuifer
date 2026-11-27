@@ -1,4 +1,6 @@
-use super::{Cassette, Source, delegation, mutations, observe_blob, observe_local, with_local};
+use super::{
+    Cassette, Source, delegation, mutations, observe_blob, observe_local, reviewed_sas, with_local,
+};
 use anyhow::{Context as _, Result, anyhow, ensure};
 use reqwest::{Url, blocking::Client, redirect::Policy};
 use serde::{Deserialize, Serialize};
@@ -15,6 +17,7 @@ const SUBSCRIPTION: &str = "AZUIFER_LIVE_STORAGE_SUBSCRIPTION";
 const RESOURCE_GROUP: &str = "AZUIFER_LIVE_STORAGE_RESOURCE_GROUP";
 const ACCOUNT: &str = "AZUIFER_LIVE_STORAGE_ACCOUNT";
 const OPT_IN_TAG: &str = "azuifer-contract-tests";
+const CAPTURE: &str = "AZUIFER_CONTRACT_CAPTURE";
 
 struct LiveTarget {
     subscription: String,
@@ -194,90 +197,182 @@ fn save_azure(cassette: Record<'_>) -> Result<()> {
         .join("azure-contracts");
     let path = save(cassette, &directory)?;
     println!(
-        "Saved normalized Azure response cassette to {}",
+        "Saved Azure candidate (not an approved baseline) to {}",
         path.display()
     );
     Ok(())
 }
 
-#[test]
-#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
-fn record_live_blob_sas_contract() -> Result<()> {
-    let local = observe_local()?;
-    ensure!(
-        local.seeded_blob_was_read(),
-        "Azuifer did not serve the synthetic setup blob"
-    );
-    let azure = with_azure(|client, account, endpoint, bearer| {
-        observe_blob(client, account, endpoint, bearer, Source::Azure)
-    })?;
-    ensure!(
-        azure.seeded_blob_was_read(),
-        "Azure did not return the seeded blob via the read-only SAS; no cassette written"
-    );
-    save_azure(Record::Sas(&azure))?;
-    azure.compare(&local)?;
-    println!("Live Azure and Azuifer matched on all selected fields");
+fn check_drift<T>(
+    baseline: &T,
+    azure: Result<T>,
+    local: Result<T>,
+    compare: fn(&T, &T) -> Result<()>,
+) -> Result<()> {
+    let check = |side, result: Result<T>| {
+        let actual = result.with_context(|| format!("{side} observation failed"))?;
+        compare(baseline, &actual)
+            .with_context(|| format!("{side} drift against the reviewed cassette"))
+    };
+    match (check("Azure", azure), check("Azuifer", local)) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(azure), Err(local)) => Err(anyhow!("{azure:#}\n{local:#}")),
+    }
+}
+
+fn run_live<T>(
+    reviewed: impl FnOnce() -> Result<T>,
+    azure: impl FnOnce(&Client, &str, &Url, &str) -> Result<T>,
+    local: impl FnOnce() -> Result<T>,
+    compare: fn(&T, &T) -> Result<()>,
+    capture: impl FnOnce(&T) -> Result<()>,
+) -> Result<()> {
+    match std::env::var_os(CAPTURE) {
+        Some(flag) if flag == "1" => return capture(&with_azure(azure)?),
+        Some(_) => {
+            return Err(anyhow!(
+                "unset {CAPTURE} for checks or set it to 1 to capture"
+            ));
+        }
+        None => (),
+    }
+    let baseline = reviewed()?;
+    check_drift(&baseline, with_azure(azure), local(), compare)?;
+    println!("Azure and Azuifer each matched the reviewed cassette");
     Ok(())
 }
 
 #[test]
 #[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
-fn record_live_delegation_key_contract() -> Result<()> {
-    let local = with_local(|client, endpoint, bearer| {
-        delegation::observe(client, endpoint, bearer, Source::Synthetic)
-    })?;
-    let azure = with_azure(|client, _, endpoint, bearer| {
-        delegation::observe(client, endpoint, bearer, Source::Azure)
-    })?;
-    save_azure(Record::Delegation(&azure))?;
-    azure.compare(&local)?;
-    println!("Live Azure and Azuifer matched on the selected delegation key fields");
-    Ok(())
+fn check_live_blob_sas_contract() -> Result<()> {
+    run_live(
+        reviewed_sas,
+        |client, account, endpoint, bearer| {
+            observe_blob(client, account, endpoint, bearer, Source::Azure)
+        },
+        observe_local,
+        Cassette::compare,
+        |azure| {
+            ensure!(
+                azure.seeded_blob_was_read(),
+                "Azure did not return the seeded blob via the read-only SAS; no cassette written"
+            );
+            save_azure(Record::Sas(azure))
+        },
+    )
 }
 
 #[test]
 #[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
-fn record_live_delegation_window_contract() -> Result<()> {
-    let local = with_local(|client, endpoint, bearer| {
-        delegation::observe_invalid_windows(client, endpoint, bearer, Source::Synthetic)
-    })?;
-    let azure = with_azure(|client, _, endpoint, bearer| {
-        delegation::observe_invalid_windows(client, endpoint, bearer, Source::Azure)
-    })?;
-    save_azure(Record::InvalidWindows(&azure))?;
-    azure.compare(&local)?;
-    println!("Live Azure and Azuifer matched on all selected invalid delegation window responses");
-    Ok(())
-}
-
-fn record_mutation(case: mutations::Case) -> Result<()> {
-    let azure = with_azure(|client, _, endpoint, bearer| {
-        mutations::observe(client, endpoint, bearer, Source::Azure, case)
-    })?;
-    azure.validate()?;
-    save_azure(Record::BlobMutation(&azure))?;
-    let local = with_local(|client, endpoint, bearer| {
-        mutations::observe(client, endpoint, bearer, Source::Synthetic, case)
-    })?;
-    azure.compare(&local)?;
-    println!(
-        "Live Azure and Azuifer matched on all selected fields for {}",
-        case.file_stem()
-    );
-    Ok(())
+fn check_live_delegation_key_contract() -> Result<()> {
+    run_live(
+        delegation::reviewed_key,
+        |client, _, endpoint, bearer| delegation::observe(client, endpoint, bearer, Source::Azure),
+        || {
+            with_local(|client, endpoint, bearer| {
+                delegation::observe(client, endpoint, bearer, Source::Synthetic)
+            })
+        },
+        delegation::KeyCassette::compare,
+        |azure| save_azure(Record::Delegation(azure)),
+    )
 }
 
 #[test]
 #[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
-fn record_live_blob_mutation_conditional_overwrite() -> Result<()> {
-    record_mutation(mutations::Case::ConditionalOverwrite)
+fn check_live_delegation_window_contract() -> Result<()> {
+    run_live(
+        delegation::reviewed_windows,
+        |client, _, endpoint, bearer| {
+            delegation::observe_invalid_windows(client, endpoint, bearer, Source::Azure)
+        },
+        || {
+            with_local(|client, endpoint, bearer| {
+                delegation::observe_invalid_windows(client, endpoint, bearer, Source::Synthetic)
+            })
+        },
+        delegation::WindowCassette::compare,
+        |azure| save_azure(Record::InvalidWindows(azure)),
+    )
+}
+
+fn live_mutation(case: mutations::Case) -> Result<()> {
+    run_live(
+        || mutations::reviewed(case),
+        |client, _, endpoint, bearer| {
+            mutations::observe(client, endpoint, bearer, Source::Azure, case)
+        },
+        || mutations::observe_local(case),
+        mutations::MutationCassette::compare,
+        |azure| {
+            azure.validate()?;
+            save_azure(Record::BlobMutation(azure))
+        },
+    )
 }
 
 #[test]
 #[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
-fn record_live_blob_mutation_staged_block_commit() -> Result<()> {
-    record_mutation(mutations::Case::StagedBlockCommit)
+fn check_live_blob_mutation_conditional_overwrite() -> Result<()> {
+    live_mutation(mutations::Case::ConditionalOverwrite)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_mutation_staged_block_commit() -> Result<()> {
+    live_mutation(mutations::Case::StagedBlockCommit)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_mutation_lease_guard() -> Result<()> {
+    live_mutation(mutations::Case::LeaseGuard)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_mutation_snapshot_recovery() -> Result<()> {
+    live_mutation(mutations::Case::SnapshotRecovery)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_mutation_append_position() -> Result<()> {
+    live_mutation(mutations::Case::AppendPosition)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_mutation_sparse_page_writes() -> Result<()> {
+    live_mutation(mutations::Case::SparsePageWrites)
+}
+
+#[test]
+fn live_drift_is_reported_even_when_both_services_change_together() -> Result<()> {
+    let baseline = reviewed_sas()?;
+    let actual = |drift| {
+        let mut observed = serde_json::to_value(&baseline)?;
+        if drift {
+            observed["exchanges"][1]["content_length"] = serde_json::json!(99);
+        }
+        Cassette::load(&serde_json::to_vec(&observed)?)
+    };
+    for (azure, local) in [(true, false), (false, true), (true, true)] {
+        let error = check_drift(&baseline, actual(azure), actual(local), Cassette::compare)
+            .expect_err("a mismatch on either side must fail");
+        let message = format!("{error:#}");
+        assert_eq!(
+            message.contains("Azure drift against the reviewed cassette"),
+            azure
+        );
+        assert_eq!(
+            message.contains("Azuifer drift against the reviewed cassette"),
+            local
+        );
+        assert!(message.contains("Range:"));
+    }
+    Ok(())
 }
 
 #[test]

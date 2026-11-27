@@ -1,20 +1,33 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "source": "azure",
   "case": "blob-conditional-overwrite",
   "api_version": "2023-11-03",
   "responses": [
     {
       "step": "seed",
+      "request": {
+        "method": "put",
+        "operation": "put_block_blob",
+        "body_bytes": 25
+      },
       "status": 201,
       "api_version": "matches",
       "request_id": "matches",
       "etag": "valid",
       "error_header": "missing",
-      "body": {"kind": "empty"}
+      "body": {
+        "kind": "empty"
+      }
     },
     {
       "step": "reject_existing",
+      "request": {
+        "method": "put",
+        "operation": "put_block_blob",
+        "body_bytes": 31,
+        "if_none_match_star": "matches"
+      },
       "status": 409,
       "api_version": "matches",
       "request_id": "matches",
@@ -31,6 +44,11 @@
     },
     {
       "step": "read_original",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
       "status": 200,
       "api_version": "matches",
       "request_id": "matches",
@@ -47,15 +65,29 @@
     },
     {
       "step": "overwrite",
+      "request": {
+        "method": "put",
+        "operation": "put_block_blob",
+        "body_bytes": 28,
+        "if_match": "matches"
+      },
       "status": 201,
       "api_version": "matches",
       "request_id": "matches",
       "etag": "changed",
       "error_header": "missing",
-      "body": {"kind": "empty"}
+      "body": {
+        "kind": "empty"
+      }
     },
     {
       "step": "reject_stale",
+      "request": {
+        "method": "put",
+        "operation": "put_block_blob",
+        "body_bytes": 31,
+        "if_match": "different"
+      },
       "status": 412,
       "api_version": "matches",
       "request_id": "matches",
@@ -72,6 +104,11 @@
     },
     {
       "step": "read_replacement",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
       "status": 200,
       "api_version": "matches",
       "request_id": "matches",

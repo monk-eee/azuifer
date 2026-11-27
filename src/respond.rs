@@ -1,7 +1,7 @@
 //! Maps typed Blob outcomes to Azure responses: headers, XML bodies, and errors.
 
 use crate::{
-    blob_page::BlobKind,
+    blob_page::{BlobKind, PageError},
     blob_sas::Overrides,
     domain::{
         BlobInfo, BlobListing, ContainerInfo, Entity, Error, Include, ListEntry, Metadata, Page,
@@ -699,6 +699,11 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
             "LeaseIdMissing",
             "There is currently a lease on the resource and no lease ID was specified in the request.",
         ),
+        Error::LeaseIdMissingBlob => (
+            S::PRECONDITION_FAILED,
+            "LeaseIdMissing",
+            "There is currently a lease on the blob and no lease ID was specified in the request.",
+        ),
         Error::LeaseLost => (
             S::PRECONDITION_FAILED,
             "LeaseLost",
@@ -777,7 +782,7 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
         Error::SnapshotsPresent => (
             S::CONFLICT,
             "SnapshotsPresent",
-            "This operation is not permitted while the blob has snapshots.",
+            "This operation is not permitted because the blob has snapshots.",
         ),
         Error::InvalidTag => (
             S::BAD_REQUEST,
@@ -816,6 +821,12 @@ pub(crate) fn request_error_response(error: Error, request_id: &str, now: System
             | Error::ConditionNotMet
             | Error::BlobMissing
             | Error::InvalidBlockList
+            | Error::LeaseIdMissingBlob
+            | Error::LeaseMismatchBlob
+            | Error::SnapshotsPresent
+            | Error::Page(
+                PageError::AppendPositionConditionNotMet | PageError::SequenceNumberConditionNotMet
+            )
     )
     .then_some((request_id, now));
     render_error(error, correlation)
