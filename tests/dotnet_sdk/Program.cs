@@ -246,6 +246,41 @@ await Step("files: metadata, ranges, delete share", async () =>
     await share.DeleteAsync();
 });
 
+await Step("files nfs: share, posix properties, hard and symbolic links", async () =>
+{
+    var nfs = fsvc.GetShareClient("nfs" + suffix);
+    await nfs.CreateAsync(new ShareCreateOptions { Protocols = ShareProtocols.Nfs, RootSquash = ShareRootSquash.RootSquash });
+    var shareProps = (await nfs.GetPropertiesAsync()).Value;
+    Check(shareProps.Protocols == ShareProtocols.Nfs, "nfs protocol");
+    Check(shareProps.RootSquash == ShareRootSquash.RootSquash, "root squash");
+    var dir = nfs.GetDirectoryClient("d");
+    await dir.CreateAsync(new ShareDirectoryCreateOptions { PosixProperties = new FilePosixProperties { Owner = "3", Group = "4" } });
+    var dposix = (await dir.GetPropertiesAsync()).Value.PosixProperties;
+    Check(dposix.Owner == "3" && dposix.Group == "4" && dposix.FileType == NfsFileType.Directory, "directory posix");
+    var f = dir.GetFileClient("f.txt");
+    await f.CreateAsync(5, new ShareFileCreateOptions { PosixProperties = new FilePosixProperties { Owner = "7", Group = "8", FileMode = NfsFileMode.ParseOctalFileMode("0640") } });
+    await f.UploadRangeAsync(new HttpRange(0, 5), new MemoryStream(System.Text.Encoding.ASCII.GetBytes("hello")));
+    var posix = (await f.GetPropertiesAsync()).Value.PosixProperties;
+    Check(posix.Owner == "7" && posix.Group == "8" && posix.LinkCount == 1 && posix.FileType == NfsFileType.Regular, "file posix");
+    Check(posix.FileMode.ToOctalFileMode() == "0640", "file mode " + posix.FileMode.ToOctalFileMode());
+    var l = dir.GetFileClient("l.txt");
+    await l.CreateHardLinkAsync("d/f.txt");
+    Check((await l.GetPropertiesAsync()).Value.PosixProperties.LinkCount == 2, "link count 2");
+    var text = new StreamReader((await l.DownloadAsync()).Value.Content).ReadToEnd();
+    Check(text == "hello", "link bytes");
+    var sym = nfs.GetRootDirectoryClient().GetFileClient("sym");
+    await sym.CreateSymbolicLinkAsync("d/f.txt", new ShareFileCreateSymbolicLinkOptions { Owner = "9" });
+    Check((await sym.GetSymbolicLinkAsync()).Value.LinkText == "d/f.txt", "symlink text");
+    var sp = (await sym.GetPropertiesAsync()).Value.PosixProperties;
+    Check(sp.FileType == NfsFileType.SymLink && sp.Owner == "9", "symlink posix");
+    string refused = "";
+    try { await sym.DownloadAsync(); } catch (Azure.RequestFailedException e) { refused = e.ErrorCode ?? ""; }
+    Check(refused == "XNfs4FileTypeUnsupportedException", "symlink bytes refused: " + refused);
+    await f.DeleteAsync();
+    Check((await l.GetPropertiesAsync()).Value.PosixProperties.LinkCount == 1, "count after delete");
+    await nfs.DeleteAsync();
+});
+
 await Step("files: service properties round trip", async () =>
 {
     var props = (await fsvc.GetPropertiesAsync()).Value;

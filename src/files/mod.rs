@@ -159,11 +159,14 @@ async fn handle(app: &Arc<App>, parts: &Parts, body: Body) -> Result<Response> {
             auth::Overrides::default()
         }
     };
-    if operation.is_unsupported() {
-        return Err(Error::NotImplemented);
-    }
+    let version = headers
+        .get("x-ms-version")?
+        .or_else(|| query.get("sv"))
+        .unwrap_or(API_VERSION)
+        .to_owned();
     let context = ops::Context {
         app,
+        version,
         operation,
         target,
         host: host.map(str::to_owned),

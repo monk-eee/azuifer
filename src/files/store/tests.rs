@@ -8,7 +8,7 @@ use crate::{
     files::{
         error::Error,
         lease::Outcome,
-        model::{Conditions, HttpProperties, Metadata, SmbProperties, TimeSpec},
+        model::{Conditions, HttpProperties, Metadata, Posix, Protocol, SmbProperties, TimeSpec},
         name::{EntryPath, ShareName},
     },
 };
@@ -43,6 +43,7 @@ async fn new_file(store: &Store, share: &str, name: &str, length: u64) {
                 http: HttpProperties::default(),
                 smb: SmbProperties::for_create(),
                 metadata: Metadata::new(),
+                posix: Posix::default(),
             },
             None,
         )
@@ -96,7 +97,13 @@ fn extent_files(location: &Path) -> Vec<String> {
 
 async fn create_share(store: &Store, name: &str) {
     store
-        .create_share(share_ref(name), None, None, Metadata::new())
+        .create_share(
+            share_ref(name),
+            None,
+            None,
+            Metadata::new(),
+            ShareOptions::default(),
+        )
         .await
         .unwrap();
 }
@@ -382,6 +389,102 @@ async fn startup_recovery_drops_orphans_and_keeps_referenced_extents() {
 }
 
 #[tokio::test]
+async fn a_hard_linked_file_keeps_its_extents_until_the_last_name_is_deleted() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(Some(directory.path()), 0, Clock::new()).unwrap();
+    store
+        .create_share(
+            share_ref("nfs"),
+            None,
+            None,
+            Metadata::new(),
+            ShareOptions {
+                protocol: Protocol::Nfs,
+                ..ShareOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    new_file(&store, "nfs", "a.bin", 100).await;
+    write(&store, "nfs", "a.bin", 0, &[7; 40]).await.unwrap();
+    let count = |name: &'static str| {
+        let store = store.clone();
+        async move {
+            store
+                .node(
+                    share_ref("nfs"),
+                    path(name),
+                    Want::File,
+                    None,
+                    Conditions::default(),
+                )
+                .await
+        }
+    };
+    for link in ["b.bin", "c.bin"] {
+        store
+            .create_hard_link(share_ref("nfs"), path(link), path("a.bin"))
+            .await
+            .unwrap();
+    }
+    let linked = count("c.bin").await.unwrap();
+    assert_eq!(linked.links, 3);
+    assert_eq!(linked.file_id, count("a.bin").await.unwrap().file_id);
+    assert_eq!(extent_files(directory.path()).len(), 1);
+    assert_eq!(store.share_usage(share_ref("nfs")).await.unwrap(), 40);
+
+    // A snapshot of the share holds the file, links and all, by reference.
+    let snapshot = store.snapshot_share(share_ref("nfs"), None).await.unwrap();
+
+    // Each delete reports the count it leaves; the extent stays while any name does.
+    let delete = |name: &'static str| {
+        let store = store.clone();
+        async move {
+            store
+                .delete_file(share_ref("nfs"), path(name), None)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(
+        delete("a.bin").await,
+        Some(2),
+        "the first name goes, the file stays"
+    );
+    assert_eq!(read(&store, "nfs", "c.bin").await[..40], [7; 40]);
+    assert_eq!(count("b.bin").await.unwrap().links, 2);
+    assert_eq!(delete("b.bin").await, Some(1));
+    assert_eq!(delete("c.bin").await, Some(0));
+    assert_eq!(
+        extent_files(directory.path()).len(),
+        1,
+        "the snapshot still holds the extent after every live name is gone"
+    );
+    assert_eq!(store.share_usage(share_ref("nfs")).await.unwrap(), 0);
+
+    let at_snapshot = ShareRef {
+        snapshot: snapshot.snapshot,
+        ..share_ref("nfs")
+    };
+    let kept = store
+        .node(
+            at_snapshot,
+            path("b.bin"),
+            Want::File,
+            None,
+            Conditions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(kept.links, 3, "the snapshot kept all three names");
+    store
+        .delete_share(share_ref("nfs"), None, SnapshotPolicy::Include)
+        .await
+        .unwrap();
+    assert!(extent_files(directory.path()).is_empty());
+}
+
+#[tokio::test]
 async fn memory_mode_enforces_its_quota_and_frees_overwritten_bytes() {
     let store = Store::open(None, 1000, Clock::new()).unwrap();
     create_share(&store, "quota").await;
@@ -405,7 +508,13 @@ async fn memory_mode_enforces_its_quota_and_frees_overwritten_bytes() {
 async fn share_quota_limits_allocated_bytes_not_logical_size() {
     let store = Store::open(None, 1 << 30, Clock::new()).unwrap();
     store
-        .create_share(share_ref("small"), Some(1), None, Metadata::new())
+        .create_share(
+            share_ref("small"),
+            Some(1),
+            None,
+            Metadata::new(),
+            ShareOptions::default(),
+        )
         .await
         .unwrap();
     new_file(&store, "small", "sparse.bin", 1 << 40).await;
@@ -426,6 +535,7 @@ async fn renaming_a_directory_moves_its_subtree_in_one_step() {
                 path(dir),
                 SmbProperties::for_create(),
                 Metadata::new(),
+                Posix::default(),
             )
             .await
             .unwrap();

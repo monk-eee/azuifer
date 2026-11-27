@@ -86,6 +86,8 @@ errors! {
     LeaseNotPresentWithFileShareOperation(StatusCode::PRECONDITION_FAILED, "LeaseNotPresentWithFileShareOperation", "There is currently no lease on the file share."),
     LeaseNotPresentWithFileLeaseOperation(StatusCode::CONFLICT, "LeaseNotPresentWithFileLeaseOperation", "There is currently no lease on the file."),
     LeaseNotPresentWithFileShareLeaseOperation(StatusCode::CONFLICT, "LeaseNotPresentWithFileShareLeaseOperation", "There is currently no lease on the file share."),
+    XNfs4FileTypeUnsupportedException(StatusCode::BAD_REQUEST, "XNfs4FileTypeUnsupportedException", "The operation isn't supported on the specified NFS file because of its file type."),
+    XNfs4ShareDeniedException(StatusCode::FORBIDDEN, "XNfs4ShareDeniedException", "REST request for this operation doesn't have appropriate permissions."),
     NotImplemented(StatusCode::NOT_IMPLEMENTED, "NotImplemented", "This operation or option is not implemented."),
     InsufficientStorage(StatusCode::INSUFFICIENT_STORAGE, "InsufficientStorage", "The in-memory content quota was exceeded."),
     ServerBusy(StatusCode::SERVICE_UNAVAILABLE, "ServerBusy", "Too many active requests."),
