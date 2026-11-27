@@ -2210,6 +2210,92 @@ fn grant(server: &Emulator, path: &str, acl: &str) {
 }
 
 #[test]
+fn recursive_acl_changes_reach_only_the_directories_a_bearer_caller_can_search() {
+    let server = Emulator::start(&["--oauth", "basic"]);
+    server.filesystem();
+    grant(&server, "", "user::rwx,group::r-x,other::rwx");
+    let user = server.token(OID);
+    let call = |method: &str, path: &str, headers: &[(&str, &str)]| {
+        server.dfs_as(&user, method, path, headers)
+    };
+    for (path, kind) in [
+        ("u", "directory"),
+        ("u/open", "directory"),
+        ("u/open/a.txt", "file"),
+        ("u/sealed", "directory"),
+        ("u/sealed/inner", "directory"),
+        ("u/sealed/inner/b.txt", "file"),
+        ("u/sealed/c.txt", "file"),
+        ("v", "directory"),
+        ("v/w.txt", "file"),
+    ] {
+        let created = call("PUT", &format!("{LAKE}/{path}?resource={kind}"), &[]);
+        assert_eq!(created.status(), 201, "create {path}");
+    }
+    // The caller owns all of it; removing execute from `u/sealed` hides what is below it.
+    let sealed = call(
+        "PATCH",
+        &format!("{LAKE}/u/sealed?action=setAccessControl"),
+        &[("x-ms-permissions", "0600")],
+    );
+    assert_eq!(sealed.status(), 200);
+    let recursive = |path: &str, mode: &str, acl: &str, extra: &str| {
+        json_body(call(
+            "PATCH",
+            &format!("{LAKE}/{path}?action=setAccessControlRecursive&mode={mode}{extra}"),
+            &[("x-ms-acl", acl)],
+        ))
+    };
+    let failed = |body: &Value| -> Vec<String> {
+        body["failedEntries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let named = "user:44444444-4444-4444-4444-444444444444:r--";
+
+    let forced = recursive("u", "modify", named, "&forceFlag=true");
+    assert_eq!(forced["directoriesSuccessful"], 3, "u, u/open, u/sealed");
+    assert_eq!(forced["filesSuccessful"], 1, "u/open/a.txt");
+    assert_eq!(forced["failureCount"], 3);
+    assert_eq!(
+        failed(&forced),
+        ["u/sealed/c.txt", "u/sealed/inner", "u/sealed/inner/b.txt"],
+        "everything below the directory the caller cannot search"
+    );
+    assert!(acl_of(&server, "u/sealed").contains("44444444-4444-4444-4444-444444444444"));
+    assert!(!acl_of(&server, "u/sealed/inner").contains("44444444-4444-4444-4444-444444444444"));
+
+    // Without forceFlag the call stops at the first path it cannot reach.
+    let stopped = recursive("u", "modify", named, "");
+    assert_eq!(failed(&stopped), ["u/sealed/c.txt"]);
+    assert_eq!(stopped["directoriesSuccessful"], 3);
+    assert_eq!(stopped["filesSuccessful"], 1);
+
+    // Removing a search right in this very call does not hide the entries below it.
+    let locked = recursive("v", "set", "user::rw-,group::---,other::---", "");
+    assert_eq!(locked["failureCount"], 0, "{locked}");
+    assert_eq!(locked["directoriesSuccessful"], 1);
+    assert_eq!(locked["filesSuccessful"], 1);
+    // A later call does see the lost right, and so cannot reach the file.
+    let later = recursive("v", "modify", named, "&forceFlag=true");
+    assert_eq!(failed(&later), ["v/w.txt"]);
+
+    // Shared Key has no ACL check, so it reaches everything.
+    let all = json_body(server.dfs(
+        "PATCH",
+        &format!("{LAKE}/u?action=setAccessControlRecursive&mode=modify"),
+        &[("x-ms-acl", named)],
+        b"",
+    ));
+    assert_eq!(all["failureCount"], 0);
+    assert_eq!(all["directoriesSuccessful"], 4);
+    assert_eq!(all["filesSuccessful"], 3);
+}
+
+#[test]
 fn bearer_tokens_are_checked_against_owner_and_acls() {
     let server = Emulator::start(&["--oauth", "basic"]);
     server.filesystem();

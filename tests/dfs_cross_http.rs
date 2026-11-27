@@ -549,6 +549,51 @@ fn dfs_create_path_expiry_is_seen_by_blob_and_expires_on_the_shared_clock() {
 }
 
 #[test]
+fn recursive_acl_changes_cover_blob_created_paths_even_below_sealed_directories() {
+    let server = Emulator::start(None);
+    server.filesystem();
+    server.put_blob("t/sealed/inner/a.txt", &[], b"one");
+    server.put_blob("t/b.txt", &[], b"two");
+    let sealed = server.dfs(
+        "PATCH",
+        &format!("{LAKE}/t/sealed?action=setAccessControl"),
+        &[("x-ms-permissions", "0000")],
+        b"",
+    );
+    assert_eq!(sealed.status(), 200);
+    let acl = "user::rwx,group::r-x,other::---,user:44444444-4444-4444-4444-444444444444:r--";
+    let response = server.dfs(
+        "PATCH",
+        &format!("{LAKE}/t?action=setAccessControlRecursive&mode=set"),
+        &[("x-ms-acl", acl)],
+        b"",
+    );
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = serde_json::from_slice(&response.bytes().unwrap()).unwrap();
+    assert_eq!(body["failureCount"], 0);
+    assert_eq!(
+        body["directoriesSuccessful"], 3,
+        "t, t/sealed, t/sealed/inner"
+    );
+    assert_eq!(body["filesSuccessful"], 2);
+    for path in ["t/sealed/inner", "t/sealed/inner/a.txt", "t/b.txt"] {
+        let head = server.dfs(
+            "HEAD",
+            &format!("{LAKE}/{path}?action=getAccessControl"),
+            &[],
+            b"",
+        );
+        assert!(
+            header(&head, "x-ms-acl").contains("44444444-4444-4444-4444-444444444444"),
+            "{path}"
+        );
+    }
+    // The Blob view of the same paths is unchanged.
+    let blob = server.blob("GET", &format!("{LAKE}/t/sealed/inner/a.txt"), &[], b"");
+    assert_eq!(blob.bytes().unwrap().as_ref(), b"one");
+}
+
+#[test]
 fn a_blob_write_discards_unflushed_dfs_data() {
     let server = Emulator::start(None);
     server.filesystem();
