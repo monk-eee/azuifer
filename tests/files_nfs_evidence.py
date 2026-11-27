@@ -140,7 +140,7 @@ CROSS_CUTTING = [
 ]
 EXAMPLES = [
     ("Create Share (NFS)", lambda e: e["method"] == "PUT" and "restype=share" in e["query"] and "NFS" in json.dumps(e["request"]) and e["status"] == 201),
-    ("Get Share Properties", lambda e: e["method"] == "HEAD" and "restype=share" in e["query"] and e["response"].get("x-ms-enabled-protocols") == "NFS"),
+    ("Get Share Properties", lambda e: e["method"] in ("GET", "HEAD") and "restype=share" in e["query"] and "comp" not in e["query"] and e["response"].get("x-ms-enabled-protocols") == "NFS"),
     ("Create Directory", lambda e: e["method"] == "PUT" and "restype=directory" in e["query"] and e["request"].get("x-ms-mode")),
     ("Create File", lambda e: e["method"] == "PUT" and e["request"].get("x-ms-type") == "file" and e["request"].get("x-ms-mode") and "comp" not in e["query"]),
     ("Create Hard Link", lambda e: "restype=hardlink" in e["query"] and e["status"] == 201),
@@ -214,6 +214,11 @@ def main():
     parser.add_argument("--mutations", help="results of mutation_check.py")
     parser.add_argument("--out", default=str(ROOT / "docs" / "compatibility" / "files-nfs-evidence.md"))
     arguments = parser.parse_args()
+
+    build = run(["cargo", "build"])
+    if build.returncode != 0:
+        print(build.stdout + build.stderr)
+        raise SystemExit("cargo build failed; no evidence report written")
 
     with tempfile.TemporaryDirectory() as scratch:
         transcript_path = Path(scratch) / "transcript.json"

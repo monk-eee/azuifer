@@ -104,7 +104,7 @@ class Server:
 
     def service(self):
         return ShareServiceClient(self.endpoint, credential={"account_name": ACCOUNT, "account_key": KEY},
-                                  per_call_policies=[Recorder()])
+                                  _additional_pipeline_policies=[Recorder()])
 
     def stop(self):
         self.process.stdin.close()
