@@ -206,7 +206,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Sets, modifies, or removes ACL entries across a subtree in bounded batches with a stable continuation token and the documented counters (directoriesSuccessful, filesSuccessful, failureCount, failedEntries). Ownership is checked per entry; each descendant's execute bit is not."
+      "notes": "Sets, modifies, or removes ACL entries across a subtree in bounded batches with a stable continuation token and the documented counters (directoriesSuccessful, filesSuccessful, failureCount, failedEntries). For a bearer caller, ownership is checked per entry and so is the execute right on each directory from the named one down to the entry (ADR-0031); an unreachable entry is a failedEntries item. That reporting, and judging rights before the call's own changes, are unverified against Azure."
     },
     {
       "name": "Lease Path",

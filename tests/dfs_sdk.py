@@ -191,6 +191,16 @@ def acl_flow(fs):
     check("default ACL inheritance", "default:user::rwx" in inherited_acl
           and "default:group::r-x" in inherited_acl, inherited_acl)
 
+    # Shared Key carries no identity, so a directory without any search right does not hide
+    # what is below it from a recursive change.
+    sub = fs.get_directory_client("archive/sub")
+    sub.set_access_control(permissions="---------")
+    sealed = directory.update_access_control_recursive(acl=f"user:{oid}:r--")
+    check("recursive change passes a sealed directory",
+          sealed.counters.failure_count == 0 and sealed.counters.files_successful == 2,
+          sealed.counters)
+    sub.set_access_control(permissions="rwxr-x---")
+
 
 def expiry_flow(server, service, fs):
     """`create_file(expires_on=...)` sends RelativeToNow for an int and Absolute for a

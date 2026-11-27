@@ -4,16 +4,22 @@
 //! starting with the directory itself, and returns the name of the last entry it
 //! handled. Names order the tree the same way on every call, so repeating the request
 //! with that name continues where it stopped even if entries were added or removed.
+//!
+//! A bearer caller changes an entry it owns and can reach: it needs execute on the
+//! directory the request names and on every directory between that one and the entry
+//! (ADR-0031). An entry it cannot reach is a failure like one it does not own.
 
 use super::{
     Store, container, db_error,
-    dfs_paths::{Caller, PathResult, located, save_attributes},
+    dfs_paths::{Caller, PathResult, ancestors, located, save_attributes},
     dfs_tree::tree_after,
 };
 use crate::{
     domain::{BlobPath, ContainerKey, Error},
-    posix::{Entry, PathKind},
+    posix::{Entry, PathKind, Perms, Subject},
 };
+use rusqlite::Connection;
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum AclMode {
@@ -52,6 +58,64 @@ pub(crate) struct RecursiveOutcome {
     pub(crate) next: Option<String>,
 }
 
+/// Whether the caller may search each directory of the subtree, judged from the ACLs a
+/// call finds before it changes them, so a change cannot lock out its own descendants.
+struct Reach<'a> {
+    caller: &'a Caller,
+    top: &'a str,
+    searchable: HashMap<String, bool>,
+}
+
+impl Reach<'_> {
+    fn subject(&self) -> Subject<'_> {
+        Subject {
+            oid: self.caller.oid(),
+            groups: &[],
+        }
+    }
+
+    /// Records the search right of a directory about to be changed.
+    fn note(&mut self, name: &str, attributes: &crate::posix::Attributes) {
+        let allowed = attributes.permits(&self.subject(), Perms::EXECUTE);
+        self.searchable.insert(name.to_owned(), allowed);
+    }
+
+    /// Whether every directory from the requested one down to the entry's parent can be
+    /// searched.
+    fn reaches(&mut self, db: &Connection, key: &ContainerKey, name: &str) -> PathResult<bool> {
+        if matches!(self.caller, Caller::Superuser) || name == self.top {
+            return Ok(true);
+        }
+        let inside = |directory: &&str| {
+            self.top.is_empty()
+                || *directory == self.top
+                || directory.starts_with(&format!("{}/", self.top))
+        };
+        let directories: Vec<String> = ancestors(name)
+            .into_iter()
+            .filter(inside)
+            .map(str::to_owned)
+            .collect();
+        for directory in directories {
+            let allowed = match self.searchable.get(&directory) {
+                Some(allowed) => *allowed,
+                None => {
+                    let Some(found) = located(db, key, &directory)? else {
+                        return Ok(false);
+                    };
+                    let allowed = found.attributes.permits(&self.subject(), Perms::EXECUTE);
+                    self.searchable.insert(directory, allowed);
+                    allowed
+                }
+            };
+            if !allowed {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
 impl Store {
     pub(crate) async fn change_access_recursive(
         &self,
@@ -87,14 +151,23 @@ impl Store {
             }
             let more = queue.len() > max_records;
             let mut last: Option<String> = None;
+            let mut reach = Reach {
+                caller: &caller,
+                top: root,
+                searchable: HashMap::new(),
+            };
             for (name, kind) in queue.into_iter().take(max_records) {
                 let Some(found) = located(&tx, &key, &name)? else {
                     continue;
                 };
-                let allowed = match &caller {
+                let owned = match &caller {
                     Caller::Superuser => true,
                     Caller::Principal(oid) => found.attributes.owned_by(oid.as_deref()),
                 };
+                let allowed = owned && reach.reaches(&tx, &key, &name)?;
+                if kind == PathKind::Directory {
+                    reach.note(&name, &found.attributes);
+                }
                 if allowed {
                     let mut attributes = found.attributes;
                     match mode {

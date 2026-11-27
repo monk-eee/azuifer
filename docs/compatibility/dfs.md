@@ -81,7 +81,7 @@ File metadata written by Blob is returned in `x-ms-properties` with base64-encod
 - Append accepts any position, including one before the committed length, but only data contiguous with the committed bytes ever publishes. An unflushed append that created its file leaves an empty file visible to Blob.
 - A flush copies the committed bytes and staged ranges into a new extent under the metadata lock (a file's first flush of a single append is a hard link), and a rename or recursive delete is one transaction proportional to the subtree.
 - The extents of unflushed data stay on disk after the file is deleted through Blob or its filesystem is deleted, until the next start recovers them.
-- POSIX checks on recursive operations cover the top directory and, for recursive ACL changes, ownership of each entry; they do not check each descendant's execute bit.
+- POSIX checks on a recursive delete cover the top directory only. A recursive ACL change by a bearer caller also checks ownership of each entry and execute on each directory between the named one and the entry ([ADR-0031](../adr.d/0031-check-search-rights-in-recursive-acl-changes.md)); an unreachable entry is a `failedEntries` item. Reporting it that way, and reading rights before the call's own changes, are unverified.
 
 ## Verify it
 
