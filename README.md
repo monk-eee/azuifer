@@ -8,7 +8,7 @@
 
 **Run Azure Storage clients locally.** Azuifer is a high-fidelity Azure Storage emulator for Blob, Data Lake Storage Gen2 (DFS), Azure Files FileREST, Queue, and Table.
 
-**Wire compatibility is the contract:** supported operations are expected to produce the same observable HTTP behavior and storage state as Azure Storage. Compatibility is published by service, operation, and API version in the [conformance manifests](specs/conformance/), and an operation is only marked as matching Azure once it has been compared against a real Azure account.
+**Wire compatibility is the goal.** The [conformance manifests](specs/conformance/) distinguish locally implemented operations, known differences, and the scenarios matched against real Azure. A matched scenario does not make an entire operation `exact`.
 
 All five services run from one binary: Blob on port `10000`, Queue `10001`, Table `10002`, DFS `10003`, and Azure Files `10004`, with health, readiness, and metrics on `10005`. Use `--services` to run a subset. The primary runtime is a non-root Azure Linux container.
 
@@ -86,13 +86,15 @@ Stop the container with `docker stop azuifer-quickstart` when you're done.
 
 ## What works
 
+Azuifer implements **151 of 153 recognized operations**. Blob Rename Container and Table Atom payloads are recognized rejection boundaries, not implemented features.
+
 | Service | Available on Azuifer |
 | --- | --- |
 | Blob | Containers, block, page, and append blobs, snapshots, versions and soft delete (including soft-deleted containers), blob index tags, Submit Batch, leases, Set Blob Expiry, immutability policies and legal holds, page range diffs, incremental copy, Query Blob Contents (a SQL subset over delimited text and JSON), copy within the instance (external sources only when allowlisted), CORS, ACLs and public access, service properties, and a static website served from `{account}.web.localhost` |
 | Queue | Queues, metadata, ACLs, service properties, and messages with visibility timeouts, pop receipts, and TTL |
 | Table | Tables, ACLs, every entity operation, OData `$filter` and `$select`, paging, ETag concurrency, and atomic entity-group batches |
-| Azure Files | Shares, snapshots, directories, files, ranges, rename, copy, leases, permissions, service properties, and NFS shares (POSIX properties, hard links and symbolic links over FileREST, not the NFS protocol) |
-| Data Lake (DFS) | Filesystems and their properties; files and directories with append and flush, reads, atomic rename, recursive delete, leases, POSIX owner, group, permissions and ACLs (default-ACL inheritance, recursive changes) on HNS-enabled accounts, sharing Blob's data and ETags |
+| Azure Files | Shares, snapshots, directories, files, ranges, rename, copy, leases, service properties, and SMB permissions including version-gated binary security descriptors. NFS shares support POSIX properties, hard links, and symbolic links over FileREST, not the NFS protocol. |
+| Data Lake (DFS) | HNS filesystems with append and flush, reads with ranged MD5, Create Path expiry, atomic rename, recursive delete, leases, POSIX ACL inheritance and recursive ACL changes with traversal checks. Blob and DFS share content and ETags. |
 | Authentication | Shared Key, Shared Key Lite, account and service SAS (including DFS directory SAS), user-delegation SAS, and bearer tokens (`--oauth`), over HTTP or HTTPS (`--tls-generate`, PEM, or PFX), at path-style or host-style endpoints. DFS checks bearer callers against POSIX ACLs |
 | Storage | In-memory or SQLite metadata with persistent payloads, per service |
 | Operations | `status`, `doctor`, and `reset` commands, Prometheus metrics, opt-in OpenTelemetry export, and a Compose example |
@@ -103,13 +105,15 @@ Each service guide lists the supported operations, limits, and known differences
 
 The [required CI check](https://github.com/monk-eee/azuifer/actions/workflows/rust.yml) runs the current pinned Azure CLI release and its three predecessors against fresh Azuifer containers. It checks bytes, ranges, metadata, rejected overwrites, ETags, and a hash-matching multipart transfer of **256 MiB + 1 byte**. It also checks `az storage fs` and uses the CLI image's Data Lake SDK to read CLI-uploaded bytes over the DFS endpoint. Each run publishes the image IDs and per-version outcomes as `azure-cli-compatibility`.
 
-See [how to run the same matrix locally](docs/compatibility/blob.md#azure-cli). A separate CI job runs [30 .NET SDK scenarios](tests/dotnet_sdk/Program.cs) (`dotnet run --project tests/dotnet_sdk` against a server started with `--services blob,queue,table,file,dfs --hns-accounts devstoreaccount1`) through the Blob, Queue, Table, Files and Data Lake clients: chunked parallel transfers, SAS, leases, tags, batch delete, table transactions, DFS rename and ACLs. These show that the .NET clients complete those workflows against Azuifer, not that responses match Azure. A matching [JavaScript SDK job](tests/js_sdk/probe.js) (`npm ci && node probe.js` there) runs 21 scenarios through the five JavaScript clients; the Data Lake client needs a host-style URL on a non-emulator port (see [dfs.md](docs/compatibility/dfs.md#data-lake-sdks-and-the-azure-cli)). A [Java SDK job](tests/java_sdk/src/main/java/probe/Probe.java) runs 19 scenarios (`mvn compile exec:java` there); the Java Files client ignores the port and account path of its endpoint, so Files needs a host-style URL on port 80 (`--file-port 80`). A [Go SDK job](tests/go_sdk/main.go) runs 11 scenarios (`go run .` there; use an IP address as the host, because the Go SDKs read other host names as host-style). To see the operation inventory from your built image:
+See [how to run the same matrix locally](docs/compatibility/blob.md#azure-cli). CI also runs official Azure SDK suites in [Python](.github/workflows/rust.yml), [.NET](tests/dotnet_sdk/Program.cs), [JavaScript](tests/js_sdk/probe.js), [Java](tests/java_sdk/src/main/java/probe/Probe.java), and [Go](tests/go_sdk/main.go). They exercise all five services, including NFS FileREST links and shared Blob/DFS workflows. Those jobs show client interoperability with Azuifer, not wire equivalence with Azure.
+
+The [Azure contract harness](docs/compatibility/azure-contracts.md) has **51 reviewed Azure cassettes** and **270 of 1,243 planned exchanges matched**. The baseline recordings cover Blob, Queue, and Table; live DFS and FileREST are still pending. The [wire ledger](docs/compatibility/wire-discrepancies.json) tracks 31 pinned discrepancies between documentation, SDK behavior, and live responses. The regular Rust suite replays the fixtures without Azure credentials.
+
+From the built binary, run `azuifer conformance export --format markdown` for the operation states and the matching evidence by service, operation, and auth mode. The default format is JSON. From the quickstart image:
 
 ```sh
-docker run --rm azuifer:quickstart conformance export
+docker run --rm azuifer:quickstart conformance export --format markdown
 ```
-
-The [Azure contract harness](docs/compatibility/azure-contracts.md) can separately compare a Blob SAS scenario with a dedicated Azure test account. The regular Rust suite replays contract fixtures offline; it doesn't need Azure credentials.
 
 ## Build natively
 

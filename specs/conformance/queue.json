@@ -11,7 +11,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "DELETE /{account}/{queue}/messages removes every message and returns 204. A service SAS cannot grant this operation; an account SAS needs the d permission on the object resource type."
+      "notes": "DELETE /{account}/{queue}/messages removes every message and returns 204. Q-04 verifies clear on a queue with a live message and an empty read-back. A service SAS cannot grant this operation; an account SAS needs the d permission on the object resource type."
     },
     {
       "name": "Create Queue",
@@ -193,5 +193,57 @@
       ],
       "notes": "PUT /{account}/{queue}/messages/{messageid}?popreceipt=&visibilitytimeout= (0-604800, required) with an optional QueueMessage body returns 204 with new x-ms-popreceipt and x-ms-time-next-visible. Empty body keeps the text. Stale issued receipts return 404 MessageNotFound. The new visibility time is not capped at the message expiry. A service SAS needs the u permission."
     }
-  ]
+  ],
+  "live_azure_evidence": {
+    "cassettes": 7,
+    "target_exchanges": 101,
+    "recorded_exchanges": 35,
+    "matched_exchanges": 35,
+    "matched_operation_auth": {
+      "Create Queue": {
+        "Bearer": "Q-01"
+      },
+      "Set Queue Metadata": {
+        "Bearer": "Q-01"
+      },
+      "Get Queue Metadata": {
+        "Bearer": "Q-01"
+      },
+      "List Queues": {
+        "Bearer": "Q-01"
+      },
+      "Delete Queue": {
+        "Bearer": "Q-01"
+      },
+      "Put Message": {
+        "Bearer": "Q-02"
+      },
+      "Peek Messages": {
+        "Bearer": "Q-02"
+      },
+      "Get Messages": {
+        "Bearer": "Q-02"
+      },
+      "Update Message": {
+        "Bearer": "Q-02"
+      },
+      "Delete Message": {
+        "Bearer": "Q-02"
+      },
+      "Clear Messages": {
+        "Bearer": "Q-04"
+      },
+      "Get Queue Service Properties": {
+        "Bearer": "Q-10"
+      },
+      "Get Queue ACL": {
+        "Bearer": "Q-10"
+      },
+      "Preflight Queue Request": {
+        "Anonymous": "Q-10"
+      }
+    },
+    "matched_unsupported_boundaries": {},
+    "wire_discrepancies": 4
+  }
 }

@@ -2,7 +2,9 @@
 
 The [Rust harness](../../tests/contracts/mod.rs) runs the same requests against Azure and the built Azuifer binary over HTTPS. Each case pins API version `2023-11-03`. The reviewed Azure cassette is the baseline. A live check compares each service with it independently: Azure drift, Azuifer drift, or both can fail the check. Matching each other is not enough.
 
-The [recording plan](azure-recording-plan.md) counts the exchange target, lists concrete pathways across all five services, and tracks which target or permissions each still needs.
+The [recording plan](azure-recording-plan.md) tracks **270 of 1,243 planned exchanges matched** at `2023-11-03`: 187 Blob, 35 Queue, and 48 Table. There are **51 reviewed cassette files** (34 Blob, 7 Queue, 10 Table); the 52 offline replay tests include a drift-detection test, not a 52nd Azure file. DFS and FileREST have no reviewed live cassettes. The [wire ledger](wire-discrepancies.json) tracks 31 pinned entries; some are documentation or SDK findings still awaiting a live run.
+
+Use `azuifer conformance export --format markdown` (or omit the format flag for JSON) for the audited totals and explicit operation/auth credits. A scenario can verify a rejection without establishing full operation parity. The legacy JSON `azure_differential_verified` flag remains `false` for full Blob/SharedKey verification; use `live_azure_evidence` for the actual recorded progress.
 
 | Case | What it compares |
 | --- | --- |
@@ -86,5 +88,6 @@ All live tests check the account, tag, and canonical HTTPS service endpoint befo
 2. Set `AZUIFER_CONTRACT_CAPTURE=1` and run the live command (or filter to the new case). Capture mode only observes Azure and writes a uniquely named candidate under `dist/azure-contracts/` (ignored by Git). It does not check Azuifer or update the baseline. Unset the variable to resume live comparisons.
 3. Review the candidate before copying it into [the cassette directory](../../tests/contracts/cassettes/). If the baseline changes, review the Git diff and explain why. Commit only the typed projection: no URLs, resource identifiers, credentials, SAS parameters, delegation keys, raw headers, or arbitrary bodies. A failed setup cannot produce a record for that workflow.
 4. Run offline replay against the reviewed record, then rerun the live check. A regression should fail against the reviewed record before fixing Azuifer; never change the record just to make the emulator pass.
+5. Link the fixture from the recording plan and update the wire ledger when supported by the evidence. Run `python scripts/audit-azure-recording-plan.py --write-evidence` to refresh the manifest projections. The default audit checks that the projections are current without writing files.
 
 A passing cassette proves only the exchanges, API version, auth mode, account features, and fields that the case checked. It does not certify other operations, Blob versioning or soft delete, or parity across services.

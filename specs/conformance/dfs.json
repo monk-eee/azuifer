@@ -206,7 +206,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Sets, modifies, or removes ACL entries across a subtree in bounded batches with a stable continuation token and the documented counters (directoriesSuccessful, filesSuccessful, failureCount, failedEntries). For a bearer caller, ownership is checked per entry and so is the execute right on each directory from the named one down to the entry (ADR-0031); an unreachable entry is a failedEntries item. That reporting, and judging rights before the call's own changes, are unverified against Azure."
+      "notes": "Sets, modifies, or removes ACL entries across a subtree in bounded batches with a stable continuation token and the documented counters (directoriesSuccessful, filesSuccessful, failureCount, failedEntries). For a bearer caller subject to ACL checks, ownership is checked per entry and so is the execute right on each directory from the named one down to the entry (ADR-0031). Reporting unreachable entries and checking rights before the call's own changes have local tests but remain pending for live Azure (D-15)."
     },
     {
       "name": "Lease Path",
@@ -234,5 +234,14 @@
       ],
       "notes": "Deletes files, empty directories, and with recursive=true whole subtrees in one transaction, paged by continuation; non-empty directories without recursive answer DirectoryNotEmpty. Answers 200, which is unverified against Azure. Staged extents of a deleted file are reclaimed at the next start."
     }
-  ]
+  ],
+  "live_azure_evidence": {
+    "cassettes": 0,
+    "target_exchanges": 203,
+    "recorded_exchanges": 0,
+    "matched_exchanges": 0,
+    "matched_operation_auth": {},
+    "matched_unsupported_boundaries": {},
+    "wire_discrepancies": 0
+  }
 }

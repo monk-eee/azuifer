@@ -1,6 +1,6 @@
 # Queue wire compatibility
 
-Azuifer serves the Azure Queue Storage data plane on its own listener (default port `10001`, `--queue-port` to change it; `--port 0` makes it ephemeral). The implemented API baseline is `2023-11-03` and the operation inventory is [`specs/conformance/queue.json`](../../specs/conformance/queue.json). No operation has been compared with real Azure yet, so none is rated `exact`; see [ADR-0013](../adr.d/0013-model-queue-messages-in-sqlite.md) and [ADR-0021](../adr.d/0021-publish-one-conformance-manifest-per-service.md).
+Azuifer serves Azure Queue Storage on its own listener (default port `10001`, `--queue-port` to change it; `--port 0` makes it ephemeral). The [manifest](../../specs/conformance/queue.json) lists 17 implemented operations at `2023-11-03`. Seven reviewed cassettes match 35 of 101 planned [exchanges](azure-recording-plan.md#queue), covering Bearer queue and message workflows and scoped anonymous preflight failures. SAS policy writes, configured CORS, and geo-secondary stats are not recorded; no operation is rated `exact`.
 
 Start it with `azuifer serve --services queue --in-memory`. Current Azure SDKs and `az` request API versions newer than the baseline, so add `--skip-api-version-check`. Connect with a connection string such as:
 
@@ -72,4 +72,4 @@ Wrong service, resource type, permission or protocol return `AuthorizationServic
 ## Tests
 
 - `cargo test` runs the unit tests (XML, string-to-sign, store with an advanced `Clock`, routing, CORS) and the [HTTP suite](../../tests/queue_http.rs), which starts the real binary and covers lifecycle, visibility, pop receipts, TTL, restart and crash persistence, all authentication modes and failures, ACLs, CORS and version policy. The [addressing suite](../../tests/addressing_http.rs) covers host-style Shared Key and SAS, and the [shared clock suite](../../tests/shared_clock_http.rs) advances the admin `--test-clock` and observes visibility and TTL expiry over HTTP.
-- [`tests/queue_sdk.py`](../../tests/queue_sdk.py) drives `azure-storage-queue` and [`tests/queue_azure_cli.py`](../../tests/queue_azure_cli.py) drives `az storage queue` and `az storage message`. They are run manually (`pip install azure-storage-queue`) against a server started as above and are not part of `cargo test`.
+- The [Python SDK suite](../../tests/queue_sdk.py) drives `azure-storage-queue` against the local server in [CI](../../.github/workflows/rust.yml). Run the [Queue Azure CLI script](../../tests/queue_azure_cli.py) separately to exercise your installed `az storage queue` and `az storage message` commands. Neither replaces the [Azure cassette checks](azure-contracts.md).
