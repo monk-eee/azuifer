@@ -63,7 +63,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Accepts x-ms-meta-* and x-ms-blob-public-access. $web is supported for the static website; $root and $logs are not. A service SAS cannot create containers."
+      "notes": "Accepts x-ms-meta-* and x-ms-blob-public-access. $web, $root, and $logs can be created like any container; Azuifer writes nothing into $logs. A service SAS cannot create containers."
     },
     {
       "name": "Delete Blob",
