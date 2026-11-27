@@ -11,7 +11,19 @@ use super::lexer::{Token, tokens};
 struct Parser {
     tokens: Vec<Token>,
     at: usize,
+    /// How much stack the expression being parsed asks for: each operator of a chain
+    /// adds `CHAIN`, each level the parser or the evaluator recurses into adds `NESTED`.
+    depth: usize,
 }
+
+/// What one more operator in a chain, or one more level of nesting, adds to `depth`.
+const CHAIN: usize = 2;
+const NESTED: usize = 4;
+/// The most `depth` a query may reach: 63 levels of parentheses, `NOT` or `-`, 21 of function
+/// calls, or a chain of 128 operators. All are generous for a written query. A hostile one
+/// would otherwise overflow the stack of the thread that parses and evaluates it, because the
+/// parser and the tree's walk and drop recurse once per level.
+const MAX_DEPTH: usize = 256;
 
 const RESERVED: [&str; 12] = [
     "from", "where", "limit", "and", "or", "not", "as", "like", "between", "in", "is", "select",
@@ -151,6 +163,15 @@ impl Parser {
         })
     }
 
+    /// Counts one more level of nesting, or refuses an expression that is too deep.
+    fn deeper(&mut self, cost: usize) -> Result<(), SqlError> {
+        self.depth += cost;
+        if self.depth > MAX_DEPTH {
+            return parse_error("the expression is nested too deeply");
+        }
+        Ok(())
+    }
+
     fn name(&mut self) -> Result<String, SqlError> {
         match self.next() {
             Some(Token::Word(name) | Token::Quoted(name)) => Ok(name),
@@ -159,24 +180,35 @@ impl Parser {
     }
 
     fn or(&mut self) -> Result<Expr, SqlError> {
+        let outer = self.depth;
+        self.deeper(NESTED)?;
         let mut left = self.and()?;
         while self.take_keyword("or") {
+            self.deeper(CHAIN)?;
             left = Expr::Binary(Op::Or, Box::new(left), Box::new(self.and()?));
         }
+        self.depth = outer;
         Ok(left)
     }
 
     fn and(&mut self) -> Result<Expr, SqlError> {
+        let outer = self.depth;
         let mut left = self.not()?;
         while self.take_keyword("and") {
+            self.deeper(CHAIN)?;
             left = Expr::Binary(Op::And, Box::new(left), Box::new(self.not()?));
         }
+        self.depth = outer;
         Ok(left)
     }
 
     fn not(&mut self) -> Result<Expr, SqlError> {
         if self.take_keyword("not") {
-            Ok(Expr::Not(Box::new(self.not()?)))
+            let outer = self.depth;
+            self.deeper(NESTED)?;
+            let inner = self.not()?;
+            self.depth = outer;
+            Ok(Expr::Not(Box::new(inner)))
         } else {
             self.predicate()
         }
@@ -236,14 +268,18 @@ impl Parser {
     }
 
     fn concat(&mut self) -> Result<Expr, SqlError> {
+        let outer = self.depth;
         let mut left = self.additive()?;
         while self.take_symbol("||") {
+            self.deeper(CHAIN)?;
             left = Expr::Binary(Op::Concat, Box::new(left), Box::new(self.additive()?));
         }
+        self.depth = outer;
         Ok(left)
     }
 
     fn additive(&mut self) -> Result<Expr, SqlError> {
+        let outer = self.depth;
         let mut left = self.term()?;
         loop {
             let op = if self.take_symbol("+") {
@@ -251,13 +287,16 @@ impl Parser {
             } else if self.take_symbol("-") {
                 Op::Sub
             } else {
+                self.depth = outer;
                 return Ok(left);
             };
+            self.deeper(CHAIN)?;
             left = Expr::Binary(op, Box::new(left), Box::new(self.term()?));
         }
     }
 
     fn term(&mut self) -> Result<Expr, SqlError> {
+        let outer = self.depth;
         let mut left = self.unary()?;
         loop {
             let op = if self.take_symbol("*") {
@@ -267,18 +306,26 @@ impl Parser {
             } else if self.take_symbol("%") {
                 Op::Rem
             } else {
+                self.depth = outer;
                 return Ok(left);
             };
+            self.deeper(CHAIN)?;
             left = Expr::Binary(op, Box::new(left), Box::new(self.unary()?));
         }
     }
 
     fn unary(&mut self) -> Result<Expr, SqlError> {
-        if self.take_symbol("-") {
-            return Ok(Expr::Negate(Box::new(self.unary()?)));
-        }
-        if self.take_symbol("+") {
-            return self.unary();
+        let negate = self.take_symbol("-");
+        if negate || self.take_symbol("+") {
+            let outer = self.depth;
+            self.deeper(NESTED)?;
+            let inner = self.unary()?;
+            self.depth = outer;
+            return Ok(if negate {
+                Expr::Negate(Box::new(inner))
+            } else {
+                inner
+            });
         }
         self.primary()
     }
@@ -340,7 +387,16 @@ impl Parser {
         }
     }
 
+    /// A call nests its arguments, and costs more stack than a parenthesis does.
     fn call(&mut self, name: &str) -> Result<Expr, SqlError> {
+        let outer = self.depth;
+        self.deeper(2 * NESTED)?;
+        let call = self.arguments(name);
+        self.depth = outer;
+        call
+    }
+
+    fn arguments(&mut self, name: &str) -> Result<Expr, SqlError> {
         self.expect_symbol("(")?;
         if name == "cast" {
             let value = self.or()?;
@@ -402,6 +458,7 @@ impl Query {
         let mut parser = Parser {
             tokens: tokens(sql)?,
             at: 0,
+            depth: 0,
         };
         parser.query()
     }

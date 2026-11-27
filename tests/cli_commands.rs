@@ -1,5 +1,5 @@
 use std::{
-    io::{BufRead as _, BufReader},
+    io::{BufRead as _, BufReader, Read as _, Write as _},
     net::TcpListener,
     path::Path,
     process::{Child, Command, Output, Stdio},
@@ -308,5 +308,232 @@ fn reset_in_memory_mode_has_nothing_to_delete() {
         stdout(&output).contains("Nothing persists"),
         "{}",
         stdout(&output)
+    );
+}
+
+/// A stand-in admin listener: answers each request with the canned reply for its path, and
+/// the first reply in `replies` named `*` for any other.
+fn fake_admin(replies: &[(&'static str, &'static str)]) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let replies = replies.to_vec();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            // The client writes its request in pieces: read it all before answering, or
+            // closing on unread data would reset the connection.
+            let mut request = Vec::new();
+            let mut chunk = [0; 256];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(&chunk[..read]),
+                }
+            }
+            let head = String::from_utf8_lossy(&request);
+            let target = head.split_whitespace().nth(1).unwrap_or("").to_owned();
+            let reply = replies
+                .iter()
+                .find(|(path, _)| *path == target)
+                .or_else(|| replies.iter().find(|(path, _)| *path == "*"));
+            if let Some((_, reply)) = reply {
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        }
+    });
+    url
+}
+
+fn http(status: &str, body: &str) -> &'static str {
+    Box::leak(
+        format!(
+            "HTTP/1.0 {status}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\n\r\n{body}",
+            body.len()
+        )
+        .into_boxed_str(),
+    )
+}
+
+#[test]
+fn status_names_what_is_wrong_with_an_admin_listener_that_answers_badly() {
+    let unhealthy = fake_admin(&[("*", http("503 Service Unavailable", "starting"))]);
+    let output = run(&["status", "--admin-url", &unhealthy]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains(&format!("{unhealthy}/healthz returned HTTP 503")),
+        "{}",
+        stderr(&output)
+    );
+
+    let no_status = fake_admin(&[
+        ("/healthz", http("200 OK", "ok")),
+        ("*", http("500 Internal Server Error", "boom")),
+    ]);
+    let output = run(&["status", "--admin-url", &no_status]);
+    assert!(
+        stderr(&output).contains("/status returned HTTP 500"),
+        "{}",
+        stderr(&output)
+    );
+
+    let not_json = fake_admin(&[("*", http("200 OK", "not json"))]);
+    let output = run(&["status", "--admin-url", &not_json]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("unexpected /status response"),
+        "{}",
+        stderr(&output)
+    );
+    let output = run(&["status", "--admin-url", &not_json, "--json"]);
+    assert_eq!(
+        stdout(&output).trim(),
+        "not json",
+        "--json prints the body as sent"
+    );
+
+    let not_http = fake_admin(&[("*", "garbage with no header terminator")]);
+    let output = run(&["status", "--admin-url", &not_http]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("malformed admin response"),
+        "{}",
+        stderr(&output)
+    );
+    let no_code = fake_admin(&[("*", "HTTP/1.0\r\n\r\nbody")]);
+    let output = run(&["status", "--admin-url", &no_code]);
+    assert!(
+        stderr(&output).contains("malformed admin status line"),
+        "{}",
+        stderr(&output)
+    );
+
+    let starting = fake_admin(&[("*", http("200 OK", "starting"))]);
+    let output = run(&["status", "--admin-url", &starting, "--ready"]);
+    assert!(
+        stderr(&output).contains("is not ready"),
+        "a 200 that does not say ready is not ready: {}",
+        stderr(&output)
+    );
+
+    let output = run(&["status", "--admin-url", "https://127.0.0.1:1"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("must start with http://"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn status_reports_storage_exporters_and_a_long_uptime() {
+    let body = r#"{"version":"9.9.9","uptime_seconds":7384,"storage":"persistent",
+        "location":"/var/lib/azuifer","services":[{"name":"blob","url":"http://127.0.0.1:1"}],
+        "admin_url":"http://127.0.0.1:2","prometheus":false,"otlp":true}"#;
+    let admin = fake_admin(&[("*", http("200 OK", body))]);
+    let output = run(&["status", "--admin-url", &admin]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains("Azuifer 9.9.9 is running at http://127.0.0.1:2 (up 2h 3m 4s)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Storage:   persistent (/var/lib/azuifer)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("OTLP:      exporting traces and metrics"),
+        "{text}"
+    );
+    assert!(!text.contains("Metrics:"), "{text}");
+}
+
+#[test]
+fn doctor_recognises_the_running_instance_it_is_asked_about() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let server = Server::start(&["--location", path(&data), "--services", "blob"]);
+    let admin_port = server.admin.rsplit(':').next().unwrap().to_owned();
+
+    let output = run(&[
+        "doctor",
+        "--location",
+        path(&data),
+        "--services",
+        "blob",
+        "--port",
+        "0",
+        "--admin-port",
+        &admin_port,
+    ]);
+    let text = stdout(&output);
+    assert!(output.status.success(), "{text}{}", stderr(&output));
+    assert!(
+        text.contains("is served by the running Azuifer instance"),
+        "{text}"
+    );
+    assert!(
+        text.contains("[PASS] Directory lock: held by the running Azuifer instance"),
+        "{text}"
+    );
+}
+
+#[test]
+fn doctor_plans_a_missing_data_directory_and_reports_the_telemetry_transport() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("a").join("b");
+    for (protocol, label) in [("grpc", "OTLP/gRPC"), ("http", "OTLP/HTTP")] {
+        let output = run(&[
+            "doctor",
+            "--location",
+            path(&data),
+            "--port",
+            "0",
+            "--admin-port",
+            "0",
+            "--otlp-endpoint",
+            "http://127.0.0.1:1",
+            "--otlp-protocol",
+            protocol,
+        ]);
+        let text = stdout(&output);
+        assert!(output.status.success(), "{text}{}", stderr(&output));
+        assert!(
+            text.contains(&format!(
+                "[PASS] Telemetry: {label} export is configured; the collector is not contacted by doctor"
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "(it will be created under {})",
+                dir.path().display()
+            )),
+            "{text}"
+        );
+    }
+    assert!(!data.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn reset_removes_a_symlinked_state_entry_without_following_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("keep.txt"), b"precious").unwrap();
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::os::unix::fs::symlink(&outside, data.join("content")).unwrap();
+    std::fs::write(data.join("metadata.sqlite3"), b"x").unwrap();
+
+    let output = run(&["reset", "--location", path(&data), "--yes"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(data.join("content").symlink_metadata().is_err());
+    assert!(!data.join("metadata.sqlite3").exists());
+    assert_eq!(
+        std::fs::read(outside.join("keep.txt")).unwrap(),
+        b"precious",
+        "the link is removed, not what it points at"
     );
 }

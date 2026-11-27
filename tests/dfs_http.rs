@@ -9,7 +9,7 @@ use base64::{
 use hmac::{Hmac, Mac as _};
 use reqwest::{
     Method, Url,
-    blocking::{Client, Response},
+    blocking::{Body, Client, Response},
 };
 use serde_json::{Value, json};
 use sha2::Sha256;
@@ -462,6 +462,24 @@ fn service_sas(resource: &str, path: Option<&str>, permissions: &str, expiry: &s
     if resource == "d" {
         let depth = path.map_or(0, |path| path.split('/').count());
         query.push_str(&format!("&sdd={depth}"));
+    }
+    format!("{query}&sig={}", encode(&sign(&signed)))
+}
+
+/// A read-only service SAS for one file that also states the address or the protocol it
+/// accepts (`sip`, `spr`); an empty one is left out.
+fn restricted_sas(path: &str, address: &str, protocol: &str, expiry: &str) -> String {
+    let canonical = format!("/blob/{ACCOUNT}/lake/{path}");
+    let signed = [
+        "r", "", expiry, &canonical, "", address, protocol, VERSION, "b", "", "", "", "", "", "",
+        "",
+    ]
+    .join("\n");
+    let mut query = format!("sv={VERSION}&sr=b&sp=r&se={}", encode(expiry));
+    for (name, value) in [("sip", address), ("spr", protocol)] {
+        if !value.is_empty() {
+            query.push_str(&format!("&{name}={}", encode(value)));
+        }
     }
     format!("{query}&sig={}", encode(&sign(&signed)))
 }
@@ -2682,11 +2700,8 @@ fn azcopy_style_clients_reach_blob_listing_and_folder_markers_on_the_dfs_port() 
     assert_eq!(flushed.status(), 200);
 }
 
-#[test]
-fn dfs_waits_for_a_request_slot_instead_of_failing_when_all_are_busy() {
-    let server = Emulator::start(&[]);
-    server.filesystem();
-    // Sixteen appends that never finish their bodies hold every slot.
+/// Sixteen appends that never finish their bodies, which hold every request slot.
+fn stall_every_request_slot(server: &Emulator) -> Vec<TcpStream> {
     let mut stalled = Vec::new();
     for index in 0..16 {
         let path = format!("{LAKE}/slot{index}?action=append&position=0");
@@ -2706,6 +2721,32 @@ fn dfs_waits_for_a_request_slot_instead_of_failing_when_all_are_busy() {
         stalled.push(socket);
     }
     thread::sleep(Duration::from_millis(500));
+    stalled
+}
+
+#[test]
+fn dfs_answers_server_busy_when_no_request_slot_frees_within_the_wait() {
+    let server = Emulator::start(&[]);
+    server.filesystem();
+    let _stalled = stall_every_request_slot(&server);
+    let started = Instant::now();
+    dfs_error(
+        server.dfs("HEAD", &format!("{LAKE}?resource=filesystem"), &[], b""),
+        503,
+        "ServerBusy",
+    );
+    assert!(
+        started.elapsed() >= Duration::from_secs(5),
+        "it waited the full five seconds first: {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn dfs_waits_for_a_request_slot_instead_of_failing_when_all_are_busy() {
+    let server = Emulator::start(&[]);
+    server.filesystem();
+    let mut stalled = stall_every_request_slot(&server);
     let started = Instant::now();
     let waiter = thread::scope(|scope| {
         let handle =
@@ -2806,4 +2847,230 @@ fn unflushed_data_and_attributes_survive_a_crash_but_a_torn_append_does_not() {
         .filter(|name| name.starts_with("incoming-"))
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+fn a_sas_limited_to_https_is_refused_over_plain_http() {
+    let server = Emulator::start(&[]);
+    server.filesystem();
+    server.file("f.txt", b"data");
+    let file = format!("{LAKE}/f.txt");
+    let expiry = in_seconds(&server, 600);
+    let read = |protocol: &str| {
+        // `sip` is signed but not enforced on any listener (docs/compatibility/blob.md), so
+        // only the protocol restriction is exercised here.
+        let sas = Auth::Sas(restricted_sas("f.txt", "", protocol, &expiry));
+        server.dfs_as(&sas, "GET", &file, &[])
+    };
+    assert_eq!(read("").status(), 200);
+    assert_eq!(read("https,http").status(), 200);
+    dfs_error(read("https"), 403, "AuthorizationProtocolMismatch");
+}
+#[test]
+fn lease_conflicts_report_the_documented_codes_and_an_expired_lease_is_lost() {
+    let server = Emulator::start(&["--test-clock"]);
+    server.filesystem();
+    server.file("f.txt", b"data");
+    let file = format!("{LAKE}/f.txt");
+    let (first, second) = (
+        "11111111-1111-1111-1111-111111111111",
+        "22222222-2222-2222-2222-222222222222",
+    );
+    let lease = |headers: &[(&str, &str)]| server.dfs("POST", &file, headers, b"");
+    let acquire = |id: &str| {
+        lease(&[
+            ("x-ms-lease-action", "acquire"),
+            ("x-ms-lease-duration", "15"),
+            ("x-ms-proposed-lease-id", id),
+        ])
+    };
+    let append = |id: &str| {
+        server.dfs(
+            "PATCH",
+            &format!("{file}?action=append&position=4"),
+            &[("x-ms-lease-id", id)],
+            b"x",
+        )
+    };
+
+    dfs_error(append(first), 412, "LeaseNotPresent");
+    assert_eq!(acquire(first).status(), 201);
+    dfs_error(acquire(second), 409, "LeaseAlreadyPresent");
+    dfs_error(append(second), 412, "LeaseIdMismatch");
+
+    let breaking = lease(&[
+        ("x-ms-lease-action", "break"),
+        ("x-ms-lease-break-period", "10"),
+    ]);
+    assert_eq!(breaking.status(), 202);
+    dfs_error(acquire(first), 409, "LeaseIsBreakingAndCannotBeAcquired");
+    dfs_error(
+        lease(&[
+            ("x-ms-lease-action", "change"),
+            ("x-ms-lease-id", first),
+            ("x-ms-proposed-lease-id", second),
+        ]),
+        409,
+        "LeaseIsBreakingAndCannotBeChanged",
+    );
+    server.advance(11);
+    dfs_error(
+        lease(&[("x-ms-lease-action", "renew"), ("x-ms-lease-id", first)]),
+        409,
+        "LeaseIsBrokenAndCannotBeRenewed",
+    );
+    assert_eq!(
+        lease(&[("x-ms-lease-action", "release"), ("x-ms-lease-id", first)]).status(),
+        200
+    );
+
+    assert_eq!(acquire(first).status(), 201);
+    server.advance(16);
+    dfs_error(append(first), 412, "LeaseLost");
+    dfs_error(append(second), 412, "LeaseNotPresent");
+}
+
+#[test]
+fn append_data_rejects_bad_checksums_bodies_without_a_length_and_invalid_names() {
+    let server = Emulator::start(&[]);
+    server.filesystem();
+    let file = format!("{LAKE}/f.bin");
+    assert_eq!(
+        server
+            .dfs("PUT", &format!("{file}?resource=file"), &[], b"")
+            .status(),
+        201
+    );
+    let append = |position: u32, headers: &[(&str, &str)], body: &[u8]| {
+        server.dfs(
+            "PATCH",
+            &format!("{file}?action=append&position={position}"),
+            headers,
+            body,
+        )
+    };
+
+    // CRC-64 of the single byte 0x11, the vector tests/blob_http.rs uses for Put Block.
+    let crc = [("x-ms-content-crc64", "0GFnV7RfVNI=")];
+    assert_eq!(append(0, &crc, b"\x11").status(), 202);
+    dfs_error(append(1, &crc, b"wrong"), 400, "Crc64Mismatch");
+    dfs_error(
+        append(1, &[("content-md5", "AAAAAAAAAAAAAAAAAAAAAA==")], b"wrong"),
+        400,
+        "Md5Mismatch",
+    );
+    let flushed = server.dfs(
+        "PATCH",
+        &format!("{file}?action=flush&position=1"),
+        &[],
+        b"",
+    );
+    assert_eq!(
+        flushed.status(),
+        200,
+        "the rejected bodies stored nothing, so one byte is all there is to flush"
+    );
+    assert_eq!(
+        server.dfs("GET", &file, &[], b"").bytes().unwrap().as_ref(),
+        b"\x11"
+    );
+    // A chunked body has no Content-Length to hold the upload to.
+    let url = Url::parse(&format!("{}{file}?action=append&position=1", server.dfs)).unwrap();
+    let headers = server.shared_key("PATCH", &url, &[], None);
+    let mut request = server.client.request(Method::PATCH, url);
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    let reply = request
+        .body(Body::new(std::io::Cursor::new(b"chunked".to_vec())))
+        .send()
+        .unwrap();
+    dfs_error(reply, 411, "MissingContentLengthHeader");
+
+    dfs_error(
+        server.dfs(
+            "PUT",
+            "/testaccount/Not_Valid?resource=filesystem",
+            &[],
+            b"",
+        ),
+        400,
+        "InvalidResourceName",
+    );
+}
+
+#[test]
+fn append_data_is_limited_by_the_memory_quota_and_the_upload_timeout() {
+    let server = Emulator::start(&["--memory-limit", "1024", "--upload-timeout-seconds", "1"]);
+    server.filesystem();
+    let file = format!("{LAKE}/big.bin");
+    assert_eq!(
+        server
+            .dfs("PUT", &format!("{file}?resource=file"), &[], b"")
+            .status(),
+        201
+    );
+    dfs_error(
+        server.dfs(
+            "PATCH",
+            &format!("{file}?action=append&position=0"),
+            &[],
+            &[7; 2048],
+        ),
+        507,
+        "InsufficientStorage",
+    );
+    assert_eq!(
+        server
+            .dfs(
+                "PATCH",
+                &format!("{file}?action=append&position=0"),
+                &[],
+                &[7; 512],
+            )
+            .status(),
+        202,
+        "a rejected upload leaves the quota intact"
+    );
+
+    // A body that stops short of its Content-Length is cut off when the timeout passes.
+    let path = format!("{LAKE}/slow.bin");
+    assert_eq!(
+        server
+            .dfs("PUT", &format!("{path}?resource=file"), &[], b"")
+            .status(),
+        201
+    );
+    let url = Url::parse(&format!("{}{path}?action=append&position=0", server.dfs)).unwrap();
+    let headers = server.shared_key("PATCH", &url, &[], Some(100));
+    let mut socket = TcpStream::connect(url.socket_addrs(|| None).unwrap()[0]).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        socket,
+        "PATCH {}?action=append&position=0 HTTP/1.1\r\nHost: {}\r\n",
+        path,
+        url.host_str().unwrap()
+    )
+    .unwrap();
+    for (name, value) in headers {
+        write!(socket, "{name}: {value}\r\n").unwrap();
+    }
+    socket.write_all(b"\r\nfirst").unwrap();
+    let mut reply = Vec::new();
+    let mut chunk = [0; 1024];
+    while !reply.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = socket
+            .read(&mut chunk)
+            .expect("a response before the read timeout");
+        assert_ne!(read, 0, "the server closed without answering");
+        reply.extend_from_slice(&chunk[..read]);
+    }
+    let reply = String::from_utf8_lossy(&reply).to_ascii_lowercase();
+    assert!(reply.starts_with("http/1.1 500"), "{reply}");
+    assert!(
+        reply.contains("x-ms-error-code: operationtimedout"),
+        "{reply}"
+    );
 }
