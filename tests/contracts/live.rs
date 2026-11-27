@@ -1,4 +1,4 @@
-use super::{Cassette, Source, delegation, observe_blob, observe_local, with_local};
+use super::{Cassette, Source, delegation, mutations, observe_blob, observe_local, with_local};
 use anyhow::{Context as _, Result, anyhow, ensure};
 use reqwest::{Url, blocking::Client, redirect::Policy};
 use serde::{Deserialize, Serialize};
@@ -151,6 +151,7 @@ pub(super) enum Record<'a> {
     Sas(&'a Cassette),
     Delegation(&'a delegation::KeyCassette),
     InvalidWindows(&'a delegation::WindowCassette),
+    BlobMutation(&'a mutations::MutationCassette),
 }
 
 pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
@@ -160,6 +161,7 @@ pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
         Record::Sas(_) => "blob-user-delegation-sas-read-only",
         Record::Delegation(_) => "blob-get-user-delegation-key",
         Record::InvalidWindows(_) => "blob-delegation-key-invalid-windows",
+        Record::BlobMutation(cassette) => cassette.case.file_stem(),
     };
     let name = format!("{scenario}-{}.json", Uuid::new_v4().simple());
     let target = directory.join(name);
@@ -247,6 +249,35 @@ fn record_live_delegation_window_contract() -> Result<()> {
     azure.compare(&local)?;
     println!("Live Azure and Azuifer matched on all selected invalid delegation window responses");
     Ok(())
+}
+
+fn record_mutation(case: mutations::Case) -> Result<()> {
+    let azure = with_azure(|client, _, endpoint, bearer| {
+        mutations::observe(client, endpoint, bearer, Source::Azure, case)
+    })?;
+    azure.validate()?;
+    save_azure(Record::BlobMutation(&azure))?;
+    let local = with_local(|client, endpoint, bearer| {
+        mutations::observe(client, endpoint, bearer, Source::Synthetic, case)
+    })?;
+    azure.compare(&local)?;
+    println!(
+        "Live Azure and Azuifer matched on all selected fields for {}",
+        case.file_stem()
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn record_live_blob_mutation_conditional_overwrite() -> Result<()> {
+    record_mutation(mutations::Case::ConditionalOverwrite)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn record_live_blob_mutation_staged_block_commit() -> Result<()> {
+    record_mutation(mutations::Case::StagedBlockCommit)
 }
 
 #[test]

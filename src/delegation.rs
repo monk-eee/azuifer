@@ -10,7 +10,7 @@ use crate::{
     domain::{AccountName, Error, Result, xml_safe},
     oauth::Principal,
     sas::{self, Sas},
-    wire::{Xml, xml_error_with_details},
+    wire::{Xml, correlated_error_message, xml_error_with_details},
     xml_tree,
 };
 use axum::{http::StatusCode, response::Response};
@@ -105,9 +105,10 @@ pub(crate) fn respond(
     let window = match parse_window(&root, now) {
         Ok(window) => window,
         Err(WindowError::NodeValue(field, value)) if xml_safe(value) => {
-            let message = format!(
-                "The value for one of the XML nodes is not in the correct format.\nRequestId:{request_id}\nTime:{}",
-                sas::format_time(now)
+            let message = correlated_error_message(
+                "The value for one of the XML nodes is not in the correct format.",
+                request_id,
+                now,
             );
             return Ok(xml_error_with_details(
                 StatusCode::BAD_REQUEST,

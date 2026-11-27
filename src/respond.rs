@@ -9,7 +9,7 @@ use crate::{
     },
     lease::LeaseView,
     store::{Download, Payload},
-    wire::Xml,
+    wire::{Xml, correlated_error_message, xml_error},
 };
 use axum::{
     body::Body,
@@ -17,7 +17,7 @@ use axum::{
     response::Response,
 };
 use futures_util::TryStreamExt as _;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt as _;
 use tokio_util::io::ReaderStream;
 
@@ -805,10 +805,27 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
 }
 
 pub(crate) fn error_response(error: Error) -> Response {
+    render_error(error, None)
+}
+
+pub(crate) fn request_error_response(error: Error, request_id: &str, now: SystemTime) -> Response {
+    let correlation = matches!(
+        error,
+        Error::PermissionMismatch
+            | Error::BlobAlreadyExists
+            | Error::ConditionNotMet
+            | Error::BlobMissing
+            | Error::InvalidBlockList
+    )
+    .then_some((request_id, now));
+    render_error(error, correlation)
+}
+
+fn render_error(error: Error, correlation: Option<(&str, SystemTime)>) -> Response {
     let Some((status, code, message)) = describe(error) else {
         return match error {
             Error::InvalidRange(length) => {
-                let mut response = crate::wire::xml_error(
+                let mut response = xml_error(
                     StatusCode::RANGE_NOT_SATISFIABLE,
                     "InvalidRange",
                     "The range is outside the blob.",
@@ -827,5 +844,12 @@ pub(crate) fn error_response(error: Error) -> Response {
             _ => empty(StatusCode::NOT_MODIFIED),
         };
     };
-    crate::wire::xml_error(status, code, message)
+    match correlation {
+        Some((request_id, now)) => xml_error(
+            status,
+            code,
+            &correlated_error_message(message, request_id, now),
+        ),
+        None => xml_error(status, code, message),
+    }
 }

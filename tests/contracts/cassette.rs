@@ -69,6 +69,9 @@ pub(super) enum ErrorCode {
     AuthenticationFailed,
     AuthorizationFailure,
     BlobNotFound,
+    BlobAlreadyExists,
+    ConditionNotMet,
+    InvalidBlockList,
     ContainerNotFound,
     InvalidInput,
     InvalidXmlDocument,
@@ -84,6 +87,9 @@ impl ErrorCode {
             Some("AuthenticationFailed") => Self::AuthenticationFailed,
             Some("AuthorizationFailure") => Self::AuthorizationFailure,
             Some("BlobNotFound") => Self::BlobNotFound,
+            Some("BlobAlreadyExists") => Self::BlobAlreadyExists,
+            Some("ConditionNotMet") => Self::ConditionNotMet,
+            Some("InvalidBlockList") => Self::InvalidBlockList,
             Some("ContainerNotFound") => Self::ContainerNotFound,
             Some("InvalidInput") => Self::InvalidInput,
             Some("InvalidXmlDocument") => Self::InvalidXmlDocument,
@@ -238,7 +244,7 @@ impl Exchange {
                     Body::XmlError {
                         code: ErrorCode::PermissionMismatch,
                         permission_message: true,
-                        correlation: Header::Matches | Header::Missing,
+                        correlation: Header::Matches,
                         extra_elements: false,
                     }
                 );
@@ -432,7 +438,7 @@ fn serialization_never_contains_headers_credentials_or_arbitrary_bodies() {
         .to_string();
     assert!(!rejected.contains(secret));
 
-    let mut unsafe_body: serde_json::Value = serde_json::from_slice(super::SYNTHETIC).unwrap();
+    let mut unsafe_body: serde_json::Value = serde_json::from_slice(super::SAS_CASSETTE).unwrap();
     unsafe_body["exchanges"][0]["body"]["raw_body"] = serde_json::json!(secret);
     let rejected = Cassette::load(&serde_json::to_vec(&unsafe_body).unwrap())
         .unwrap_err()

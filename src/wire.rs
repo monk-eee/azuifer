@@ -8,7 +8,7 @@ use axum::{
     response::Response,
 };
 use futures_util::{StreamExt as _, TryStreamExt as _};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::{io::AsyncReadExt as _, sync::OwnedSemaphorePermit};
 use tokio_util::io::ReaderStream;
 
@@ -190,6 +190,13 @@ impl Xml {
 /// Azure-shaped XML error with the `x-ms-error-code` header.
 pub(crate) fn xml_error(status: StatusCode, code: &'static str, message: &str) -> Response {
     xml_error_with_details(status, code, message, &[])
+}
+
+pub(crate) fn correlated_error_message(message: &str, request_id: &str, now: SystemTime) -> String {
+    format!(
+        "{message}\nRequestId:{request_id}\nTime:{}",
+        crate::sas::format_time(now)
+    )
 }
 
 pub(crate) fn xml_error_with_details(

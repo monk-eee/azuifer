@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "blob-conditional-overwrite",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "seed",
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "valid",
+      "error_header": "missing",
+      "body": {"kind": "empty"}
+    },
+    {
+      "step": "reject_existing",
+      "status": 409,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "blob_already_exists",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "blob_already_exists",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "read_original",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 25,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      }
+    },
+    {
+      "step": "overwrite",
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "changed",
+      "error_header": "missing",
+      "body": {"kind": "empty"}
+    },
+    {
+      "step": "reject_stale",
+      "status": 412,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "condition_not_met",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "condition_not_met",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "read_replacement",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 28,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      }
+    }
+  ]
+}

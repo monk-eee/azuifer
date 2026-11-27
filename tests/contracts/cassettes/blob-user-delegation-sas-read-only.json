@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "source": "synthetic",
+  "source": "azure",
   "scenario": "blob-user-delegation-sas-read-only",
   "api_version": "2023-11-03",
   "exchanges": [
@@ -54,7 +54,7 @@
         "kind": "xml_error",
         "code": "permission_mismatch",
         "permission_message": true,
-        "correlation": "missing",
+        "correlation": "matches",
         "extra_elements": false
       }
     },

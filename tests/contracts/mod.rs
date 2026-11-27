@@ -1,6 +1,7 @@
 mod cassette;
 mod delegation;
 mod live;
+mod mutations;
 
 use super::{ACCOUNT, Server, VERSION, basic_token, client, iso, sas_query};
 use anyhow::{Context as _, Result, anyhow, ensure};
@@ -21,7 +22,7 @@ const BLOB: &str = "object.txt";
 const BLOB_BYTES: &[u8] = b"azuifer synthetic contract fixture\n";
 const RANGE_START: usize = 2;
 const RANGE_END: usize = 8;
-const SYNTHETIC: &[u8] = include_bytes!("cassettes/blob-user-delegation-sas-read-only.json");
+const SAS_CASSETTE: &[u8] = include_bytes!("cassettes/blob-user-delegation-sas-read-only.json");
 
 pub(super) fn sign_sas(
     key_document: &str,
@@ -143,13 +144,12 @@ fn get_delegation_key(
     )
 }
 
-fn observe_blob(
+fn with_fresh_container<T>(
     client: &Client,
-    account: &str,
     endpoint: &Url,
     bearer: &str,
-    source: Source,
-) -> Result<Cassette> {
+    observe: impl FnOnce(&str, Url) -> Result<T>,
+) -> Result<T> {
     let container = format!("azuifer-contract-{}", Uuid::new_v4().simple());
     let container_url = endpoint.join(&format!("{container}?restype=container"))?;
     let blob_url = endpoint.join(&format!("{container}/{BLOB}"))?;
@@ -162,7 +162,29 @@ fn observe_blob(
     )?;
     require_status(&created, 201, "create test container")?;
 
-    let outcome = (|| {
+    let outcome = observe(&container, blob_url);
+    let cleanup = send(
+        request(client, Method::DELETE, container_url).bearer_auth(bearer),
+        "delete test container",
+    )
+    .and_then(|response| require_status(&response, 202, "delete test container"));
+    match (outcome, cleanup) {
+        (Ok(cassette), Ok(())) => Ok(cassette),
+        (Ok(_), Err(error)) | (Err(error), Ok(())) => Err(error),
+        (Err(scenario), Err(cleanup)) => {
+            Err(anyhow!("{scenario:#}; cleanup also failed: {cleanup:#}"))
+        }
+    }
+}
+
+fn observe_blob(
+    client: &Client,
+    account: &str,
+    endpoint: &Url,
+    bearer: &str,
+    source: Source,
+) -> Result<Cassette> {
+    with_fresh_container(client, endpoint, bearer, |container, blob_url| {
         let put = send(
             request(client, Method::PUT, blob_url.clone())
                 .bearer_auth(bearer)
@@ -186,7 +208,7 @@ fn observe_blob(
         let mut signed_url = blob_url;
         signed_url.set_query(Some(&sign_sas(
             key,
-            (account, &container, Some(BLOB)),
+            (account, container, Some(BLOB)),
             "r",
             &expiry,
         )?));
@@ -212,20 +234,7 @@ fn observe_blob(
             .try_into()
             .map_err(|_| anyhow!("missing SAS probe results"))?;
         Ok(Cassette::new(source, exchanges))
-    })();
-
-    let cleanup = send(
-        request(client, Method::DELETE, container_url).bearer_auth(bearer),
-        "delete test container",
-    )
-    .and_then(|response| require_status(&response, 202, "delete test container"));
-    match (outcome, cleanup) {
-        (Ok(cassette), Ok(())) => Ok(cassette),
-        (Ok(_), Err(error)) | (Err(error), Ok(())) => Err(error),
-        (Err(scenario), Err(cleanup)) => {
-            Err(anyhow!("{scenario:#}; cleanup also failed: {cleanup:#}"))
-        }
-    }
+    })
 }
 
 fn observe_local() -> Result<Cassette> {
@@ -258,14 +267,14 @@ fn replay_blob_sas_contract() -> Result<()> {
             Some(path) => Cassette::load(&read_bounded(File::open(path).map_err(|error| {
                 anyhow!("could not open replay cassette ({:?})", error.kind())
             })?)?)?,
-            None => Cassette::load(SYNTHETIC)?,
+            None => Cassette::load(SAS_CASSETTE)?,
         };
     expected.compare(&observe_local()?)
 }
 
 #[test]
 fn replay_detects_a_changed_range_contract() -> Result<()> {
-    let mut changed: serde_json::Value = serde_json::from_slice(SYNTHETIC)?;
+    let mut changed: serde_json::Value = serde_json::from_slice(SAS_CASSETTE)?;
     changed["exchanges"][1]["content_length"] = serde_json::json!(99);
     let changed = Cassette::load(&serde_json::to_vec(&changed)?)?;
     let error = changed
