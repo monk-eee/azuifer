@@ -239,6 +239,24 @@ public class Probe {
             check("b".equals(f.getProperties().getMetadata().get("a")), "meta");
             share.delete();
         });
+        step("files: NFS share, hard link, symbolic link", () -> {
+            ShareClient nfs = fsvc.getShareClient("jvn" + sfx);
+            nfs.createWithResponse(new com.azure.storage.file.share.options.ShareCreateOptions()
+                .setProtocols(new com.azure.storage.file.share.models.ShareProtocols().setNfsEnabled(true)), null, null);
+            byte[] data = bytes(5000);
+            ShareFileClient target = nfs.getFileClient("target.bin");
+            target.create(data.length);
+            target.upload(new ByteArrayInputStream(data), data.length);
+            ShareFileClient hard = nfs.getFileClient("hard.bin");
+            hard.createHardLink("target.bin");
+            ByteArrayOutputStream viaHard = new ByteArrayOutputStream();
+            hard.download(viaHard);
+            check(Arrays.equals(viaHard.toByteArray(), data), "hard link shares the bytes");
+            ShareFileClient sym = nfs.getFileClient("sym.bin");
+            sym.createSymbolicLink("target.bin");
+            check("target.bin".equals(sym.getSymbolicLink().getLinkText()), "link text");
+            nfs.delete();
+        });
 
         // ---- DFS
         DataLakeServiceClient dsvc = new DataLakeServiceClientBuilder().endpoint("http://" + host + ":10003/" + account).credential(cred).buildClient();
@@ -275,6 +293,20 @@ public class Probe {
             List<String> after = new ArrayList<>();
             for (PathItem p : fs.listPaths(new ListPathsOptions().setRecursive(true), null)) after.add(p.getName());
             check(after.contains("dir2/renamed.txt"), String.join(",", after));
+        });
+        step("dfs: create with a scheduled deletion", () -> {
+            DataLakeFileClient f = fs.getFileClient("ttl.txt");
+            f.createWithResponse(new com.azure.storage.file.datalake.options.DataLakePathCreateOptions()
+                .setScheduleDeletionOptions(new com.azure.storage.file.datalake.options.DataLakePathScheduleDeletionOptions(Duration.ofSeconds(4))), null, null);
+            byte[] data = "short lived".getBytes(StandardCharsets.UTF_8);
+            f.append(new ByteArrayInputStream(data), 0, data.length);
+            f.flush(data.length, true);
+            var viaBlob = blobSvc.getBlobContainerClient(fs.getFileSystemName()).getBlobClient("ttl.txt");
+            check(viaBlob.getProperties().getExpiresOn() != null, "blob shows the deadline");
+            check(f.exists(), "present before the deadline");
+            Thread.sleep(5000);
+            check(!f.exists(), "gone after the deadline");
+            check(!viaBlob.exists(), "gone for blob too");
         });
         step("dfs: delete recursive and filesystem", () -> {
             fs.getDirectoryClient("dir2").deleteWithResponse(true, null, null, null);

@@ -21,9 +21,11 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/lease"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/sas"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake"
+	dlfile "github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/file"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/filesystem"
 	dlservice "github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/service"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azfile/service"
+	sharepkg "github.com/Azure/azure-sdk-for-go/sdk/storage/azfile/share"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azqueue"
 )
 
@@ -348,6 +350,54 @@ func main() {
 		return err
 	})
 
+	step("files: NFS share, hard link, symbolic link", func() error {
+		fkey, err := service.NewSharedKeyCredential(account, key)
+		if err != nil {
+			return err
+		}
+		fs, err := service.NewClientWithSharedKeyCredential(fmt.Sprintf("http://%s:10004/%s", host, account), fkey, nil)
+		if err != nil {
+			return err
+		}
+		nfs := fs.NewShareClient("gon" + sfx)
+		if _, err := nfs.Create(ctx, &sharepkg.CreateOptions{EnabledProtocols: to.Ptr("NFS")}); err != nil {
+			return err
+		}
+		root := nfs.NewRootDirectoryClient()
+		target := root.NewFileClient("target.bin")
+		data := random(5000)
+		if _, err := target.Create(ctx, int64(len(data)), nil); err != nil {
+			return err
+		}
+		if err := target.UploadBuffer(ctx, data, nil); err != nil {
+			return err
+		}
+		hard := root.NewFileClient("hard.bin")
+		if _, err := hard.CreateHardLink(ctx, "target.bin", nil); err != nil {
+			return err
+		}
+		buf := make([]byte, len(data))
+		if _, err := hard.DownloadBuffer(ctx, buf, nil); err != nil {
+			return err
+		}
+		if err := check(bytes.Equal(buf, data), "hard link shares the bytes"); err != nil {
+			return err
+		}
+		sym := root.NewFileClient("sym.bin")
+		if _, err := sym.CreateSymbolicLink(ctx, "target.bin", nil); err != nil {
+			return err
+		}
+		got, err := sym.GetSymbolicLink(ctx, nil)
+		if err != nil {
+			return err
+		}
+		if err := check(got.LinkText != nil && *got.LinkText == "target.bin", "link text"); err != nil {
+			return err
+		}
+		_, err = nfs.Delete(ctx, nil)
+		return err
+	})
+
 	// ---- DFS
 	step("dfs: filesystem, directory, file, rename", func() error {
 		dcred, err := azdatalake.NewSharedKeyCredential(account, key)
@@ -398,6 +448,38 @@ func main() {
 		}
 		if err := check(strings.Contains(strings.Join(names, ","), "dir1/renamed.txt"), strings.Join(names, ",")); err != nil {
 			return err
+		}
+		_, err = fsc.Delete(ctx, nil)
+		return err
+	})
+
+	step("dfs: create with an expiry", func() error {
+		dcred, err := azdatalake.NewSharedKeyCredential(account, key)
+		if err != nil {
+			return err
+		}
+		ds, err := dlservice.NewClientWithSharedKeyCredential(fmt.Sprintf("http://%s:%s/%s", host, envOr("AZUIFER_DFS_PORT", "10003"), account), dcred, nil)
+		if err != nil {
+			return err
+		}
+		fsc := ds.NewFileSystemClient("goe" + sfx)
+		if _, err := fsc.Create(ctx, nil); err != nil {
+			return err
+		}
+		f := fsc.NewFileClient("ttl.txt")
+		opts := &dlfile.CreateOptions{Expiry: dlfile.CreateExpiryValues{ExpiryType: dlfile.CreateExpiryTypeRelativeToNow, ExpiresOn: "4000"}}
+		if _, err := f.Create(ctx, opts); err != nil {
+			return err
+		}
+		if err := f.UploadBuffer(ctx, []byte("short lived"), nil); err != nil {
+			return err
+		}
+		if _, err := f.GetProperties(ctx, nil); err != nil {
+			return fmt.Errorf("present before the deadline: %w", err)
+		}
+		time.Sleep(5 * time.Second)
+		if _, err := f.GetProperties(ctx, nil); err == nil {
+			return fmt.Errorf("the file outlived its deadline")
 		}
 		_, err = fsc.Delete(ctx, nil)
 		return err

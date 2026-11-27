@@ -5,32 +5,34 @@ use super::{
     auth::Overrides,
     error::{Error, Result},
     lease::{self, Kind, Outcome},
-    model::{AccessPolicy, Metadata, Posix, Protocol, RootSquash, TimeSpec},
-    request::{ByteRange, Headers, Operation, Query, Target, file_length},
+    model::{AccessPolicy, Protocol},
+    request::{Headers, Operation, Query, Target, file_length},
     response::{
-        self, EntryDetail, ListEntriesView, ListSharesView, decode_marker, empty, etag_headers,
+        self, EntryDetail, ListEntriesView, decode_marker, empty, etag_headers,
         http_property_headers, node_headers, property_headers, set, share_headers,
     },
     store::{
-        CopyRequest, CopySource, FilePatch, LeaseRequest, ListSharesRequest, NewFile,
-        NfsShareSettings, ReadOptions, ReadRange, RenameFlags, ShareOptions, ShareRef,
+        FilePatch, LeaseRequest, NewFile, ReadOptions, ReadRange, RenameFlags, ShareRef,
         SnapshotPolicy, Want,
     },
     time, xml,
 };
-use crate::checksum::Checksum;
 use axum::{
     body::{Body, Bytes, to_bytes},
     http::StatusCode,
     response::Response,
 };
-use futures_util::StreamExt as _;
 use std::{ops::Range, sync::Arc, time::Duration};
 
 const MAX_XML_BYTES: u64 = 1024 * 1024;
-const MAX_RANGE_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_QUOTA_GIB: u64 = 102_400;
-const TIERS: [&str; 3] = ["TransactionOptimized", "Hot", "Cool"];
+
+mod content;
+mod links;
+mod shares;
+
+use content::{copy_file, list_ranges, put_range, put_range_from_url};
+use links::{create_hard_link, create_symbolic_link, read_symbolic_link};
+use shares::{create_share, list_shares, set_share_properties};
 
 pub(super) struct Context<'a> {
     pub(super) app: &'a Arc<App>,
@@ -44,11 +46,6 @@ pub(super) struct Context<'a> {
     pub(super) headers: Headers<'a>,
     pub(super) overrides: Overrides,
 }
-
-/// First versions of the NFS link operations: hard links with NFS over REST, symbolic links
-/// two versions later.
-const HARD_LINK_VERSION: &str = "2025-05-05";
-const SYMBOLIC_LINK_VERSION: &str = "2025-07-05";
 
 impl Context<'_> {
     /// Operations that exist only from a given version answer as a service that does not
@@ -455,74 +452,6 @@ pub(super) async fn execute(ctx: Context<'_>, body: Body) -> Result<Response> {
     }
 }
 
-/// A share snapshot is read-only; the link operations that write refuse one.
-fn refuse_snapshot(ctx: &Context<'_>) -> Result<()> {
-    if ctx.query.get("sharesnapshot").is_some() {
-        return Err(Error::InvalidQueryParameterValue);
-    }
-    Ok(())
-}
-
-async fn create_hard_link(ctx: &Context<'_>) -> Result<Response> {
-    ctx.require_version(HARD_LINK_VERSION)?;
-    refuse_snapshot(ctx)?;
-    match ctx.headers.required("x-ms-type")? {
-        value if value.eq_ignore_ascii_case("file") => {}
-        _ => return Err(Error::InvalidHeaderValue),
-    }
-    let source = ctx.share_path(ctx.headers.required("x-ms-file-target-file")?)?;
-    let node = ctx
-        .app
-        .store
-        .create_hard_link(ctx.live()?, ctx.target.path.clone(), source)
-        .await?;
-    let mut reply = with_node(StatusCode::CREATED, &node)?;
-    response::link_count_header(reply.headers_mut(), node.links)?;
-    Ok(reply)
-}
-
-async fn create_symbolic_link(ctx: &Context<'_>) -> Result<Response> {
-    ctx.require_version(SYMBOLIC_LINK_VERSION)?;
-    refuse_snapshot(ctx)?;
-    let text = ctx.headers.required("x-ms-link-text")?.to_owned();
-    let mut smb = ctx.headers.smb(true)?;
-    // Only the two times a symbolic link can set; the rest is the share's business.
-    smb.attributes = None;
-    let node = ctx
-        .app
-        .store
-        .create_symlink(
-            ctx.live()?,
-            ctx.target.path.clone(),
-            text,
-            Posix {
-                mode: None,
-                ..ctx.headers.posix()?
-            },
-            ctx.headers.metadata()?,
-            smb,
-        )
-        .await?;
-    with_node(StatusCode::CREATED, &node)
-}
-
-async fn read_symbolic_link(ctx: &Context<'_>) -> Result<Response> {
-    ctx.require_version(SYMBOLIC_LINK_VERSION)?;
-    let node = ctx
-        .app
-        .store
-        .read_symlink(ctx.share()?, ctx.target.path.clone())
-        .await?;
-    let mut reply = with_etag(StatusCode::OK, &node.etag, node.modified)?;
-    let text = node
-        .nfs
-        .as_ref()
-        .and_then(|nfs| nfs.link_text.as_deref())
-        .unwrap_or_default();
-    set(reply.headers_mut(), "x-ms-link-text", text)?;
-    Ok(reply)
-}
-
 async fn read_small(ctx: &Context<'_>, body: Body) -> Result<Bytes> {
     let length = ctx.headers.content_length()?;
     if length > MAX_XML_BYTES {
@@ -539,135 +468,6 @@ async fn read_small(ctx: &Context<'_>, body: Body) -> Result<Bytes> {
         return Err(Error::InvalidInput);
     }
     Ok(bytes)
-}
-
-fn quota(headers: &Headers<'_>) -> Result<Option<u64>> {
-    headers
-        .number("x-ms-share-quota")?
-        .map(|quota| {
-            if (1..=MAX_QUOTA_GIB).contains(&quota) {
-                Ok(quota)
-            } else {
-                Err(Error::InvalidHeaderValue)
-            }
-        })
-        .transpose()
-}
-
-fn tier(headers: &Headers<'_>) -> Result<Option<String>> {
-    headers
-        .get("x-ms-access-tier")?
-        .map(|tier| {
-            TIERS
-                .iter()
-                .find(|known| known.eq_ignore_ascii_case(tier))
-                .map(|known| (*known).to_owned())
-                .ok_or(Error::InvalidHeaderValue)
-        })
-        .transpose()
-}
-
-async fn list_shares(ctx: &Context<'_>) -> Result<Response> {
-    let includes = ctx.query.includes();
-    let marker = ctx.query.get("marker").filter(|marker| !marker.is_empty());
-    let after = marker
-        .map(|marker| {
-            let text = decode_marker(marker)?;
-            let (name, snapshot) = text
-                .split_once('\0')
-                .ok_or(Error::InvalidContinuationToken)?;
-            let snapshot = snapshot
-                .parse()
-                .map_err(|_| Error::InvalidContinuationToken)?;
-            Ok::<_, Error>((name.to_owned(), snapshot))
-        })
-        .transpose()?;
-    let limit = ctx.query.limit()?;
-    let prefix = ctx.query.get("prefix").unwrap_or_default();
-    let (shares, next) = ctx
-        .app
-        .store
-        .list_shares(
-            ctx.target.account.clone(),
-            ListSharesRequest {
-                prefix: prefix.to_owned(),
-                after,
-                limit,
-                snapshots: includes.iter().any(|include| include == "snapshots"),
-                deleted: includes.iter().any(|include| include == "deleted"),
-            },
-        )
-        .await?;
-    let view = ListSharesView {
-        prefix,
-        marker,
-        limit,
-        metadata: includes.iter().any(|include| include == "metadata"),
-    };
-    response::list_shares(&ctx.endpoint(), &view, &shares, next, ctx.now())
-}
-
-async fn create_share(ctx: &Context<'_>) -> Result<Response> {
-    let protocol = ctx
-        .headers
-        .get("x-ms-enabled-protocols")?
-        .map(Protocol::parse)
-        .transpose()?
-        .unwrap_or_default();
-    let squash = ctx
-        .headers
-        .get("x-ms-root-squash")?
-        .map(RootSquash::parse)
-        .transpose()?;
-    let access = ctx
-        .headers
-        .optional_flag("x-ms-enable-snapshot-virtual-directory-access")?;
-    // Root squash and snapshot directory access are NFS settings.
-    if protocol != Protocol::Nfs && (squash.is_some() || access.is_some()) {
-        return Err(Error::InvalidHeaderValue);
-    }
-    let options = ShareOptions {
-        protocol,
-        root_squash: (protocol == Protocol::Nfs).then(|| squash.unwrap_or_default()),
-        snapshot_virtual_directory_access: access.unwrap_or(true),
-    };
-    let share = ctx
-        .app
-        .store
-        .create_share(
-            ctx.live()?,
-            quota(&ctx.headers)?,
-            tier(&ctx.headers)?,
-            ctx.headers.metadata()?,
-            options,
-        )
-        .await?;
-    with_etag(StatusCode::CREATED, &share.etag, share.modified)
-}
-
-async fn set_share_properties(ctx: &Context<'_>) -> Result<Response> {
-    let nfs = NfsShareSettings {
-        root_squash: ctx
-            .headers
-            .get("x-ms-root-squash")?
-            .map(RootSquash::parse)
-            .transpose()?,
-        snapshot_virtual_directory_access: ctx
-            .headers
-            .optional_flag("x-ms-enable-snapshot-virtual-directory-access")?,
-    };
-    let share = ctx
-        .app
-        .store
-        .set_share_properties(
-            ctx.live()?,
-            ctx.lease_id()?,
-            quota(&ctx.headers)?,
-            tier(&ctx.headers)?,
-            nfs,
-        )
-        .await?;
-    with_etag(StatusCode::OK, &share.etag, share.modified)
 }
 
 fn lease_request(headers: &Headers<'_>) -> Result<LeaseRequest> {
@@ -960,272 +760,6 @@ async fn get_file(ctx: &Context<'_>) -> Result<Response> {
     if !head {
         *reply.body_mut() = Body::from_stream(read.body.into_stream());
     }
-    Ok(reply)
-}
-
-/// `x-ms-file-last-write-time` of a range write: `now` (default) or `preserve`, in any case.
-fn last_write_spec(ctx: &Context<'_>) -> Result<TimeSpec> {
-    match ctx.headers.get("x-ms-file-last-write-time")? {
-        None => Ok(TimeSpec::Now),
-        Some(value) if value.eq_ignore_ascii_case("now") => Ok(TimeSpec::Now),
-        Some(value) if value.eq_ignore_ascii_case("preserve") => Ok(TimeSpec::Preserve),
-        Some(_) => Err(Error::InvalidHeaderValue),
-    }
-}
-
-async fn put_range(ctx: &Context<'_>, body: Body) -> Result<Response> {
-    let (offset, length) = ctx
-        .headers
-        .range()?
-        .ok_or(Error::MissingRequiredHeader)?
-        .exact()?;
-    let last_write = last_write_spec(ctx)?;
-    let request_length = ctx.headers.content_length()?;
-    match ctx.headers.required("x-ms-write")? {
-        "clear" => {
-            if request_length != 0 {
-                return Err(Error::InvalidHeaderValue);
-            }
-            let node = ctx
-                .app
-                .store
-                .clear_range(
-                    ctx.live()?,
-                    ctx.target.path.clone(),
-                    ctx.lease_id()?,
-                    offset,
-                    length,
-                    last_write,
-                )
-                .await?;
-            range_response(&node, None)
-        }
-        "update" => {
-            if length > MAX_RANGE_BYTES || request_length != length {
-                return Err(Error::InvalidHeaderValue);
-            }
-            let checksum = match (
-                ctx.headers.md5("content-md5")?,
-                ctx.headers.crc64("x-ms-content-crc64")?,
-            ) {
-                (Some(md5), None) => Some(Checksum::Md5(md5)),
-                (None, Some(crc)) => Some(Checksum::Crc64(crc)),
-                (None, None) => None,
-                (Some(_), Some(_)) => return Err(Error::InvalidHeaderValue),
-            };
-            write_range(ctx, (offset, length), checksum, last_write, body).await
-        }
-        _ => Err(Error::InvalidHeaderValue),
-    }
-}
-
-/// Stages `body` and publishes it at `range` (`offset`, `length`), as Put Range
-/// and Put Range From URL both do.
-async fn write_range(
-    ctx: &Context<'_>,
-    (offset, length): (u64, u64),
-    checksum: Option<Checksum>,
-    last_write: TimeSpec,
-    body: Body,
-) -> Result<Response> {
-    let mut upload = ctx.app.store.begin_upload(length).await?;
-    let receive = async {
-        let mut data = body.into_data_stream();
-        while let Some(chunk) = data.next().await {
-            upload
-                .append(&chunk.map_err(|_| Error::InvalidInput)?)
-                .await?;
-        }
-        Ok::<_, Error>(())
-    };
-    tokio::time::timeout(ctx.app.config.upload_timeout, receive)
-        .await
-        .map_err(|_| Error::OperationTimedOut)??;
-    let staged = upload.finish(checksum).await?;
-    let checksums = (
-        STANDARD_MD5.encode(staged.checksums.md5),
-        staged.checksums.response(Some(Checksum::Crc64(0))).1,
-    );
-    let node = ctx
-        .app
-        .store
-        .put_range(
-            ctx.live()?,
-            ctx.target.path.clone(),
-            ctx.lease_id()?,
-            offset,
-            staged,
-            last_write,
-        )
-        .await?;
-    range_response(
-        &node,
-        Some((checksums, matches!(checksum, Some(Checksum::Crc64(_))))),
-    )
-}
-
-/// Put Range From URL: writes a range read from a file on this instance and account.
-async fn put_range_from_url(ctx: &Context<'_>) -> Result<Response> {
-    let (offset, length) = ctx
-        .headers
-        .range()?
-        .ok_or(Error::MissingRequiredHeader)?
-        .exact()?;
-    let source_range = ByteRange::parse(ctx.headers.required("x-ms-source-range")?)?;
-    if ctx.headers.required("x-ms-write")? != "update"
-        || length > MAX_RANGE_BYTES
-        || source_range.exact()?.1 != length
-        || ctx.headers.content_length()? != 0
-    {
-        return Err(Error::InvalidHeaderValue);
-    }
-    let last_write = last_write_spec(ctx)?;
-    let (source, query) = local_source(ctx, ctx.headers.required("x-ms-copy-source")?)?;
-    if source.account != ctx.target.account {
-        return Err(Error::CannotVerifyCopySource);
-    }
-    let from = ShareRef {
-        account: source.account.clone(),
-        share: source.share.clone().ok_or(Error::InvalidHeaderValue)?,
-        snapshot: query.snapshot("sharesnapshot")?,
-    };
-    let read = ctx
-        .app
-        .store
-        .read_file(
-            from,
-            source.path,
-            ReadOptions {
-                lease_id: None,
-                conditions: Default::default(),
-                range: Some(ReadRange {
-                    start: source_range.start,
-                    end: source_range.end,
-                }),
-                want_md5: false,
-                with_body: true,
-            },
-        )
-        .await?;
-    if read
-        .range
-        .is_none_or(|range| range.end - range.start != length)
-    {
-        return Err(Error::InvalidRange);
-    }
-    write_range(
-        ctx,
-        (offset, length),
-        None,
-        last_write,
-        Body::from_stream(read.body.into_stream()),
-    )
-    .await
-}
-
-use base64::{Engine as _, engine::general_purpose::STANDARD as STANDARD_MD5};
-
-type Checksums = ((String, String), bool);
-
-fn range_response(node: &super::model::NodeInfo, checksums: Option<Checksums>) -> Result<Response> {
-    let mut reply = empty(StatusCode::CREATED);
-    let headers = reply.headers_mut();
-    etag_headers(headers, &node.etag, node.modified)?;
-    set(headers, "x-ms-request-server-encrypted", "true")?;
-    set(
-        headers,
-        "x-ms-file-last-write-time",
-        &time::iso_ticks(node.last_write),
-    )?;
-    if let Some(((md5, crc64), wants_crc64)) = checksums {
-        set(headers, "content-md5", &md5)?;
-        if wants_crc64 {
-            set(headers, "x-ms-content-crc64", &crc64)?;
-        }
-    }
-    Ok(reply)
-}
-
-async fn list_ranges(ctx: &Context<'_>) -> Result<Response> {
-    let window = ctx.headers.range()?.map(|range: ByteRange| {
-        range.start..range.end.map_or(u64::MAX, |end| end.saturating_add(1))
-    });
-    let previous = ctx.query.snapshot("prevsharesnapshot")?;
-    let listing = ctx
-        .app
-        .store
-        .list_ranges(
-            ctx.share()?,
-            ctx.target.path.clone(),
-            ctx.lease_id()?,
-            window,
-            previous,
-        )
-        .await?;
-    let mut reply = response::ranges(&listing.ranges, &listing.cleared);
-    etag_headers(
-        reply.headers_mut(),
-        &listing.info.etag,
-        listing.info.modified,
-    )?;
-    set(
-        reply.headers_mut(),
-        "x-ms-content-length",
-        &listing.info.length.to_string(),
-    )?;
-    Ok(reply)
-}
-
-async fn copy_file(ctx: &Context<'_>) -> Result<Response> {
-    let url = ctx.headers.required("x-ms-copy-source")?;
-    let (source, query) = local_source(ctx, url)?;
-    if source.account != ctx.target.account {
-        return Err(Error::CannotVerifyCopySource);
-    }
-    let from = ShareRef {
-        account: source.account.clone(),
-        share: source.share.clone().ok_or(Error::InvalidHeaderValue)?,
-        snapshot: query.snapshot("sharesnapshot")?,
-    };
-    let copy_mode_override = match ctx.headers.get("x-ms-file-copy-mode")? {
-        None | Some("source") => false,
-        Some("override") => true,
-        Some(_) => return Err(Error::InvalidHeaderValue),
-    };
-    let metadata: Option<Metadata> = ctx
-        .headers
-        .has_metadata()
-        .then(|| ctx.headers.metadata())
-        .transpose()?;
-    let ignore_readonly = ctx.headers.flag("x-ms-file-copy-ignore-read-only")?
-        || ctx.headers.flag("x-ms-file-copy-ignore-readonly")?;
-    let request = CopyRequest {
-        dest_lease: ctx.lease_id()?,
-        ignore_readonly,
-        metadata,
-        smb: copy_mode_override
-            .then(|| ctx.headers.smb(true))
-            .transpose()?,
-        nfs: ctx.headers.nfs_copy()?,
-    };
-    let clean_url = url.split('?').next().unwrap_or(url).to_owned();
-    let (node, copy_id) = ctx
-        .app
-        .store
-        .copy_file(
-            CopySource {
-                target: from,
-                path: source.path,
-                url: clean_url,
-            },
-            ctx.live()?,
-            ctx.target.path.clone(),
-            request,
-        )
-        .await?;
-    let mut reply = with_etag(StatusCode::ACCEPTED, &node.etag, node.modified)?;
-    set(reply.headers_mut(), "x-ms-copy-id", &copy_id)?;
-    set(reply.headers_mut(), "x-ms-copy-status", "success")?;
     Ok(reply)
 }
 
