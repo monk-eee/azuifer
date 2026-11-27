@@ -566,6 +566,12 @@ fn check_live_blob_query_malformed_xml() -> Result<()> {
 
 #[test]
 #[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_invalid_system_container_name() -> Result<()> {
+    check_live_rejection(request_errors::Case::InvalidSystemContainerName)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
 fn check_live_blob_mutation_block_list_selectors() -> Result<()> {
     live_mutation(mutations::Case::BlockListSelectors)
 }

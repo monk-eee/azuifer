@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "invalid_system_container_name",
+  "api_version": "2023-11-03",
+  "response": {
+    "status": 400,
+    "request_id": "matches",
+    "api_version": "matches",
+    "header_code": "invalid_resource_name",
+    "body": {
+      "kind": "empty"
+    }
+  }
+}

@@ -7,11 +7,11 @@ The target is the five Azure Storage REST services, using the operations and aut
 | Service | Operations | Advertised operation/auth pairs | Unsupported operations | Journey exchanges | Extra grid exchanges | Target |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Blob | 55 | 303 | 1 | 256 | 244 | 500 |
-| DFS | 18 | 106 | 0 | 108 | 86 | 194 |
-| FileREST | 44 | 197 | 0 | 131 | 153 | 284 |
+| DFS | 18 | 106 | 0 | 117 | 86 | 203 |
+| FileREST | 44 | 197 | 0 | 169 | 153 | 322 |
 | Queue | 17 | 72 | 0 | 49 | 52 | 101 |
 | Table | 19 | 72 | 1 | 65 | 52 | 117 |
-| **Total** | **153** | **750** | **2** | **609** | **587** | **1,196** |
+| **Total** | **153** | **750** | **2** | **656** | **587** | **1,243** |
 
 This is a finite coverage target, not a claim that every possible input is covered. It tests each advertised operation/auth pair once and adds separate exchanges for meaningful branches: conditions, checksums and limits, continuations, post-mutation state, failure atomicity, expiry, feature switches, and shared Blob/DFS state. It does not multiply every branch by every credential. Add a row when an API version, profile, or new variant changes contract behavior. Keep newer-version evidence separate until that version is adopted; a client reaching the emulator through version fallback is not evidence for the newer version. SMB and NFS wire exchanges, control-plane APIs, infrastructure performance, and emulator-only fault injection are out of scope.
 
@@ -51,6 +51,11 @@ The current target supports `flat`, same-account Blob `copy` with an authorized 
 
 ### Blob
 
+Read-only HEAD checks found neither `$root` nor `$logs` on the current target.
+B-36 still needs a disposable singleton profile: neither container was created,
+populated, or listed. B-46 isolates the invalid-name rejection without accessing
+either singleton or changing account settings.
+
 | ID | Profile | Auth | Ordered exchanges | Count | Evidence |
 | --- | --- | --- | --- | ---: | --- |
 | B-01 | flat | Bearer | `Get User Delegation Key` with a bounded window | 1 | [fixture](../../tests/contracts/cassettes/blob-get-user-delegation-key.json) |
@@ -88,7 +93,7 @@ The current target supports `flat`, same-account Blob `copy` with an authorized 
 | B-33 | flat | Bearer | `Query Blob Contents` CSV with projection and predicate; JSON projection; query all rows and verify Avro progress/end; empty result; read Avro conversion errors with byte offsets; reject invalid SQL; read original unchanged | 7 | [fixture](../../tests/contracts/cassettes/blob-query-avro.json) |
 | B-34 | config | Mixed | `Set Blob Service Properties@Bearer` isolated CORS rule; `Preflight Blob Request@Anonymous` allowed; denied origin; denied method; restore original properties; verify restored | 6 | pending |
 | B-35 | config | Mixed | `Set Container ACL@Bearer` Blob-level public; `Get Container ACL@Bearer`; `Get Blob@Anonymous`; deny anonymous listing; set container-level public; `List Blobs@Anonymous`; revert to private; deny anonymous read | 8 | pending |
-| B-36 | config | Bearer | Create test-only root container; put a singleton-path root blob; read via explicit root path; list root; list dedicated logs container by explicit name; reject invalid system container name | 6 | pending |
+| B-36 | config | Bearer | Create test-only root container; put a singleton-path root blob; read via explicit root path; list root; list dedicated logs container by explicit name | 5 | pending |
 | B-37 | config | Anonymous | `Static website request` index; configured 404 page; nested asset; unsupported HTTP method | 4 | pending |
 | B-38 | geo | Bearer | `Get Blob Service Stats` on readable secondary | 1 | pending |
 | B-39 | flat | UserDelegationSAS | Read in-window; deny expired token; deny future start; read with in-window signed start; deny still-unexpired SAS after the short key expires | 5 | [fixture](../../tests/contracts/cassettes/blob-user-delegation-sas-windows.json) |
@@ -98,11 +103,15 @@ The current target supports `flat`, same-account Blob `copy` with an authorized 
 | B-43 | flat | Bearer | Reject malformed Query Blob Contents XML before reading blob data, checking status, code, message and request correlation | 1 | [fixture](../../tests/contracts/cassettes/blob-query-malformed-xml.json) |
 | B-44 | flat | Bearer | Reject a truncated container-scoped Submit Batch part before executing subrequests, checking status and request correlation | 1 | [fixture](../../tests/contracts/cassettes/blob-batch-truncated-part.json) |
 | B-45 | copy | Bearer | Abort a genuinely pending copy on a target that reliably queues; verify the aborted destination | 2 | pending |
+| B-46 | flat | Bearer | Reject a container-properties HEAD on a synthetic invalid dollar-prefixed name | 1 | [fixture](../../tests/contracts/cassettes/blob-invalid-system-container-name.json) |
 
 ### DFS and Blob/DFS
 
 Rows D-11 through D-14 track the live verification still owed by
 [ADR-0030](../adr.d/0030-read-path-range-checksums-and-create-path-expiry.md).
+D-15 tracks [ADR-0031](../adr.d/0031-check-search-rights-in-recursive-acl-changes.md):
+use a bearer owner without an ACL-bypassing data role and a separate approved
+verifier to read the ACLs on unreachable entries.
 
 | ID | Profile | Auth | Ordered exchanges | Count | Evidence |
 | --- | --- | --- | --- | ---: | --- |
@@ -120,6 +129,7 @@ Rows D-11 through D-14 track the live verification still owed by
 | D-12 | hns | Bearer | Create Path on a file with RelativeToNow; append bytes; flush; read the deadline through Blob HEAD; after the deadline check that DFS cannot read the file; check that Blob cannot read it either; create a file with Absolute expiry; verify the deadline; recreate it with NeverExpire; check that the old deadline is cleared | 10 | pending |
 | D-13 | hns | Bearer | Send expiry headers on directory creation; check whether the directory exists; try RelativeToCreation on a file; check the resulting file and deadline if present; send a past Absolute time; send a nonnumeric relative time; combine NeverExpire with a time; send an unknown option; send a time without an option; send an option without a time | 10 | pending |
 | D-14 | hns | Bearer | Create a file with a future deadline; rename it; check the old name is gone; read the deadline on the new name through Blob HEAD; read the renamed file before the deadline; after the deadline check DFS visibility; check Blob visibility | 7 | pending |
+| D-15 | hns | Bearer | Set Access Control Recursive with `forceFlag=false` on a tree with an intermediate directory at mode `0600` and record the first denial; verify an unvisited sibling's ACL; repeat on an equivalent tree with `forceFlag=true` and record failed entries, diagnostics and continuation; verify a blocked child's ACL; verify a reachable sibling's ACL; recursively set an ACL that removes execute on the requested directory of a fresh tree; verify the child ACL from that same call; repeat with the requested directory now not searchable; check the child's ACL after the repeat | 9 | pending |
 
 ### FileREST
 
@@ -131,6 +141,11 @@ permissions. Use `2025-07-05` for the NFS comparisons unless a row explicitly
 probes another version. Keep those live recordings separate from the
 `2023-11-03` baseline; an emulator response obtained through version fallback
 is not evidence that the newer Azure version is implemented.
+
+F-24 through F-27 track [ADR-0032](../adr.d/0032-check-copy-source-sas-and-convert-binary-security-descriptors.md).
+Use disposable SMB shares in a separate Shared Key-enabled target. Record
+the `2024-02-04` copy diagnostics and the versioned permission calls separately
+from the baseline.
 
 | ID | Profile | Auth | Ordered exchanges | Count | Evidence |
 | --- | --- | --- | --- | ---: | --- |
@@ -157,6 +172,10 @@ is not evidence that the newer Azure version is implemented.
 | F-21 | files-nfs | Bearer | List a directory containing a symbolic link and check entry type and length against the synthetic link text; read the link's file properties and compare Content-Length | 2 | pending |
 | F-22 | files-nfs | Bearer | Get Share Properties for a premium NFS share and record access-tier and quota fields; list the same share and compare the reported fields | 2 | pending |
 | F-23 | files-nfs | Bearer | Create File over one name of a nonempty hard-linked file; read the recreated name and its ID, link count and data; read the sibling name and compare its ID, link count and data | 3 | pending |
+| F-24 | files + keys + copy | Mixed | Copy File with a read-only source SAS; read copied bytes; Put Range From URL with a read-only source SAS; verify written range; try Copy File with a write-only source SAS; check for a destination; try Put Range From URL with an expired source SAS; verify destination is unchanged; try Copy File with destination SAS and no source SAS; try Put Range From URL with destination SAS and no source SAS | 10 | pending |
+| F-25 | files + keys + copy | SharedKey | Try Copy File with a tampered source SAS at `2024-02-04` and check source error headers and body; check for a destination; try Put Range From URL with an expired source SAS at the same version and check source diagnostics; verify destination is unchanged | 4 | pending |
+| F-26 | files + keys (SMB) | SharedKey | Create Permission with a known binary descriptor at `2024-11-04`; Get Permission as binary; get as SDDL and compare alias and flag spelling; create equivalent SDDL and compare the returned key; try malformed binary; try a descriptor with a SACL; try an object ACE; try a callback ACE; try an unknown body format; try an unknown Get Permission header format; send valid SDDL with a binary format label at `2023-11-03`; get that permission at `2023-11-03` and check response fields | 12 | pending |
+| F-27 | files + keys (SMB) | SharedKey | Create File with a binary permission header at `2025-01-05`; read the stored permission key; Set File Properties with a different binary permission; read the new key; Create Directory with a binary permission; read the stored key; Set Directory Properties with a different binary permission; read the new key; try a valid binary header at the 8 KiB base64 boundary; try one above the boundary; send SDDL with the binary format header at `2024-11-04`; read that permission back | 12 | pending |
 
 ### Queue
 
