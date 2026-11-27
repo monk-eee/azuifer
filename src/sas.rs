@@ -90,27 +90,39 @@ pub(crate) fn parse_time(value: &str) -> Result<SystemTime> {
         Some((date, time)) => (date, Some(time.strip_suffix('Z').ok_or(bad)?)),
         None => (value, None),
     };
-    let mut parts = date.split('-');
-    let mut number = |digits: usize| -> Result<i64> {
-        let part = parts.next().ok_or(bad)?;
+    // Every field is a fixed number of ASCII digits: `str::parse` would also take a sign.
+    let field = |part: Option<&str>, digits: usize| -> Result<i64> {
+        let part = part.ok_or(bad)?;
         if part.len() != digits || !part.bytes().all(|b| b.is_ascii_digit()) {
             return Err(bad);
         }
         part.parse().map_err(|_| bad)
     };
-    let (year, month, day) = (number(4)?, number(2)?, number(2)?);
-    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    let mut parts = date.split('-');
+    let (year, month, day) = (
+        field(parts.next(), 4)?,
+        field(parts.next(), 2)?,
+        field(parts.next(), 2)?,
+    );
+    if parts.next().is_some()
+        || !(1..=12).contains(&month)
+        || !(1..=days_in(year, month)).contains(&day)
+    {
         return Err(bad);
     }
     let mut seconds = days_from_civil(year, month, day) * 86_400;
     let mut millis = 0;
     if let Some(time) = time {
-        let (clock, fraction) = time.split_once('.').unwrap_or((time, ""));
+        let (clock, fraction) = match time.split_once('.') {
+            Some((clock, fraction)) if (1..=7).contains(&fraction.len()) => (clock, fraction),
+            Some(_) => return Err(bad),
+            None => (time, ""),
+        };
         let mut fields = clock.split(':');
-        let hour: i64 = fields.next().and_then(|v| v.parse().ok()).ok_or(bad)?;
-        let minute: i64 = fields.next().and_then(|v| v.parse().ok()).ok_or(bad)?;
-        let second: i64 = match fields.next() {
-            Some(value) => value.parse().map_err(|_| bad)?,
+        let hour = field(fields.next(), 2)?;
+        let minute = field(fields.next(), 2)?;
+        let second = match fields.next() {
+            Some(value) => field(Some(value), 2)?,
             None => 0,
         };
         if fields.next().is_some() || hour > 23 || minute > 59 || second > 59 {
@@ -125,6 +137,15 @@ pub(crate) fn parse_time(value: &str) -> Result<SystemTime> {
     }
     let seconds = u64::try_from(seconds).map_err(|_| bad)?;
     Ok(UNIX_EPOCH + Duration::from_secs(seconds) + Duration::from_millis(millis))
+}
+
+fn days_in(year: i64, month: i64) -> i64 {
+    match month {
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
 }
 
 // Howard Hinnant's days-from-civil algorithm.
@@ -173,6 +194,7 @@ pub(crate) fn format_time(time: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hostile;
 
     fn secs(value: &str) -> u64 {
         parse_time(value)
@@ -222,5 +244,39 @@ mod tests {
         assert!(window("2030-06-01").is_err());
         assert!(check_window(None, None, parse_time("2029-06-01").unwrap()).is_err());
         assert!(Sas::from_query(&Query::new()).unwrap().is_none());
+    }
+
+    #[test]
+    fn hostile_times_are_refused_and_hostile_text_never_panics() {
+        for bad in [
+            "2023-11-03T-9223372036854775808:00Z",
+            "2023-11-03T-1:00Z",
+            "2023-11-03T+1:00Z",
+            "2023-11-03T12:-5Z",
+            "2023-11-03T12:30:+5Z",
+            "2023-11-03T1:30Z",
+            "2023-11-03T12:3Z",
+            "2023-11-03T12:30:5Z",
+            "2023-11-03T12:30:15.Z",
+            "2023-11-03T24:00Z",
+            "2023-02-31",
+            "2023-02-29",
+            "2023-04-31",
+            "2023-00-10",
+            "0000-01-01",
+            "2023-11-03T12:30:15.1234567890123456789012345678901234567890Z",
+            "+023-11-03",
+            "2023-11-03TZ",
+            "T12:30Z",
+        ] {
+            assert!(parse_time(bad).is_err(), "{bad}");
+        }
+        assert!(parse_time("2024-02-29").is_ok(), "a leap day is a day");
+        for text in hostile::variants("2023-11-03T12:30:15.123Z") {
+            if let Ok(time) = parse_time(&text) {
+                let seconds = time.duration_since(UNIX_EPOCH).unwrap().as_secs();
+                assert_eq!(secs(&format_time(time)), seconds, "{text:?}");
+            }
+        }
     }
 }

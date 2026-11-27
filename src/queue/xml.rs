@@ -622,4 +622,27 @@ mod tests {
         assert!(xml.contains("<Queue><Name>b</Name><Metadata></Metadata></Queue>"));
         assert!(xml.ends_with("<NextMarker></NextMarker></EnumerationResults>"));
     }
+
+    #[test]
+    fn hostile_documents_are_answered_without_panic() {
+        crate::hostile::sweep(
+            &["<QueueMessage><MessageText>hi &amp; <![CDATA[there]]></MessageText></QueueMessage>"],
+            ("<A>", "</A>"),
+            |text| {
+                let _ = message_text(text.as_bytes());
+            },
+        );
+        let acl = "<SignedIdentifiers><SignedIdentifier><Id>a</Id><AccessPolicy><Start>2020-01-01T00:00:00Z</Start><Expiry>2099-01-01T00:00:00Z</Expiry><Permission>raup</Permission></AccessPolicy></SignedIdentifier></SignedIdentifiers>";
+        crate::hostile::sweep(
+            &[acl],
+            ("<SignedIdentifier>", "</SignedIdentifier>"),
+            |text| {
+                let _ = parse_acl(text.as_bytes());
+            },
+        );
+        let properties = "<StorageServiceProperties><Logging><Version>1.0</Version><Read>true</Read><RetentionPolicy><Enabled>true</Enabled><Days>7</Days></RetentionPolicy></Logging><Cors><CorsRule><AllowedOrigins>*</AllowedOrigins><AllowedMethods>GET</AllowedMethods><MaxAgeInSeconds>10</MaxAgeInSeconds></CorsRule></Cors></StorageServiceProperties>";
+        crate::hostile::sweep(&[properties], ("<A>", "</A>"), |text| {
+            let _ = parse_properties(text.as_bytes());
+        });
+    }
 }

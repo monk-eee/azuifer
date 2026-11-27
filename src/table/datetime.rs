@@ -221,4 +221,19 @@ mod tests {
             "2023-11-14T22:13:20.1234567Z"
         );
     }
+
+    #[test]
+    fn hostile_timestamps_are_answered_without_panic() {
+        crate::hostile::sweep(
+            &[
+                "2008-07-10T12:34:56.1234567Z",
+                "2024-02-29T00:00:00Z",
+                "9999-12-31T23:59:59.9999999Z",
+            ],
+            ("0", "Z"),
+            |text| {
+                let _ = Ticks::parse(text);
+            },
+        );
+    }
 }

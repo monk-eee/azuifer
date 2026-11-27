@@ -86,4 +86,16 @@ mod tests {
             assert!(parse(bad.as_bytes()).is_err(), "{bad}");
         }
     }
+
+    #[test]
+    fn hostile_policy_documents_are_answered_without_panic() {
+        let seed = "<SignedIdentifiers><SignedIdentifier><Id>read</Id><AccessPolicy><Start>2020-01-01T00:00:00.0000000Z</Start><Expiry>2099-01-01T00:00:00Z</Expiry><Permission>rwdl</Permission></AccessPolicy></SignedIdentifier></SignedIdentifiers>";
+        crate::hostile::sweep(
+            &[seed],
+            ("<SignedIdentifier>", "</SignedIdentifier>"),
+            |text| {
+                let _ = parse(text.as_bytes());
+            },
+        );
+    }
 }

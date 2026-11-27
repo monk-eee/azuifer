@@ -601,4 +601,29 @@ mod tests {
             .key_bounds();
         assert!(conflict.empty);
     }
+
+    #[test]
+    fn hostile_filters_are_answered_without_panic_or_overflow() {
+        let seed = "(PartitionKey eq 'a''b' and RowKey ge 'x') or not (T gt datetime'2008-07-10T00:00:00Z' \
+                    and G eq guid'a455c695-df98-5678-aaaa-81d3367e5a34') or X eq X'AB01' \
+                    or I lt -5 or L eq 5000000000L or D le 1.5e3 or B";
+        crate::hostile::sweep(&[seed], ("(", ")"), |text| {
+            if let Ok(expr) = parse(text) {
+                let _ = expr.matches(&|_| Some(Cow::Owned(Value::Int32(1))));
+                let _ = expr.key_bounds();
+            }
+        });
+        for filter in [
+            "not ".repeat(100_000) + "A",
+            "(".repeat(100_000) + "A" + &")".repeat(100_000),
+            "A eq 1 and ".repeat(100_000) + "A eq 1",
+            "A eq 1 or ".repeat(100_000) + "A eq 1",
+            format!("S eq '{}'", "''".repeat(500_000)),
+            format!("X eq X'{}'", "AB".repeat(500_000)),
+        ] {
+            assert!(
+                parse(&filter).is_err() || filter.starts_with("S eq") || filter.starts_with("X eq")
+            );
+        }
+    }
 }

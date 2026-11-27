@@ -1189,6 +1189,36 @@ fn expiry(
 }
 
 #[test]
+fn an_expiry_too_far_ahead_to_report_is_refused_and_leaves_the_blob_usable() {
+    let server = Emulator::start(None, &[]);
+    server.create_container();
+    let blob = "/testaccount/container/a.txt";
+    assert_eq!(server.put_block_blob(blob, b"x").status(), 201);
+    for option in ["RelativeToNow", "RelativeToCreation"] {
+        for millis in ["9000000000000000", "9223372036854775807", "253402300800000"] {
+            error(
+                expiry(&server, blob, option, Some(millis), &[]),
+                400,
+                "InvalidHeaderValue",
+            );
+            let head = server.head(blob);
+            assert_eq!(
+                head.status(),
+                200,
+                "{option} {millis} must not break the blob"
+            );
+            assert!(!has_header(&head, "x-ms-expiry-time"));
+        }
+    }
+    let year = "31536000000";
+    assert_eq!(
+        expiry(&server, blob, "RelativeToNow", Some(year), &[]).status(),
+        200
+    );
+    assert!(has_header(&server.head(blob), "x-ms-expiry-time"));
+}
+
+#[test]
 fn service_statistics_exist_only_on_the_secondary_endpoint() {
     let server = Emulator::start(None, &[]);
     let port = server.blob.rsplit(':').next().unwrap().to_owned();

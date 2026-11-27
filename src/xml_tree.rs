@@ -161,4 +161,19 @@ mod tests {
         }
         assert!(parse(&b"<A>".repeat(40)).is_err());
     }
+
+    #[test]
+    fn hostile_documents_are_refused_or_parsed_within_their_bounds() {
+        let seed = "<?xml version=\"1.0\"?><Root a=\"1\"><A>x &amp; y &#65;<![CDATA[z]]></A><!--c--><B/><C><D>1</D></C></Root>";
+        crate::hostile::sweep(&[seed], ("<A>", "</A>"), |text| {
+            if let Ok(tree) = parse(text.as_bytes()) {
+                assert!(!tree.name.is_empty());
+            }
+        });
+        let wide = format!("<Root>{}</Root>", "<A/>".repeat(100_000));
+        assert_eq!(parse(wide.as_bytes()).err(), Some(Error::InvalidXml));
+        let deep = format!("{}{}", "<A>".repeat(100_000), "</A>".repeat(100_000));
+        assert_eq!(parse(deep.as_bytes()).err(), Some(Error::InvalidXml));
+        assert_eq!(parse(b"<A>\xff</A>").err(), Some(Error::InvalidXml));
+    }
 }

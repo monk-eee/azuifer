@@ -382,4 +382,12 @@ mod tests {
         );
         assert!(ServiceProperties::parse(too_many.as_bytes()).is_err());
     }
+
+    #[test]
+    fn hostile_documents_are_answered_without_panic() {
+        let seed = "<StorageServiceProperties><Logging><Version>1.0</Version><Delete>true</Delete><Read>true</Read><Write>true</Write><RetentionPolicy><Enabled>true</Enabled><Days>7</Days></RetentionPolicy></Logging><HourMetrics><Version>1.0</Version><Enabled>true</Enabled><IncludeAPIs>true</IncludeAPIs></HourMetrics><Cors><CorsRule><AllowedOrigins>https://a.example</AllowedOrigins><AllowedMethods>GET,PUT</AllowedMethods><AllowedHeaders>x-ms-*</AllowedHeaders><ExposedHeaders>*</ExposedHeaders><MaxAgeInSeconds>60</MaxAgeInSeconds></CorsRule></Cors><DefaultServiceVersion>2023-11-03</DefaultServiceVersion><StaticWebsite><Enabled>true</Enabled><IndexDocument>i.html</IndexDocument></StaticWebsite></StorageServiceProperties>";
+        crate::hostile::sweep(&[seed], ("<CorsRule>", "</CorsRule>"), |text| {
+            let _ = ServiceProperties::parse(text.as_bytes());
+        });
+    }
 }

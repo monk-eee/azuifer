@@ -19,6 +19,10 @@ pub(crate) enum ExpiryOption {
     NeverExpire,
 }
 
+/// The first instant an HTTP date cannot show (the year 10000). A later deadline could be
+/// stored but never reported in `x-ms-expiry-time`, which would fail every read of the blob.
+const MAX_DEADLINE_MILLIS: i64 = 253_402_300_800_000;
+
 impl ExpiryOption {
     pub(crate) fn parse(headers: &HeaderMap) -> Result<Self> {
         let option = header(headers, "x-ms-expiry-option")?.ok_or(Error::MissingHeader)?;
@@ -58,7 +62,7 @@ impl ExpiryOption {
                 .ok_or(Error::InvalidHeader)?,
             Self::Absolute(at) => at,
         };
-        if deadline <= now {
+        if deadline <= now || deadline >= MAX_DEADLINE_MILLIS {
             return Err(Error::InvalidHeader);
         }
         Ok(Some(deadline))
@@ -169,5 +173,27 @@ mod tests {
             http_time(1_700_000_000_999).unwrap(),
             "Tue, 14 Nov 2023 22:13:20 GMT"
         );
+    }
+
+    #[test]
+    fn a_deadline_an_http_date_cannot_show_is_refused() {
+        let now = 1_700_000_000_000;
+        for option in [
+            ExpiryOption::RelativeToNow(u64::MAX),
+            ExpiryOption::RelativeToNow(i64::MAX as u64),
+            ExpiryOption::RelativeToNow(9_000_000_000_000_000),
+            ExpiryOption::RelativeToCreation(9_000_000_000_000_000),
+            ExpiryOption::Absolute(i64::MAX),
+            ExpiryOption::Absolute(MAX_DEADLINE_MILLIS),
+        ] {
+            assert_eq!(
+                option.deadline(0, now),
+                Err(Error::InvalidHeader),
+                "{option:?}"
+            );
+        }
+        let last = ExpiryOption::Absolute(MAX_DEADLINE_MILLIS - 1);
+        assert_eq!(last.deadline(0, now), Ok(Some(MAX_DEADLINE_MILLIS - 1)));
+        assert!(http_time(MAX_DEADLINE_MILLIS - 1).is_ok());
     }
 }

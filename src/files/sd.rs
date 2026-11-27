@@ -421,4 +421,45 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn hostile_descriptors_are_refused_or_convert_back_exactly() {
+        let good = simple_binary();
+        let mut forged: Vec<Vec<u8>> = (0..good.len())
+            .flat_map(|at| {
+                [0x00u8, 0x01, 0x7f, 0x80, 0xff].map(|byte| {
+                    let mut bytes = good.clone();
+                    bytes[at] = byte;
+                    bytes
+                })
+            })
+            .collect();
+        forged.extend((0..good.len()).map(|length| good[..length].to_vec()));
+        let mut many = good.clone();
+        many[24..26].copy_from_slice(&u16::MAX.to_le_bytes());
+        forged.push(many);
+        let mut huge = vec![1, 0, 0x04, 0x80];
+        huge.extend([0xff; 16]);
+        forged.push(huge);
+        for bytes in forged {
+            if let Ok(sddl) = sddl_from_binary(&STANDARD.encode(&bytes)) {
+                let back = binary_from_sddl(&sddl).expect("an SDDL it produced converts back");
+                assert_eq!(sddl_from_binary(&back).as_deref(), Ok(sddl.as_str()));
+            }
+        }
+        crate::hostile::sweep(
+            &[
+                "O:S-1-5-21-1-2-3-4G:BAD:PAI(A;OICI;FA;;;SY)(D;CIIO;0x1200a9;;;S-1-5-21-1-2-3-500)(A;;FRFX;;;WD)",
+            ],
+            ("(A;;FA;;;SY)", ""),
+            |text| {
+                if let Ok(binary) = binary_from_sddl(text) {
+                    assert!(sddl_from_binary(&binary).is_ok(), "{text:?}");
+                }
+            },
+        );
+        crate::hostile::sweep(&["AQAEgDA8AAA="], ("A", "="), |text| {
+            let _ = sddl_from_binary(text);
+        });
+    }
 }

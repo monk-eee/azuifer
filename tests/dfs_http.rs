@@ -3074,3 +3074,24 @@ fn append_data_is_limited_by_the_memory_quota_and_the_upload_timeout() {
         "{reply}"
     );
 }
+
+#[test]
+fn create_path_refuses_an_expiry_too_far_ahead_to_report() {
+    let server = Emulator::start(&[]);
+    server.filesystem();
+    let file = format!("{LAKE}/far.txt");
+    dfs_error(
+        server.dfs(
+            "PUT",
+            &format!("{file}?resource=file"),
+            &[
+                ("x-ms-expiry-option", "RelativeToNow"),
+                ("x-ms-expiry-time", "9000000000000000"),
+            ],
+            b"",
+        ),
+        400,
+        "InvalidHeaderValue",
+    );
+    assert_eq!(server.dfs("HEAD", &file, &[], b"").status(), 404);
+}

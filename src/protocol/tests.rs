@@ -156,3 +156,17 @@ fn listing_includes_name_what_they_support() {
     );
     assert!(includes(None).unwrap().is_empty());
 }
+
+#[test]
+fn hostile_block_lists_and_batch_boundaries_are_answered_without_panic() {
+    let seed = "<?xml version=\"1.0\"?><BlockList><Committed>QUFBQQ==</Committed><Uncommitted>QkJCQg==</Uncommitted><Latest>Q0NDQw==</Latest></BlockList>";
+    assert_eq!(parse_block_list(seed.as_bytes()).unwrap().len(), 3);
+    crate::hostile::sweep(&[seed], ("<Latest>", "</Latest>"), |text| {
+        let _ = parse_block_list(text.as_bytes());
+    });
+    let many = format!(
+        "<BlockList>{}</BlockList>",
+        "<Latest>QUFBQQ==</Latest>".repeat(100_000)
+    );
+    assert!(parse_block_list(many.as_bytes()).is_err());
+}

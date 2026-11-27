@@ -582,4 +582,37 @@ mod tests {
         assert!(text.contains("boundary=changesetresponse_"));
         assert!(text.trim_end().ends_with("--"));
     }
+
+    #[test]
+    fn hostile_batches_are_answered_without_panic() {
+        let seed = "--batch_1\r\nContent-Type: multipart/mixed; boundary=changeset_1\r\n\r\n\
+                    --changeset_1\r\nContent-Type: application/http\r\nContent-Transfer-Encoding: binary\r\nContent-ID: 1\r\n\r\n\
+                    POST /acct/tbl HTTP/1.1\r\nContent-Type: application/json\r\nAccept: application/json;odata=nometadata\r\n\r\n\
+                    {\"PartitionKey\":\"p\",\"RowKey\":\"r\",\"V\":1}\r\n--changeset_1--\r\n--batch_1--\r\n";
+        assert!(parse("multipart/mixed; boundary=batch_1", seed.as_bytes(), "acct").is_ok());
+        crate::hostile::sweep(
+            &[seed],
+            (
+                "--batch_1\r\nContent-Type: multipart/mixed; boundary=batch_1\r\n\r\n",
+                "--batch_1--",
+            ),
+            |text| {
+                let _ = parse("multipart/mixed; boundary=batch_1", text.as_bytes(), "acct");
+            },
+        );
+        crate::hostile::sweep(
+            &["multipart/mixed; boundary=\"batch_1\""],
+            (";", "="),
+            |text| {
+                let _ = boundary_of(text);
+            },
+        );
+        let part =
+            "--c\r\nContent-Type: application/http\r\n\r\nPOST /acct/tbl HTTP/1.1\r\n\r\n{}\r\n";
+        let nested = format!(
+            "--b\r\nContent-Type: multipart/mixed; boundary=c\r\n\r\n{}--c--\r\n--b--\r\n",
+            part.repeat(5000)
+        );
+        assert!(parse("multipart/mixed; boundary=b", nested.as_bytes(), "acct").is_err());
+    }
 }
