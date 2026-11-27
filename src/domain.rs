@@ -4,7 +4,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::SystemTime};
 use uuid::Uuid;
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
@@ -12,12 +12,21 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Error {
     AuthenticationFailed,
+    DelegationSasWindow {
+        start: SystemTime,
+        expiry: SystemTime,
+    },
+    DelegationKeyExpired {
+        start: SystemTime,
+        expiry: SystemTime,
+    },
     InvalidAuthenticationInfo,
     InvalidName,
     InvalidHeader,
     IncompatibleBlobTier,
     InvalidVersion,
     InvalidQuery,
+    ContainerRenameUnsupported,
     Unsupported,
     MissingLength,
     InvalidLength,
@@ -70,6 +79,7 @@ pub(crate) enum Error {
     CopyIdMismatch,
     CopySourceDenied,
     CopySourceMissing,
+    CopySourceRange,
     CorsPreflight,
     SourceConditionNotMet,
     Page(crate::blob_page::PageError),

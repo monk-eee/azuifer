@@ -6,12 +6,12 @@ The target is the five Azure Storage REST services, using the operations and aut
 
 | Service | Operations | Advertised operation/auth pairs | Unsupported operations | Journey exchanges | Extra grid exchanges | Target |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Blob | 55 | 303 | 1 | 255 | 244 | 499 |
+| Blob | 55 | 303 | 1 | 256 | 244 | 500 |
 | DFS | 18 | 106 | 0 | 108 | 86 | 194 |
 | FileREST | 44 | 197 | 0 | 131 | 153 | 284 |
 | Queue | 17 | 72 | 0 | 49 | 52 | 101 |
 | Table | 19 | 72 | 1 | 65 | 52 | 117 |
-| **Total** | **153** | **750** | **2** | **608** | **587** | **1,195** |
+| **Total** | **153** | **750** | **2** | **609** | **587** | **1,196** |
 
 This is a finite coverage target, not a claim that every possible input is covered. It tests each advertised operation/auth pair once and adds separate exchanges for meaningful branches: conditions, checksums and limits, continuations, post-mutation state, failure atomicity, expiry, feature switches, and shared Blob/DFS state. It does not multiply every branch by every credential. Add a row when an API version, profile, or new variant changes contract behavior. Keep newer-version evidence separate until that version is adopted; a client reaching the emulator through version fallback is not evidence for the newer version. SMB and NFS wire exchanges, control-plane APIs, infrastructure performance, and emulator-only fault injection are out of scope.
 
@@ -45,7 +45,7 @@ manifest pairs + journeys -> select safe target -> record Azure candidate
 | `files` | Approved pre-provisioned disposable share or account-level control where the operation needs it; FileREST backup-intent permissions where required. `files-history`, `files-handles`, and `files-nfs` additionally require retention/snapshot settings, a disposable source of open handles, or an NFS-capable target, respectively. Do not rely on SMB/NFS wire parity. |
 | `queue`, `table` | Approved data-plane scopes for fresh synthetic resources, such as Storage Queue Data Contributor and Storage Table Data Contributor on dedicated targets. Queue/table lifecycle and request rejection do not establish message/entity permissions. Account settings and multirole tests use dedicated accounts/identities. |
 
-The current target supports `flat`, same-account Blob `copy` with an authorized synthetic source, and the recorded Queue and Table Bearer journeys. FileREST backup writes were denied. Shared Key and anonymous Blob access are disabled, and the account has no HNS, versioning, or soft delete. Rows requiring those permissions or settings need a separate approved scope or target. This ledger never authorizes granting access or changing settings.
+The current target supports `flat`, same-account Blob `copy` with an authorized synthetic source, and the recorded Queue and Table Bearer journeys. Blob tag writes and reads and FileREST backup writes were denied. Shared Key and anonymous Blob access are disabled; HNS, versioning, and both retention policies are off. Blob, Queue, and Table have no CORS rules. Rows requiring those permissions or settings need a separate approved scope or target. This ledger never authorizes granting access or changing settings.
 
 ## Pathways
 
@@ -75,8 +75,8 @@ The current target supports `flat`, same-account Blob `copy` with an authorized 
 | B-20 | flat | Bearer | Acquire finite lease; renew; change ID; reject old ID; break with delay; reject acquire during break; read broken state; reacquire after the break period; release | 9 | [fixture](../../tests/contracts/cassettes/blob-finite-lease.json) |
 | B-21 | flat | Bearer | `Lease Container` acquire; reject delete without lease; get leased properties; reject wrong-ID renew; renew correctly; release; delete with no active lease | 7 | [fixture](../../tests/contracts/cassettes/blob-container-lease.json) |
 | B-22 | copy | Bearer | `Copy Blob` completes within the same account; inspect source, progress and copy ID; read bytes and metadata; reject source condition; reject destination condition; `Abort Copy Blob` on a completed copy returns 409; read unchanged destination | 7 | [fixture](../../tests/contracts/cassettes/blob-completed-copy.json) |
-| B-23 | copy | Bearer | `Put Blob From URL`; read result; `Put Block From URL`; commit staged block; read committed bytes; `Append Block From URL`; read appended result; `Put Page From URL`; read sparse destination; reject invalid source range | 10 | pending |
-| B-24 | copy | Bearer | `Incremental Copy Blob` from a page snapshot; check copy state; update source page; take new snapshot; incremental copy again; get destination page ranges; verify bytes | 7 | pending |
+| B-23 | copy | Bearer | `Put Blob From URL`; read result; `Put Block From URL`; commit staged block; read committed bytes; `Append Block From URL`; read appended result; `Put Page From URL`; read sparse destination; reject invalid source range | 10 | [fixture](../../tests/contracts/cassettes/blob-write-from-url.json) |
+| B-24 | copy | Bearer | `Incremental Copy Blob` from a page snapshot authorized by UserDelegationSAS; check completed properties; reject GET of the base; update source page; take new snapshot; incremental copy again; diff destination snapshots; verify copied snapshot bytes | 8 | [fixture](../../tests/contracts/cassettes/blob-incremental-copy.json) |
 | B-25 | history | Bearer | Write first version; overwrite; list versions with current marker; read first version; delete base without deleting history; read retained version; restore by copy; read restored base | 8 | pending |
 | B-26 | history | Bearer | Delete blob with snapshots included; list deleted; read missing; `Undelete Blob`; read current; read restored snapshot; delete snapshots only; confirm base survives | 8 | pending |
 | B-27 | history | Bearer | Soft-delete container; list retained containers; `Restore Container`; verify restored properties; read original blob; reject stale restore after replacement | 6 | pending |
@@ -91,8 +91,8 @@ The current target supports `flat`, same-account Blob `copy` with an authorized 
 | B-36 | config | Bearer | Create test-only root container; put a singleton-path root blob; read via explicit root path; list root; list dedicated logs container by explicit name; reject invalid system container name | 6 | pending |
 | B-37 | config | Anonymous | `Static website request` index; configured 404 page; nested asset; unsupported HTTP method | 4 | pending |
 | B-38 | geo | Bearer | `Get Blob Service Stats` on readable secondary | 1 | pending |
-| B-39 | flat | UserDelegationSAS | Read in-window; deny expired token; deny future start; read with in-window signed start; read after key expiry under controlled short validity | 5 | pending |
-| B-40 | flat | Bearer | !`Rename Container` recognized boundary with a synthetic container (not DFS Rename Path) | 1 | pending |
+| B-39 | flat | UserDelegationSAS | Read in-window; deny expired token; deny future start; read with in-window signed start; deny still-unexpired SAS after the short key expires | 5 | [fixture](../../tests/contracts/cassettes/blob-user-delegation-sas-windows.json) |
+| B-40 | flat | Bearer | !`Rename Container` rejected with 400 InvalidQueryParameterValue for `comp=rename` on a synthetic flat container (not DFS Rename Path) | 1 | [fixture](../../tests/contracts/cassettes/blob-container-rename-boundary.json) |
 | B-41 | flat | Bearer | `Get Account Information` on StorageV2 Standard_LRS with HNS off; `Get Blob Service Properties` with empty CORS and Blob soft delete and website disabled | 2 | [fixture](../../tests/contracts/cassettes/blob-account-read-only.json) |
 | B-42 | flat | Bearer | Reject a container-scoped Submit Batch envelope with zero parts, checking the embedded 400 and its request correlation | 1 | [fixture](../../tests/contracts/cassettes/blob-batch-empty-envelope.json) |
 | B-43 | flat | Bearer | Reject malformed Query Blob Contents XML before reading blob data, checking status, code, message and request correlation | 1 | [fixture](../../tests/contracts/cassettes/blob-query-malformed-xml.json) |

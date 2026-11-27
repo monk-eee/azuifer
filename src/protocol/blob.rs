@@ -6,8 +6,8 @@ use super::headers::{
 };
 use super::{
     BLOB_PROPERTIES, CHECKSUMS, CONDITIONS, LEASE, LEASE_HEADERS, MAX_BLOCK_LIST_BYTES,
-    MAX_XML_BODY_BYTES, Operation, PLAIN_PROPERTIES, Request, SOURCE, SourceRequest, TAG_CONDITION,
-    TAGS,
+    MAX_XML_BODY_BYTES, Operation, PLAIN_PROPERTIES, Request, SOURCE, SOURCE_BEARER, SourceRequest,
+    TAG_CONDITION, TAGS,
 };
 use crate::{
     auth::header,
@@ -70,6 +70,7 @@ impl Request<'_> {
                             ],
                             TAGS,
                             SOURCE,
+                            SOURCE_BEARER,
                             CONDITIONS,
                             LEASE,
                             BLOB_PROPERTIES,
@@ -125,6 +126,7 @@ impl Request<'_> {
                     &["comp", "blockid"],
                     &[
                         SOURCE,
+                        SOURCE_BEARER,
                         LEASE,
                         &["x-ms-source-range", "content-md5", "x-ms-content-crc64"],
                     ],
@@ -369,6 +371,9 @@ impl Request<'_> {
         };
         Ok(SourceRequest {
             url: CopySource::parse(url)?,
+            bearer: header(self.headers, "x-ms-copy-source-authorization")?
+                .map(crate::blob_copy::SourceBearer::parse)
+                .transpose()?,
             guard: Guard {
                 conditions: Conditions::parse(self.headers, &conditions::SOURCE)?,
                 lease: lease_id(self.headers, "x-ms-source-lease-id")?,

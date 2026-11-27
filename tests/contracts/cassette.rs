@@ -126,6 +126,9 @@ pub(super) enum ErrorCode {
     InvalidInput,
     InvalidHeaderValue,
     InvalidRange,
+    InvalidQueryParameterValue,
+    CannotVerifyCopySource,
+    OperationNotAllowedOnIncrementalCopyBlob,
     BothCrc64AndMd5RangeHeaderPresent,
     MixedBatchOperations,
     QueryExpression,
@@ -178,6 +181,11 @@ impl ErrorCode {
             Some("InvalidInput") => Self::InvalidInput,
             Some("InvalidHeaderValue") => Self::InvalidHeaderValue,
             Some("InvalidRange") => Self::InvalidRange,
+            Some("InvalidQueryParameterValue") => Self::InvalidQueryParameterValue,
+            Some("CannotVerifyCopySource") => Self::CannotVerifyCopySource,
+            Some("OperationNotAllowedOnIncrementalCopyBlob") => {
+                Self::OperationNotAllowedOnIncrementalCopyBlob
+            }
             Some("BothCrc64AndMd5RangeHeaderPresent") => Self::BothCrc64AndMd5RangeHeaderPresent,
             Some("AllBatchSubRequestsShouldBeSameApi") => Self::MixedBatchOperations,
             Some("ErrorProcessingQueryExpression") => Self::QueryExpression,

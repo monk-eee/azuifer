@@ -303,9 +303,15 @@ pub(crate) async fn dispatch(State(app): State<Arc<App>>, request: Request) -> R
         add_cors(&app, &parts, &mut response).await;
         response
     };
-    response
-        .headers_mut()
-        .insert("x-ms-version", app.version.clone());
+    if response
+        .extensions()
+        .get::<respond::OmitApiVersion>()
+        .is_none()
+    {
+        response
+            .headers_mut()
+            .insert("x-ms-version", app.version.clone());
+    }
     if let Some(id) = client_request_id {
         response.headers_mut().insert("x-ms-client-request-id", id);
     }

@@ -999,16 +999,24 @@ fn incremental_copy_blob_copies_snapshots_and_takes_its_own() {
 
         let first = copy(&source(&one));
         assert_eq!(first.status(), 202);
-        assert_eq!(header_text(&first, "x-ms-copy-status"), "success");
+        assert_eq!(header_text(&first, "x-ms-copy-status"), "pending");
         assert!(has_header(&first, "x-ms-copy-id") && has_header(&first, "etag"));
         let expected_one = laid_out(4096, &[(0, b'a', 512), (1024, b'b', 512)]);
-        assert_eq!(body(server.read(DEST, None)), expected_one);
+        error(
+            server.read(DEST, None),
+            409,
+            "OperationNotAllowedOnIncrementalCopyBlob",
+        );
         let head = server.head(DEST);
         assert_eq!(header_text(&head, "x-ms-blob-type"), "PageBlob");
         assert_eq!(header_text(&head, "x-ms-blob-sequence-number"), "5");
         assert_eq!(header_text(&head, "x-ms-incremental-copy"), "true");
         assert_eq!(header_text(&head, "x-ms-copy-status"), "success");
         let first_snapshot = header_text(&head, "x-ms-copy-destination-snapshot");
+        assert_eq!(
+            body(server.read(&format!("{DEST}?snapshot={first_snapshot}"), None)),
+            expected_one
+        );
         assert!(
             server
                 .list("include=snapshots&prefix=backup")
@@ -1021,9 +1029,12 @@ fn incremental_copy_blob_copies_snapshots_and_takes_its_own() {
             4096,
             &[(0, b'c', 512), (1024, b'b', 512), (2048, b'd', 512)],
         );
-        assert_eq!(body(server.read(DEST, None)), expected_two);
         let second_snapshot = header_text(&server.head(DEST), "x-ms-copy-destination-snapshot");
         assert_ne!(first_snapshot, second_snapshot);
+        assert_eq!(
+            body(server.read(&format!("{DEST}?snapshot={second_snapshot}"), None)),
+            expected_two
+        );
         assert_eq!(
             body(server.read(&format!("{DEST}?snapshot={first_snapshot}"), None)),
             expected_one,

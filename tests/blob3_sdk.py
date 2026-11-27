@@ -182,24 +182,27 @@ def incremental_copy(ctx):
     dest = ctx.blob("backup.vhd")
 
     copied = dest.start_copy_from_url(f"{source.url}?snapshot={one}", incremental_copy=True)
-    require(copied["copy_status"] == "success", f"copy status {copied}")
-    require(
-        dest.download_blob().readall() == dense(4096, [(0, 97, 512), (1024, 98, 512)]),
-        "the destination holds the first snapshot",
-    )
+    require(copied["copy_status"] == "pending", f"copy status {copied}")
+    expect("OperationNotAllowedOnIncrementalCopyBlob", lambda: dest.download_blob().readall())
     props = dest.get_blob_properties()
     require(props.copy.incremental_copy is True, "the destination is an incremental copy blob")
+    require(props.copy.status == "success", "the local copy has completed")
     first_destination = props.copy.destination_snapshot
     require(first_destination, "the destination took a snapshot")
+    require(
+        ctx.snapshot_client("backup.vhd", first_destination).download_blob().readall()
+        == dense(4096, [(0, 97, 512), (1024, 98, 512)]),
+        "the first destination snapshot has the source bytes",
+    )
 
     dest.start_copy_from_url(f"{source.url}?snapshot={two}", incremental_copy=True)
-    require(
-        dest.download_blob().readall() == dense(4096, [(0, 99, 512), (1024, 98, 512), (2048, 100, 512)]),
-        "the destination holds the second snapshot",
-    )
     second_destination = dest.get_blob_properties().copy.destination_snapshot
     require(second_destination != first_destination, "each copy takes its own snapshot")
     diff_client = ctx.snapshot_client("backup.vhd", second_destination)
+    require(
+        diff_client.download_blob().readall() == dense(4096, [(0, 99, 512), (1024, 98, 512), (2048, 100, 512)]),
+        "the second destination snapshot has the updated source bytes",
+    )
     filled, cleared = diff_client.get_page_ranges(previous_snapshot_diff=first_destination)
     require(
         filled == [{"start": 0, "end": 511}, {"start": 2048, "end": 2559}] and not cleared,

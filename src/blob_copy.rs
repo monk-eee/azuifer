@@ -9,6 +9,7 @@ use crate::{
     blob_snapshot::{self, Selector},
     config::Config,
     domain::{AccountName, BlobKey, BlobPath, ContainerKey, ContainerName, Error, Result},
+    oauth,
     protocol::parse_query,
     store::Store,
 };
@@ -49,6 +50,18 @@ pub(crate) struct Resolved {
     /// The snapshot or version the source URL names, if any.
     pub(crate) selector: Option<Selector>,
     sas: Option<Query>,
+    authority: String,
+    https: bool,
+}
+
+pub(crate) struct SourceBearer(String);
+
+impl SourceBearer {
+    pub(crate) fn parse(authorization: &str) -> Result<Self> {
+        oauth::bearer(authorization)
+            .map(|token| Self(token.to_owned()))
+            .ok_or(Error::InvalidHeader)
+    }
 }
 
 impl CopySource {
@@ -145,6 +158,8 @@ impl CopySource {
             display,
             selector,
             sas,
+            authority,
+            https: self.scheme == "https",
         })
     }
 }
@@ -158,6 +173,7 @@ pub(crate) async fn authorize_source(
     destination: &AccountName,
     source: &Resolved,
     connection: &Connection,
+    bearer: Option<&SourceBearer>,
 ) -> Result<()> {
     let denied = |_| Error::CopySourceDenied;
     let account = &source.key.container.account;
@@ -166,8 +182,22 @@ pub(crate) async fn authorize_source(
         .get(account)
         .ok_or(Error::CopySourceDenied)?;
     let target = Target::Blob(source.key.clone());
-    let credentials = match &source.sas {
-        Some(query) => {
+    let credentials = match (bearer, &source.sas) {
+        (Some(bearer), None) if source.https && connection.https && account == destination => {
+            blob_auth::authenticate_bearer(
+                &config.oauth,
+                &bearer.0,
+                &oauth::Request {
+                    account: account.as_str(),
+                    host: Some(&source.authority),
+                    now: connection.now,
+                },
+                false,
+            )
+            .map_err(denied)?
+        }
+        (Some(_), _) => return Err(Error::CopySourceDenied),
+        (None, Some(query)) => {
             let resource = Resource {
                 account,
                 container: Some(source.key.container.name.as_str()),
@@ -178,12 +208,13 @@ pub(crate) async fn authorize_source(
                 .ok_or(Error::CopySourceDenied)?;
             Credentials::Sas(Box::new(token))
         }
-        None if matches!(caller, Credentials::Key | Credentials::Bearer(_))
-            && account == destination =>
+        (None, None)
+            if matches!(caller, Credentials::Key | Credentials::Bearer(_))
+                && account == destination =>
         {
             Credentials::Key
         }
-        None => Credentials::Anonymous,
+        (None, None) => Credentials::Anonymous,
     };
     blob_auth::authorize(
         store,

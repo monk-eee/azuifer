@@ -39,7 +39,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Same-instance sources only; x-ms-source-content-md5 and crc64 are not accepted."
+      "notes": "The 2023-11-03 Bearer cassette replays a same-account HTTPS source with explicit source authorization, checks offset and block count, and reads back appended bytes. The local source Bearer header is not forwarded to a remote host. x-ms-source-content-md5 and crc64 are not accepted."
     },
     {
       "name": "Copy Blob",
@@ -140,7 +140,7 @@
         "Anonymous",
         "Bearer"
       ],
-      "notes": "Reads the current blob, a snapshot (snapshot), or a version (versionid), with a single byte range (Range or x-ms-range), x-ms-range-get-content-md5 and -crc64 up to 4 MiB, all four conditions, x-ms-if-tags, lease id, and service SAS response-header overrides. Page blob holes read as zeros and append blobs return their concatenated blocks. Archived blobs answer BlobArchived. Reports x-ms-version-id, x-ms-is-current-version, and x-ms-tag-count. Metadata names are returned in lowercase. x-ms-content-crc64 uses CRC-64/NVME, which has not been differentially verified against Azure."
+      "notes": "Reads the current blob, a snapshot (snapshot), or a version (versionid), with a single byte range (Range or x-ms-range), x-ms-range-get-content-md5 and -crc64 up to 4 MiB, all four conditions, x-ms-if-tags, lease id, and service SAS response-header overrides. Page blob holes read as zeros and append blobs return their concatenated blocks. Archived blobs answer BlobArchived. Downloading an incremental copy base returns 409 OperationNotAllowedOnIncrementalCopyBlob; the copied snapshots remain readable. Reports x-ms-version-id, x-ms-is-current-version, and x-ms-tag-count. Metadata names are returned in lowercase. x-ms-content-crc64 uses CRC-64/NVME, which has not been differentially verified against Azure."
     },
     {
       "name": "Get Blob Metadata",
@@ -292,7 +292,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Same-instance page blob snapshots only; each copy must name a newer snapshot of the same source. The destination shares the snapshot's extents and takes its own snapshot at completion (x-ms-copy-destination-snapshot). Completes synchronously. Copies from another instance are unsupported."
+      "notes": "Same-instance page blob snapshots only; each copy must name a newer snapshot of the same source. The 2023-11-03 Bearer cassette uses a user delegation SAS on the source and checks 202 pending, the copy ID, a readable destination snapshot and the range diff between two copies. Azuifer completes the copy synchronously, so HEAD already reports success and there is no abortable copy or cross-instance copy."
     },
     {
       "name": "Lease Blob",
@@ -378,7 +378,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Same-instance sources only, authorized as for Copy Blob. x-ms-copy-source-blob-properties selects source or request properties. Source conditions apply. Tags, encryption, and source MD5 validation are unsupported."
+      "notes": "The 2023-11-03 Bearer cassette verifies a full same-account HTTPS copy with x-ms-copy-source-authorization and request properties. x-ms-copy-source-blob-properties selects source or request properties. Source conditions apply. Tags, encryption, and source MD5 validation are unsupported."
     },
     {
       "name": "Put Block",
@@ -404,7 +404,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Same-instance sources only, with an optional x-ms-source-range. Source MD5 and CRC64 validation headers are unsupported."
+      "notes": "The 2023-11-03 Bearer cassette stages a range from a same-account HTTPS source using explicit source authorization, commits it, and reads the selected bytes. Source MD5 and CRC64 validation headers are unsupported."
     },
     {
       "name": "Put Block List",
@@ -443,7 +443,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Same-instance sources only; x-ms-source-content-md5 and crc64 are not accepted."
+      "notes": "The 2023-11-03 Bearer cassette writes a range from a same-account HTTPS source using explicit source authorization, verifies sparse read-back, and rejects a source range past EOF with 416 CannotVerifyCopySource. x-ms-source-content-md5 and crc64 are not accepted."
     },
     {
       "name": "Query Blob Contents",
@@ -462,7 +462,7 @@
       "name": "Rename Container",
       "state": "unsupported",
       "authorization": [],
-      "notes": "Not planned."
+      "notes": "Unsupported. The 2023-11-03 flat Bearer cassette records 400 InvalidQueryParameterValue with comp=rename in the XML details."
     },
     {
       "name": "Resize Page Blob",

@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "incremental_copy",
+  "api_version": "2023-11-03",
+  "exchanges": [
+    {
+      "step": "start_copy",
+      "status": 202,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "missing",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty",
+        "matches": true
+      },
+      "details": {
+        "kind": "copy",
+        "id": "matches",
+        "status": "matches",
+        "incremental": "missing",
+        "snapshot": "missing"
+      }
+    },
+    {
+      "step": "copy_complete",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "octet_stream",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty",
+        "matches": true
+      },
+      "details": {
+        "kind": "copy",
+        "id": "matches",
+        "status": "matches",
+        "incremental": "matches",
+        "snapshot": "matches"
+      }
+    },
+    {
+      "step": "reject_base_read",
+      "status": 409,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "xml",
+      "etag": "missing",
+      "error_header": "operation_not_allowed_on_incremental_copy_blob",
+      "body": {
+        "kind": "error",
+        "code": "operation_not_allowed_on_incremental_copy_blob",
+        "correlation": "matches",
+        "detail": "none"
+      },
+      "details": null
+    },
+    {
+      "step": "update_source",
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "missing",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty",
+        "matches": true
+      },
+      "details": null
+    },
+    {
+      "step": "snapshot_source",
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "missing",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty",
+        "matches": true
+      },
+      "details": {
+        "kind": "snapshot",
+        "timestamp": "matches"
+      }
+    },
+    {
+      "step": "copy_again",
+      "status": 202,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "missing",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty",
+        "matches": true
+      },
+      "details": {
+        "kind": "copy",
+        "id": "matches",
+        "status": "matches",
+        "incremental": "missing",
+        "snapshot": "missing"
+      }
+    },
+    {
+      "step": "changed_ranges",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "xml",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "ranges",
+        "media": "xml",
+        "blob_length": 2048,
+        "ranges": [
+          [
+            1024,
+            1535
+          ]
+        ],
+        "cleared": [],
+        "next_marker": "missing"
+      },
+      "details": null
+    },
+    {
+      "step": "read_snapshot",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "octet_stream",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "bytes",
+        "matches": true,
+        "length": "matches",
+        "blob_type": "matches"
+      },
+      "details": null
+    }
+  ]
+}

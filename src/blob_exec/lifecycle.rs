@@ -75,7 +75,7 @@ pub(super) async fn execute(
                 .await?;
             let mut response = entity_response(StatusCode::ACCEPTED, copied.entity)?;
             set(response.headers_mut(), "x-ms-copy-id", &copied.copy_id)?;
-            set(response.headers_mut(), "x-ms-copy-status", "success")?;
+            set(response.headers_mut(), "x-ms-copy-status", "pending")?;
             Ok(response)
         }
     }

@@ -132,22 +132,29 @@ pub(crate) fn credentials(request: &Presented<'_>) -> Result<Credentials> {
 /// Delegation Key is a read-class operation for them, as it is in Azure.
 fn verify_bearer(request: &Presented<'_>, authorization: &str) -> Result<Credentials> {
     let token = oauth::bearer(authorization).ok_or(Error::InvalidAuthenticationInfo)?;
-    let principal = request
-        .oauth
-        .authenticate(
-            token,
-            &oauth::Request {
-                account: request.target.account().as_str(),
-                host: header(request.headers, "host")?,
-                now: request.now,
-            },
-        )
-        .map_err(|_| Error::InvalidAuthenticationInfo)?;
     let delegation_key = request.query.get("comp").map(String::as_str) == Some("userdelegationkey");
-    if !principal.permits(
-        Service::Blob,
+    authenticate_bearer(
+        request.oauth,
+        token,
+        &oauth::Request {
+            account: request.target.account().as_str(),
+            host: header(request.headers, "host")?,
+            now: request.now,
+        },
         oauth::is_write(request.method) && !delegation_key,
-    ) {
+    )
+}
+
+pub(crate) fn authenticate_bearer(
+    oauth: &OAuth,
+    token: &str,
+    request: &oauth::Request<'_>,
+    write: bool,
+) -> Result<Credentials> {
+    let principal = oauth
+        .authenticate(token, request)
+        .map_err(|_| Error::InvalidAuthenticationInfo)?;
+    if !principal.permits(Service::Blob, write) {
         return Err(Error::PermissionMismatch);
     }
     Ok(Credentials::Bearer(principal))

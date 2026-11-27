@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "rename_boundary",
+  "api_version": "2023-11-03",
+  "exchanges": [
+    {
+      "step": "reject_rename",
+      "status": 400,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "xml",
+      "etag": "missing",
+      "error_header": "invalid_query_parameter_value",
+      "body": {
+        "kind": "error",
+        "code": "invalid_query_parameter_value",
+        "correlation": "matches",
+        "detail": "rename"
+      },
+      "details": null
+    }
+  ]
+}
