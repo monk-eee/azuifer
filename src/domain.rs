@@ -15,6 +15,7 @@ pub(crate) enum Error {
     InvalidAuthenticationInfo,
     InvalidName,
     InvalidHeader,
+    IncompatibleBlobTier,
     InvalidVersion,
     InvalidQuery,
     Unsupported,
@@ -23,7 +24,9 @@ pub(crate) enum Error {
     TooLarge,
     Md5Mismatch,
     Crc64Mismatch,
+    ConflictingRangeChecksums,
     InvalidBlockId,
+    BlockIdWidthMismatch,
     InvalidBlockList,
     InvalidXml,
     BlockCountExceeded,
@@ -50,11 +53,13 @@ pub(crate) enum Error {
     BlobArchived,
     MissingHeader,
     LeaseIdMissing,
+    LeaseIdMissingBlob,
     LeaseLost,
     LeaseAlreadyPresent,
     LeaseMismatchBlob,
     LeaseMismatchContainer,
     LeaseMismatchLease,
+    LeaseMismatchContainerLease,
     LeaseNotPresentBlob,
     LeaseNotPresentContainer,
     LeaseNotPresentLease,
@@ -72,6 +77,8 @@ pub(crate) enum Error {
     SnapshotsPresent,
     InvalidTag,
     TagsTooLarge,
+    InvalidBatchEnvelope,
+    MixedBatchOperations,
     InvalidInput,
 }
 
@@ -372,6 +379,10 @@ impl PageRequest {
             after,
             limit: limit.min(5000),
         })
+    }
+
+    pub(crate) fn marker(&self) -> Option<String> {
+        (!self.after.is_empty()).then(|| URL_SAFE_NO_PAD.encode(&self.after))
     }
 }
 

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "malformed_query_xml",
+  "api_version": "2023-11-03",
+  "response": {
+    "status": 400,
+    "request_id": "matches",
+    "api_version": "matches",
+    "header_code": "invalid_xml_document",
+    "body": {
+      "kind": "xml",
+      "code": "invalid_xml_document",
+      "correlation": "matches",
+      "message_matches": true,
+      "extra_elements": 0
+    }
+  }
+}

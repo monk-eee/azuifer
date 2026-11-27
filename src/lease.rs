@@ -305,7 +305,10 @@ impl StoredLease {
             (LeaseState::Leased | LeaseState::Breaking, Some(id)) if self.id == Some(id) => Ok(()),
             (LeaseState::Leased | LeaseState::Breaking, Some(_)) => Err(mismatch),
             (LeaseState::Leased | LeaseState::Breaking, None) => match need {
-                LeaseNeed::Required => Err(Error::LeaseIdMissing),
+                LeaseNeed::Required => Err(match owner {
+                    LeaseOwner::Blob => Error::LeaseIdMissingBlob,
+                    LeaseOwner::Container => Error::LeaseIdMissing,
+                }),
                 LeaseNeed::Optional => Ok(()),
             },
             (_, None) => Ok(()),
@@ -655,7 +658,7 @@ mod tests {
         };
         assert_eq!(
             check(&held, None, LeaseNeed::Required, 0),
-            Err(Error::LeaseIdMissing)
+            Err(Error::LeaseIdMissingBlob)
         );
         assert_eq!(check(&held, None, LeaseNeed::Optional, 0), Ok(()));
         assert_eq!(check(&held, Some(a), LeaseNeed::Required, 0), Ok(()));
@@ -685,7 +688,7 @@ mod tests {
         let infinite = leased(0, None);
         assert_eq!(
             check(&infinite, None, LeaseNeed::Required, i64::MAX / 2),
-            Err(Error::LeaseIdMissing)
+            Err(Error::LeaseIdMissingBlob)
         );
         let breaking = breaking(0);
         assert_eq!(
@@ -694,7 +697,7 @@ mod tests {
         );
         assert_eq!(
             check(&breaking, None, LeaseNeed::Required, 1_000),
-            Err(Error::LeaseIdMissing)
+            Err(Error::LeaseIdMissingBlob)
         );
         assert_eq!(
             check(&breaking, Some(a), LeaseNeed::Required, 20_000),

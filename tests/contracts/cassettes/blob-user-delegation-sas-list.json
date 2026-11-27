@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "blob-user-delegation-sas-list",
+  "api_version": "2023-11-03",
+  "exchanges": [
+    {
+      "step": "list_first",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "list",
+        "media": "xml",
+        "service_endpoint": "matches",
+        "container_name": "matches",
+        "prefix": "matches",
+        "delimiter": "matches",
+        "max_results": 1,
+        "echoed_marker": "missing",
+        "next_marker": "more",
+        "entries": [
+          {
+            "kind": "blob",
+            "name": "direct",
+            "length": 35,
+            "etag": "unquoted_match",
+            "block_blob": true,
+            "purpose_matches": true
+          }
+        ]
+      }
+    },
+    {
+      "step": "list_next",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "list",
+        "media": "xml",
+        "service_endpoint": "matches",
+        "container_name": "matches",
+        "prefix": "matches",
+        "delimiter": "matches",
+        "max_results": 1,
+        "echoed_marker": "matches",
+        "next_marker": "end",
+        "entries": [
+          {
+            "kind": "prefix",
+            "name": "group"
+          }
+        ]
+      }
+    },
+    {
+      "step": "list_nested",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "list",
+        "media": "xml",
+        "service_endpoint": "matches",
+        "container_name": "matches",
+        "prefix": "matches",
+        "delimiter": "matches",
+        "max_results": 1,
+        "echoed_marker": "missing",
+        "next_marker": "end",
+        "entries": [
+          {
+            "kind": "blob",
+            "name": "nested",
+            "length": 35,
+            "etag": "unquoted_match",
+            "block_blob": true,
+            "purpose_matches": true
+          }
+        ]
+      }
+    },
+    {
+      "step": "read_denied",
+      "status": 403,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "permission_mismatch",
+      "body": {
+        "kind": "xml_error",
+        "code": "permission_mismatch",
+        "permission_message": true,
+        "correlation": "matches",
+        "extra_elements": false
+      }
+    },
+    {
+      "step": "list_denied",
+      "status": 403,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "permission_mismatch",
+      "body": {
+        "kind": "xml_error",
+        "code": "permission_mismatch",
+        "permission_message": true,
+        "correlation": "matches",
+        "extra_elements": false
+      }
+    },
+    {
+      "step": "read_nested",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "read",
+        "bytes_match": true,
+        "length": 35,
+        "etag": "matches",
+        "range": "missing",
+        "metadata": "matches",
+        "blob_type": "matches",
+        "cache_control": "stored",
+        "disposition": "stored",
+        "encoding": "missing",
+        "language": "stored",
+        "content_type": "stored"
+      }
+    }
+  ]
+}

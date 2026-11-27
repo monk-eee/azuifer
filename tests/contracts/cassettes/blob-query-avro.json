@@ -1,0 +1,279 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "csv_filter",
+      "status": 200,
+      "request_id": true,
+      "api_version": "matches",
+      "error_header": "missing",
+      "media": "avro_binary",
+      "length_present": false,
+      "etag": "matches",
+      "modified": "matches",
+      "body": {
+        "kind": "avro",
+        "schema": [
+          "data",
+          "error",
+          "progress",
+          "end"
+        ],
+        "qualified_names": true,
+        "explicit_null_codec": false,
+        "block_sizes": [
+          1,
+          1,
+          1
+        ],
+        "records": [
+          {
+            "kind": "data",
+            "bytes": 7
+          },
+          {
+            "kind": "progress",
+            "scanned": 20,
+            "total": 20
+          },
+          {
+            "kind": "end",
+            "total": 20
+          }
+        ],
+        "bytes_match": true
+      }
+    },
+    {
+      "step": "json_projection",
+      "status": 200,
+      "request_id": true,
+      "api_version": "matches",
+      "error_header": "missing",
+      "media": "avro_binary",
+      "length_present": false,
+      "etag": "matches",
+      "modified": "matches",
+      "body": {
+        "kind": "avro",
+        "schema": [
+          "data",
+          "error",
+          "progress",
+          "end"
+        ],
+        "qualified_names": true,
+        "explicit_null_codec": false,
+        "block_sizes": [
+          1,
+          1,
+          1
+        ],
+        "records": [
+          {
+            "kind": "data",
+            "bytes": 29
+          },
+          {
+            "kind": "progress",
+            "scanned": 47,
+            "total": 47
+          },
+          {
+            "kind": "end",
+            "total": 47
+          }
+        ],
+        "bytes_match": true
+      }
+    },
+    {
+      "step": "all_rows",
+      "status": 200,
+      "request_id": true,
+      "api_version": "matches",
+      "error_header": "missing",
+      "media": "avro_binary",
+      "length_present": false,
+      "etag": "matches",
+      "modified": "matches",
+      "body": {
+        "kind": "avro",
+        "schema": [
+          "data",
+          "error",
+          "progress",
+          "end"
+        ],
+        "qualified_names": true,
+        "explicit_null_codec": false,
+        "block_sizes": [
+          1,
+          1,
+          1
+        ],
+        "records": [
+          {
+            "kind": "data",
+            "bytes": 11
+          },
+          {
+            "kind": "progress",
+            "scanned": 20,
+            "total": 20
+          },
+          {
+            "kind": "end",
+            "total": 20
+          }
+        ],
+        "bytes_match": true
+      }
+    },
+    {
+      "step": "empty_result",
+      "status": 200,
+      "request_id": true,
+      "api_version": "matches",
+      "error_header": "missing",
+      "media": "avro_binary",
+      "length_present": false,
+      "etag": "matches",
+      "modified": "matches",
+      "body": {
+        "kind": "avro",
+        "schema": [
+          "data",
+          "error",
+          "progress",
+          "end"
+        ],
+        "qualified_names": true,
+        "explicit_null_codec": false,
+        "block_sizes": [
+          1,
+          1,
+          1
+        ],
+        "records": [
+          {
+            "kind": "data",
+            "bytes": 0
+          },
+          {
+            "kind": "progress",
+            "scanned": 20,
+            "total": 20
+          },
+          {
+            "kind": "end",
+            "total": 20
+          }
+        ],
+        "bytes_match": true
+      }
+    },
+    {
+      "step": "conversion_errors",
+      "status": 200,
+      "request_id": true,
+      "api_version": "matches",
+      "error_header": "missing",
+      "media": "avro_binary",
+      "length_present": false,
+      "etag": "matches",
+      "modified": "matches",
+      "body": {
+        "kind": "avro",
+        "schema": [
+          "data",
+          "error",
+          "progress",
+          "end"
+        ],
+        "qualified_names": true,
+        "explicit_null_codec": false,
+        "block_sizes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "records": [
+          {
+            "kind": "data",
+            "bytes": 0
+          },
+          {
+            "kind": "error",
+            "fatal": false,
+            "name": "invalid_type_conversion",
+            "description_matches": true,
+            "position": 0
+          },
+          {
+            "kind": "error",
+            "fatal": false,
+            "name": "invalid_type_conversion",
+            "description_matches": true,
+            "position": 7
+          },
+          {
+            "kind": "error",
+            "fatal": false,
+            "name": "invalid_type_conversion",
+            "description_matches": true,
+            "position": 14
+          },
+          {
+            "kind": "progress",
+            "scanned": 20,
+            "total": 20
+          },
+          {
+            "kind": "end",
+            "total": 20
+          }
+        ],
+        "bytes_match": true
+      }
+    },
+    {
+      "step": "invalid_sql",
+      "status": 400,
+      "request_id": true,
+      "api_version": "matches",
+      "error_header": "query_expression",
+      "media": "xml",
+      "length_present": true,
+      "etag": "missing",
+      "modified": "missing",
+      "body": {
+        "kind": "xml",
+        "code": "query_expression",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "read_original",
+      "status": 200,
+      "request_id": true,
+      "api_version": "matches",
+      "error_header": "missing",
+      "media": "text_plain",
+      "length_present": true,
+      "etag": "matches",
+      "modified": "matches",
+      "body": {
+        "kind": "readback",
+        "bytes_match": true
+      }
+    }
+  ]
+}

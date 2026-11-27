@@ -352,8 +352,12 @@ def query_contents(ctx):
         on_error=errors.append,
     )
     failing.readall()
-    require(errors and errors[0].error == "CastFailed" and errors[0].is_fatal, f"error callback {errors}")
-    expect("ParseError", lambda: people.query_blob("SELEC 1 FROM BlobStorage"))
+    require(
+        [(error.error, error.is_fatal, error.position) for error in errors]
+        == [("InvalidTypeConversion", False, offset) for offset in (9, 16, 23)],
+        f"error callback {errors}",
+    )
+    expect("ErrorProcessingQueryExpression", lambda: people.query_blob("SELEC 1 FROM BlobStorage"))
 
 
 @check("copy from an external http source (opt-in)")

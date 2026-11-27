@@ -1,0 +1,140 @@
+{
+  "schema_version": 2,
+  "source": "azure",
+  "case": "blob-staged-block-commit",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "stage_first",
+      "request": {
+        "method": "put",
+        "operation": "stage_block",
+        "body_bytes": 6
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "stage_second",
+      "request": {
+        "method": "put",
+        "operation": "stage_block",
+        "body_bytes": 7
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "read_uncommitted",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 404,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "blob_not_found",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "blob_not_found",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "commit",
+      "request": {
+        "method": "put",
+        "operation": "commit_block_list",
+        "body_bytes": 65
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "valid",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "read_committed",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 13,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      }
+    },
+    {
+      "step": "reject_unknown_block",
+      "request": {
+        "method": "put",
+        "operation": "commit_block_list",
+        "body_bytes": 44
+      },
+      "status": 400,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "invalid_block_list",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "invalid_block_list",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "read_after_rejected_commit",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 13,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      }
+    }
+  ]
+}

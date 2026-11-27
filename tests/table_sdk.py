@@ -94,8 +94,9 @@ CHECKS = []
 
 
 def code(error):
-    """The Azure error code the service sent in `x-ms-error-code`."""
-    return error.response.headers.get("x-ms-error-code")
+    """Catalog errors carry their code in the OData envelope, not in a header."""
+    header = error.response.headers.get("x-ms-error-code")
+    return header if header is not None else json.loads(error.response.text())["odata.error"]["code"]
 
 
 def check(function):

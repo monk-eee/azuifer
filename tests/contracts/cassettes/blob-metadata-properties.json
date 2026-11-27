@@ -1,0 +1,177 @@
+{
+  "schema_version": 2,
+  "source": "azure",
+  "case": "blob-metadata-properties",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "seed",
+      "request": {
+        "method": "put",
+        "operation": "put_block_blob",
+        "body_bytes": 25
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "valid",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "set_metadata",
+      "request": {
+        "method": "put",
+        "operation": "blob_metadata",
+        "body_bytes": 0,
+        "if_match": "matches"
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "changed",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "read_metadata",
+      "request": {
+        "method": "get",
+        "operation": "blob_metadata",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      },
+      "details": {
+        "kind": "metadata",
+        "purpose": "matches",
+        "removed": "missing"
+      }
+    },
+    {
+      "step": "reject_stale_metadata",
+      "request": {
+        "method": "put",
+        "operation": "blob_metadata",
+        "body_bytes": 0,
+        "if_match": "different"
+      },
+      "status": 412,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "condition_not_met",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "condition_not_met",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "read_metadata_after_rejection",
+      "request": {
+        "method": "get",
+        "operation": "blob_metadata",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      },
+      "details": {
+        "kind": "metadata",
+        "purpose": "matches",
+        "removed": "missing"
+      }
+    },
+    {
+      "step": "set_properties",
+      "request": {
+        "method": "put",
+        "operation": "set_blob_properties",
+        "body_bytes": 0,
+        "if_match": "matches"
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "changed",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "head_properties",
+      "request": {
+        "method": "head",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      },
+      "details": {
+        "kind": "properties",
+        "purpose": "matches",
+        "removed": "missing",
+        "content_type": "matches",
+        "cache_control": "matches",
+        "language": "missing",
+        "length": 25
+      }
+    },
+    {
+      "step": "read_updated_properties",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 25,
+        "media": "octet_stream",
+        "blob_type": "matches",
+        "metadata": "matches"
+      },
+      "details": {
+        "kind": "properties",
+        "purpose": "matches",
+        "removed": "missing",
+        "content_type": "matches",
+        "cache_control": "matches",
+        "language": "missing",
+        "length": 25
+      }
+    }
+  ]
+}

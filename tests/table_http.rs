@@ -272,8 +272,12 @@ impl Reply {
     }
 
     fn error_code(&self) -> String {
-        self.header("x-ms-error-code")
-            .unwrap_or_default()
+        if let Some(code) = self.header("x-ms-error-code") {
+            return code.to_owned();
+        }
+        self.json()["odata.error"]["code"]
+            .as_str()
+            .expect("OData error code")
             .to_owned()
     }
 }
@@ -287,12 +291,12 @@ fn encode(text: &str) -> String {
 }
 
 #[test]
-fn every_response_carries_the_standard_headers_and_json_errors() {
+fn table_catalog_responses_and_auth_errors_carry_standard_azure_headers() {
     let server = Server::start(None);
     let reply = server.get("/Tables");
     assert_eq!(reply.status, 200);
     assert_eq!(reply.header("x-ms-version"), Some("2023-11-03"));
-    assert_eq!(reply.header("dataserviceversion"), Some("3.0;"));
+    assert_eq!(reply.header("dataserviceversion"), None);
     assert_eq!(reply.header("x-ms-request-id").map(str::len), Some(36));
     assert!(
         reply
@@ -417,7 +421,7 @@ fn table_lifecycle_naming_prefer_and_paging() {
     let gone = server.send(Call::new("DELETE", "/Tables('beta')"));
     assert_eq!(
         (gone.status, gone.error_code().as_str()),
-        (404, "TableNotFound")
+        (404, "ResourceNotFound")
     );
     assert_eq!(server.get("/Tables('beta')").status, 404);
     let atom = server.send(Call::new("GET", "/Tables").header("accept", "application/atom+xml"));
@@ -818,7 +822,7 @@ fn entity_validation_limits_and_error_codes() {
     );
     many.remove("P0");
     assert_eq!(
-        kind(Value::Object(many)).0,
+        server.insert("limits", &Value::Object(many)).status,
         204,
         "252 properties are allowed"
     );

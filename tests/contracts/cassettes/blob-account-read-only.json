@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "account_information",
+        "empty": true,
+        "sku_lrs": "matches",
+        "storage_v2": "matches",
+        "hns_disabled": "matches"
+      }
+    },
+    {
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "service_properties",
+        "media": "xml",
+        "logging_version_1": true,
+        "hour_metrics_version_1": true,
+        "minute_metrics_version_1": true,
+        "cors_rules": 0,
+        "blob_soft_delete": false,
+        "static_website": false
+      }
+    }
+  ]
+}

@@ -1,6 +1,13 @@
+mod account;
+mod batch;
 mod cassette;
+mod catalog;
 mod delegation;
 mod live;
+mod mutations;
+mod query;
+mod request_errors;
+mod sas_reads;
 
 use super::{ACCOUNT, Server, VERSION, basic_token, client, iso, sas_query};
 use anyhow::{Context as _, Result, anyhow, ensure};
@@ -21,13 +28,47 @@ const BLOB: &str = "object.txt";
 const BLOB_BYTES: &[u8] = b"azuifer synthetic contract fixture\n";
 const RANGE_START: usize = 2;
 const RANGE_END: usize = 8;
-const SYNTHETIC: &[u8] = include_bytes!("cassettes/blob-user-delegation-sas-read-only.json");
+const SAS_CASSETTE: &[u8] = include_bytes!("cassettes/blob-user-delegation-sas-read-only.json");
+const SAS_RESPONSE_FIELDS: [&str; 5] = ["rscc", "rscd", "rsce", "rscl", "rsct"];
+
+#[derive(Clone, Copy)]
+enum Service {
+    Blob,
+    Queue,
+    Table,
+}
+
+impl Service {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Blob => "blob",
+            Self::Queue => "queue",
+            Self::Table => "table",
+        }
+    }
+}
 
 pub(super) fn sign_sas(
     key_document: &str,
     (account, container, blob): (&str, &str, Option<&str>),
     permissions: &str,
     expiry: &str,
+) -> Result<String> {
+    sign_sas_with_overrides(
+        key_document,
+        (account, container, blob),
+        permissions,
+        expiry,
+        [""; 5],
+    )
+}
+
+fn sign_sas_with_overrides(
+    key_document: &str,
+    (account, container, blob): (&str, &str, Option<&str>),
+    permissions: &str,
+    expiry: &str,
+    overrides: [&str; 5],
 ) -> Result<String> {
     let fields = flat_xml(key_document, "UserDelegationKey")
         .context("invalid user delegation key envelope")?;
@@ -47,7 +88,8 @@ pub(super) fn sign_sas(
         None => (format!("/blob/{account}/{container}"), "c"),
     };
     let string_to_sign = format!(
-        "{permissions}\n\n{expiry}\n{path}\n{oid}\n{tid}\n{start}\n{end}\n{service}\n{version}\n\n\n\n\nhttps\n{VERSION}\n{resource}\n\n\n\n\n\n\n"
+        "{permissions}\n\n{expiry}\n{path}\n{oid}\n{tid}\n{start}\n{end}\n{service}\n{version}\n\n\n\n\nhttps\n{VERSION}\n{resource}\n\n\n{}",
+        overrides.join("\n"),
     );
     let value = STANDARD
         .decode(get("Value")?)
@@ -60,7 +102,7 @@ pub(super) fn sign_sas(
         Hmac::<Sha256>::new_from_slice(&value).map_err(|_| anyhow!("invalid HMAC key"))?;
     mac.update(string_to_sign.as_bytes());
     let signature = STANDARD.encode(mac.finalize().into_bytes());
-    Ok(sas_query(&[
+    let mut fields = vec![
         ("sv", VERSION),
         ("sr", resource),
         ("sp", permissions),
@@ -73,7 +115,14 @@ pub(super) fn sign_sas(
         ("sks", service),
         ("skv", version),
         ("sig", &signature),
-    ]))
+    ];
+    fields.extend(
+        SAS_RESPONSE_FIELDS
+            .into_iter()
+            .zip(overrides)
+            .filter(|(_, value)| !value.is_empty()),
+    );
+    Ok(sas_query(&fields))
 }
 
 fn request(client: &Client, method: Method, url: Url) -> RequestBuilder {
@@ -84,7 +133,11 @@ fn request(client: &Client, method: Method, url: Url) -> RequestBuilder {
 }
 
 fn send(request: RequestBuilder, phase: &'static str) -> Result<Response> {
-    request.send().map_err(|error| {
+    sent(request.send(), phase)
+}
+
+fn sent(response: reqwest::Result<Response>, phase: &'static str) -> Result<Response> {
+    response.map_err(|error| {
         let kind = if error.is_timeout() {
             "timeout"
         } else if error.is_connect() {
@@ -143,13 +196,24 @@ fn get_delegation_key(
     )
 }
 
-fn observe_blob(
+fn delegation_key_document(
     client: &Client,
-    account: &str,
     endpoint: &Url,
     bearer: &str,
-    source: Source,
-) -> Result<Cassette> {
+    expiry: &str,
+) -> Result<String> {
+    let key = get_delegation_key(client, endpoint, bearer, Some(&iso(-120)), Some(expiry))?;
+    require_status(&key, 200, "get user delegation key")?;
+    String::from_utf8(read_bounded(key)?)
+        .map_err(|_| anyhow!("invalid user delegation key encoding"))
+}
+
+fn with_fresh_container<T>(
+    client: &Client,
+    endpoint: &Url,
+    bearer: &str,
+    observe: impl FnOnce(&str, Url) -> Result<T>,
+) -> Result<T> {
     let container = format!("azuifer-contract-{}", Uuid::new_v4().simple());
     let container_url = endpoint.join(&format!("{container}?restype=container"))?;
     let blob_url = endpoint.join(&format!("{container}/{BLOB}"))?;
@@ -162,7 +226,43 @@ fn observe_blob(
     )?;
     require_status(&created, 201, "create test container")?;
 
-    let outcome = (|| {
+    let outcome = observe(&container, blob_url);
+    let cleanup = remove_test_container(client, container_url, bearer);
+    finish_cleanup(outcome, cleanup)
+}
+
+fn remove_test_container(client: &Client, container_url: Url, bearer: &str) -> Result<()> {
+    let response = send(
+        request(client, Method::DELETE, container_url).bearer_auth(bearer),
+        "delete test container",
+    )?;
+    // Some journeys delete their own container before cleanup.
+    if response.status().as_u16() == 404
+        && header_text(response.headers(), "x-ms-error-code") == Some("ContainerNotFound")
+    {
+        return Ok(());
+    }
+    require_status(&response, 202, "delete test container")
+}
+
+fn finish_cleanup<T>(outcome: Result<T>, cleanup: Result<()>) -> Result<T> {
+    match (outcome, cleanup) {
+        (Ok(cassette), Ok(())) => Ok(cassette),
+        (Ok(_), Err(error)) | (Err(error), Ok(())) => Err(error),
+        (Err(scenario), Err(cleanup)) => {
+            Err(anyhow!("{scenario:#}; cleanup also failed: {cleanup:#}"))
+        }
+    }
+}
+
+fn observe_blob(
+    client: &Client,
+    account: &str,
+    endpoint: &Url,
+    bearer: &str,
+    source: Source,
+) -> Result<Cassette> {
+    with_fresh_container(client, endpoint, bearer, |container, blob_url| {
         let put = send(
             request(client, Method::PUT, blob_url.clone())
                 .bearer_auth(bearer)
@@ -178,15 +278,11 @@ fn observe_blob(
             .context("seed test blob: missing or malformed ETag")?;
 
         let expiry = iso(900);
-        let key = get_delegation_key(client, endpoint, bearer, Some(&iso(-120)), Some(&expiry))?;
-        require_status(&key, 200, "get user delegation key")?;
-        let key = read_bounded(key)?;
-        let key = std::str::from_utf8(&key)
-            .map_err(|_| anyhow!("invalid user delegation key encoding"))?;
+        let key = delegation_key_document(client, endpoint, bearer, &expiry)?;
         let mut signed_url = blob_url;
         signed_url.set_query(Some(&sign_sas(
-            key,
-            (account, &container, Some(BLOB)),
+            &key,
+            (account, container, Some(BLOB)),
             "r",
             &expiry,
         )?));
@@ -212,20 +308,7 @@ fn observe_blob(
             .try_into()
             .map_err(|_| anyhow!("missing SAS probe results"))?;
         Ok(Cassette::new(source, exchanges))
-    })();
-
-    let cleanup = send(
-        request(client, Method::DELETE, container_url).bearer_auth(bearer),
-        "delete test container",
-    )
-    .and_then(|response| require_status(&response, 202, "delete test container"));
-    match (outcome, cleanup) {
-        (Ok(cassette), Ok(())) => Ok(cassette),
-        (Ok(_), Err(error)) | (Err(error), Ok(())) => Err(error),
-        (Err(scenario), Err(cleanup)) => {
-            Err(anyhow!("{scenario:#}; cleanup also failed: {cleanup:#}"))
-        }
-    }
+    })
 }
 
 fn observe_local() -> Result<Cassette> {
@@ -234,12 +317,24 @@ fn observe_local() -> Result<Cassette> {
     })
 }
 
+fn reviewed_sas() -> Result<Cassette> {
+    Cassette::load_azure(SAS_CASSETTE)
+}
+
 fn with_local<T>(observe: impl FnOnce(&Client, &Url, &str) -> Result<T>) -> Result<T> {
+    with_local_service(Service::Blob, observe)
+}
+
+fn with_local_service<T>(
+    service: Service,
+    observe: impl FnOnce(&Client, &Url, &str) -> Result<T>,
+) -> Result<T> {
+    let service = service.name();
     let server = Server::start(
         &[
             "--in-memory",
             "--services",
-            "blob",
+            service,
             "--tls-generate",
             "--oauth",
             "basic",
@@ -247,25 +342,28 @@ fn with_local<T>(observe: impl FnOnce(&Client, &Url, &str) -> Result<T>) -> Resu
         &[],
     );
     let trusting = client(Some(&server.generated_certificate()));
-    let endpoint = Url::parse(&format!("{}/{ACCOUNT}/", server.url("blob")))?;
+    let endpoint = Url::parse(&format!("{}/{ACCOUNT}/", server.url(service)))?;
     observe(&trusting, &endpoint, &basic_token())
 }
 
 #[test]
 fn replay_blob_sas_contract() -> Result<()> {
-    let expected =
-        match std::env::var_os("AZUIFER_CONTRACT_REPLAY_FILE") {
-            Some(path) => Cassette::load(&read_bounded(File::open(path).map_err(|error| {
-                anyhow!("could not open replay cassette ({:?})", error.kind())
-            })?)?)?,
-            None => Cassette::load(SYNTHETIC)?,
-        };
-    expected.compare(&observe_local()?)
+    reviewed_sas()?.compare(&observe_local()?)
+}
+
+#[test]
+#[ignore = "optional saved SAS cassette: set AZUIFER_CONTRACT_REPLAY_FILE"]
+fn replay_saved_blob_sas_contract() -> Result<()> {
+    let path = std::env::var_os("AZUIFER_CONTRACT_REPLAY_FILE")
+        .context("AZUIFER_CONTRACT_REPLAY_FILE must select a saved SAS cassette")?;
+    let file = File::open(path)
+        .map_err(|error| anyhow!("could not open replay cassette ({:?})", error.kind()))?;
+    Cassette::load(&read_bounded(file)?)?.compare(&observe_local()?)
 }
 
 #[test]
 fn replay_detects_a_changed_range_contract() -> Result<()> {
-    let mut changed: serde_json::Value = serde_json::from_slice(SYNTHETIC)?;
+    let mut changed: serde_json::Value = serde_json::from_slice(SAS_CASSETTE)?;
     changed["exchanges"][1]["content_length"] = serde_json::json!(99);
     let changed = Cassette::load(&serde_json::to_vec(&changed)?)?;
     let error = changed

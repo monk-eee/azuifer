@@ -96,7 +96,7 @@ pub(super) fn serialization(node: Option<&Node>) -> Result<Option<Format>> {
 
 pub(super) struct Input {
     pub(super) headers: Option<Vec<String>>,
-    pub(super) rows: Vec<Row>,
+    pub(super) rows: Vec<(u64, Row)>,
 }
 
 /// A malformed record: the message and its byte offset.
@@ -116,9 +116,18 @@ fn read_json(text: &str) -> std::result::Result<Input, ReadError> {
     let mut stream = serde_json::Deserializer::from_str(text).into_iter::<Json>();
     let mut rows = Vec::new();
     loop {
+        let scanned = stream.byte_offset();
+        let remaining = text.get(scanned..).ok_or_else(|| ReadError {
+            message: "invalid JSON byte offset".into(),
+            position: scanned as u64,
+        })?;
+        let start = text.len()
+            - remaining
+                .trim_start_matches(|c: char| c.is_ascii_whitespace())
+                .len();
         match stream.next() {
             None => break,
-            Some(Ok(value)) => rows.push(Row::Json(value)),
+            Some(Ok(value)) => rows.push((start as u64, Row::Json(value))),
             Some(Err(error)) => {
                 return Err(ReadError {
                     message: format!("invalid JSON: {error}"),
@@ -134,7 +143,7 @@ fn read_json(text: &str) -> std::result::Result<Input, ReadError> {
 }
 
 fn read_delimited(text: &str, config: &Delimited) -> Input {
-    let mut records: Vec<Vec<String>> = Vec::new();
+    let mut records = Vec::new();
     let mut fields: Vec<String> = Vec::new();
     let mut field = String::new();
     let mut in_quote = false;
@@ -142,16 +151,21 @@ fn read_delimited(text: &str, config: &Delimited) -> Input {
     let chars: Vec<char> = text.chars().collect();
     let separator: Vec<char> = config.record.chars().collect();
     let mut at = 0;
+    let mut byte_offset = 0;
+    let mut record_start = 0;
     let mut record_started = false;
     while at < chars.len() {
         let c = chars[at];
+        byte_offset += c.len_utf8();
         if in_quote {
             if Some(c) == config.escape && config.escape != config.quote && at + 1 < chars.len() {
                 field.push(chars[at + 1]);
+                byte_offset += chars[at + 1].len_utf8();
                 at += 2;
             } else if Some(c) == config.quote {
                 if chars.get(at + 1) == Some(&c) {
                     field.push(c);
+                    byte_offset += c.len_utf8();
                     at += 2;
                 } else {
                     in_quote = false;
@@ -168,10 +182,12 @@ fn read_delimited(text: &str, config: &Delimited) -> Input {
                 field.pop();
             }
             fields.push(std::mem::take(&mut field));
-            records.push(std::mem::take(&mut fields));
+            records.push((record_start, std::mem::take(&mut fields)));
             quoted = false;
             record_started = false;
             at += separator.len();
+            byte_offset += config.record.len() - c.len_utf8();
+            record_start = byte_offset;
             continue;
         }
         record_started = true;
@@ -188,13 +204,19 @@ fn read_delimited(text: &str, config: &Delimited) -> Input {
     }
     if record_started || !field.is_empty() || !fields.is_empty() {
         fields.push(field);
-        records.push(fields);
+        records.push((record_start, fields));
     }
     let mut records = records.into_iter();
-    let headers = if config.headers { records.next() } else { None };
+    let headers = if config.headers {
+        records.next().map(|(_, fields)| fields)
+    } else {
+        None
+    };
     Input {
         headers,
-        rows: records.map(Row::Csv).collect(),
+        rows: records
+            .map(|(offset, fields)| (offset as u64, Row::Csv(fields)))
+            .collect(),
     }
 }
 
@@ -262,7 +284,7 @@ mod tests {
         input
             .rows
             .iter()
-            .map(|row| match row {
+            .map(|(_, row)| match row {
                 Row::Csv(fields) => fields.iter().map(String::as_str).collect(),
                 Row::Json(_) => unreachable!(),
             })

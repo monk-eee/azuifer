@@ -50,13 +50,13 @@ pub(crate) async fn execute(
     match op {
         Operation::ListContainers(account, page, metadata, deleted) => {
             let endpoint = storage_endpoint(app, account.as_str());
-            let (limit, prefix) = (page.limit, page.prefix.clone());
+            let xml = respond::container_list_xml(&endpoint, &page);
             if deleted {
                 let page = store.list_containers_with_deleted(account, page).await?;
-                return lifecycle::list_containers(&endpoint, limit, &prefix, page, metadata);
+                return lifecycle::list_containers(xml, page, metadata);
             }
             let page = store.list_containers(account, page).await?;
-            respond::list_containers(&endpoint, limit, &prefix, page, metadata)
+            respond::list_containers(xml, page, metadata)
         }
         Operation::GetServiceProperties(account) => {
             let properties = store.service_properties(account).await?;
@@ -155,21 +155,11 @@ pub(crate) async fn execute(
                 return blob_snapshot::list(app, key, request, lease).await;
             }
             let endpoint = storage_endpoint(app, key.account.as_str());
-            let name = key.name.as_str().to_owned();
-            let prefix = request.page.prefix.clone();
-            let delimiter = request.delimiter.clone();
-            let limit = request.page.limit;
+            let xml = respond::blob_list_xml(&endpoint, key.name.as_str(), &request);
             let include = request.include.clone();
             let hierarchical = app.config.hns_accounts.contains(&key.account);
             let listing = store.list_blobs(key, request, lease).await?;
-            respond::list_blobs(
-                &endpoint,
-                &name,
-                (&prefix, delimiter.as_deref(), limit),
-                listing,
-                &include,
-                hierarchical,
-            )
+            respond::list_blobs(xml, listing, &include, hierarchical)
         }
         Operation::PutBlob(key, body_options, options) => {
             let upload = receive_upload(app, body, &body_options).await?;

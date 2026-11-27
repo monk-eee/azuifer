@@ -47,7 +47,10 @@ pub(super) async fn execute(
             let written = store.put_page(key, write, Some(source.upload)).await?;
             page_written(written, Some(checksum))
         }
-        PageOperation::PageRanges(key, query) => page_list(store.page_ranges(key, query).await?),
+        PageOperation::PageRanges(key, query) => {
+            let paged = query.limit.is_some() || query.marker.is_some();
+            page_list(store.page_ranges(key, query).await?, paged)
+        }
         PageOperation::AppendBlock(key, write, options) => {
             let upload = receive_upload(app, body, &options).await?;
             let checksum = upload.checksums.response(options.checksum);
@@ -148,7 +151,7 @@ fn appended(appended: Appended, checksum: (&'static str, String)) -> Result<Resp
     write_response(response, checksum)
 }
 
-fn page_list(list: PageRanges) -> Result<Response> {
+fn page_list(list: PageRanges, paged: bool) -> Result<Response> {
     let mut xml = Xml::root("PageList", &[]);
     // A diff lists changed and cleared ranges together, in offset order.
     let mut entries: Vec<(&std::ops::Range<u64>, &str)> = list
@@ -164,10 +167,12 @@ fn page_list(list: PageRanges) -> Result<Response> {
         xml.element("End", &(range.end - 1).to_string());
         xml.close(tag);
     }
-    xml.element(
-        "NextMarker",
-        &list.next.map(|next| next.to_string()).unwrap_or_default(),
-    );
+    if paged {
+        xml.element(
+            "NextMarker",
+            &list.next.map(|next| next.to_string()).unwrap_or_default(),
+        );
+    }
     let mut response = xml.finish("PageList", StatusCode::OK);
     entity_headers(response.headers_mut(), list.entity)?;
     set(

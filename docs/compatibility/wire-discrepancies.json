@@ -30,11 +30,11 @@
         },
         {
           "kind": "live",
-          "reference": "cf4ae1673295b316bbd3ba8e9a12c6e5369fa909:tests/contracts/cassettes/blob-user-delegation-sas-list.json#list_first",
+          "reference": "b4b07c1de8e2d18178829c76fab1ea4853463f26:tests/contracts/cassettes/blob-user-delegation-sas-list.json#list_first",
           "source": "azure",
           "api_version": "2023-11-03",
           "auth_mode": "user_delegation_sas",
-          "detail": "status=200; body.entries[0].etag=unquoted_match. Recording inspected on the unmerged cassette branch."
+          "detail": "status=200; body.entries[0].etag=unquoted_match."
         }
       ],
       "status": "observed"
@@ -60,11 +60,11 @@
         },
         {
           "kind": "live",
-          "reference": "0682d29586aa366ba79f55a8cb7682627ec28799:tests/contracts/cassettes/blob-range-checksums.json#reject_both_checksums",
+          "reference": "2052c6dde020e82b22aa65810d4ae528a9805656:tests/contracts/cassettes/blob-range-checksums.json#reject_both_checksums",
           "source": "azure",
           "api_version": "2023-11-03",
           "auth_mode": "bearer",
-          "detail": "status=400; error_header and body.code=both_crc64_and_md5_range_header_present. Recording inspected on the unmerged cassette branch."
+          "detail": "status=400; error_header and body.code=both_crc64_and_md5_range_header_present."
         }
       ],
       "status": "observed"
@@ -85,11 +85,11 @@
         },
         {
           "kind": "live",
-          "reference": "0682d29586aa366ba79f55a8cb7682627ec28799:tests/contracts/cassettes/blob-conditional-reads.json#head_not_modified",
+          "reference": "2052c6dde020e82b22aa65810d4ae528a9805656:tests/contracts/cassettes/blob-conditional-reads.json#head_not_modified",
           "source": "azure",
           "api_version": "2023-11-03",
           "auth_mode": "bearer",
-          "detail": "status=304; error_header=condition_not_met; body.kind=empty. get_not_modified and mixed_not_modified agree. Recording inspected on the unmerged cassette branch."
+          "detail": "status=304; error_header=condition_not_met; body.kind=empty. get_not_modified and mixed_not_modified agree."
         }
       ],
       "status": "observed"
@@ -142,6 +142,294 @@
         }
       ],
       "status": "awaiting_live_recording"
+    },
+    {
+      "id": "WD-012",
+      "service": "blob",
+      "operation": "Query Blob Contents",
+      "category": "live_vs_docs",
+      "summary": "Successful Blob queries return HTTP 200, not 202.",
+      "expected_by_docs_or_sdk": "The Learn response section says a well-formed, authorized query returns 202 Accepted with an Avro body.",
+      "observed_behavior": "The CSV filter and JSON projection both return 200 with Content-Type avro/binary and no Content-Length. The media type agrees with Learn.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/7311e3c3222f07325501561cc216c4161547a961/docs-ref-conceptual/storageservices/query-blob-contents.md",
+          "detail": "Response status and headers specify 202 and avro/binary."
+        },
+        {
+          "kind": "live",
+          "reference": "3a00d9514e463cde8067248c33ced8ec575d9266:tests/contracts/cassettes/blob-query-avro.json#csv_filter",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=200, media=avro_binary, length_present=false. json_projection records the same wire fields."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-013",
+      "service": "blob",
+      "operation": "Query Blob Contents",
+      "category": "undocumented_live",
+      "summary": "A query with no matching rows still starts with an empty Avro resultData record.",
+      "expected_by_docs_or_sdk": "Learn shows the Avro record schema but does not specify the empty-result sequence or object-container block framing.",
+      "observed_behavior": "A no-match CSV query yields a zero-byte resultData record, then progress and end. The recorded stream has one record per Avro block and does not explicitly declare the null codec.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/7311e3c3222f07325501561cc216c4161547a961/docs-ref-conceptual/storageservices/query-blob-contents.md",
+          "detail": "Response body defines the Avro union without specifying what an empty result emits."
+        },
+        {
+          "kind": "live",
+          "reference": "3a00d9514e463cde8067248c33ced8ec575d9266:tests/contracts/cassettes/blob-query-avro.json#empty_result",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "First record is data with bytes=0, followed by progress and end; block_sizes=[1,1,1] and explicit_null_codec=false."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-014",
+      "service": "blob",
+      "operation": "Query Blob Contents",
+      "category": "undocumented_live",
+      "summary": "Bad CSV casts produce nonfatal InvalidTypeConversion records at row byte offsets.",
+      "expected_by_docs_or_sdk": "Learn documents that Avro errors can be nonfatal and carry a blob offset; it does not identify this conversion failure's code or record sequence.",
+      "observed_behavior": "HTTP 200 carries an empty resultData record, three nonfatal InvalidTypeConversion errors at offsets 0, 7 and 14, then progress and end for the 20-byte input.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/7311e3c3222f07325501561cc216c4161547a961/docs-ref-conceptual/storageservices/query-blob-contents.md",
+          "detail": "The error record defines fatal, name, description and blob offset without naming InvalidTypeConversion."
+        },
+        {
+          "kind": "live",
+          "reference": "3a00d9514e463cde8067248c33ced8ec575d9266:tests/contracts/cassettes/blob-query-avro.json#conversion_errors",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "Three error records have fatal=false, name=invalid_type_conversion, and description_matches=true for 'Invalid type conversion.'."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-015",
+      "service": "blob",
+      "operation": "Query Blob Contents",
+      "category": "undocumented_live",
+      "summary": "Invalid SQL can return an HTTP 400 XML error before the Avro stream opens.",
+      "expected_by_docs_or_sdk": "Learn describes errors encountered during response streaming, but does not specify the HTTP error for this invalid SQL expression.",
+      "observed_behavior": "Azure returns 400 ErrorProcessingQueryExpression, with the expression in the XML syntax-error message and request correlation. This is not an in-band row error.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/7311e3c3222f07325501561cc216c4161547a961/docs-ref-conceptual/storageservices/query-blob-contents.md",
+          "detail": "The status section describes well-formed requests and in-stream errors, not this syntax rejection."
+        },
+        {
+          "kind": "live",
+          "reference": "3a00d9514e463cde8067248c33ced8ec575d9266:tests/contracts/cassettes/blob-query-avro.json#invalid_sql",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=400, media=xml, error_header=query_expression; body.message_matches and body.correlation confirm the syntax rejection."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-016",
+      "service": "blob",
+      "operation": "Submit Batch",
+      "category": "live_vs_docs",
+      "summary": "An empty container-scoped Blob Batch returns outer 202 with an embedded 400.",
+      "expected_by_docs_or_sdk": "Learn says an empty batch fails with HTTP 400 and describes outer 202 for a well-formed, authorized batch.",
+      "observed_behavior": "The empty container-scoped request returns outer 202 with a single embedded 400 InvalidInput, no Content-ID, and correlated XML. A truncated part has the same response shape.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/ad1abc07a0db92c69443f571a14c54413100e27f/docs-ref-conceptual/storageservices/blob-batch.md",
+          "detail": "Remarks list 400 for an empty batch without specifying an embedded response."
+        },
+        {
+          "kind": "live",
+          "reference": "f65106d3f8de6f35e5a8b59787488cece12a2684:tests/contracts/cassettes/blob-batch-empty-envelope.json#response",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "response.status=202 and response.body.status=400 with header_code=invalid_input and no Content-ID."
+        },
+        {
+          "kind": "live",
+          "reference": "f65106d3f8de6f35e5a8b59787488cece12a2684:tests/contracts/cassettes/blob-batch-truncated-part.json#response",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "A truncated container-scoped part also returns outer 202 and one embedded 400 InvalidInput."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-017",
+      "service": "blob",
+      "operation": "Submit Batch",
+      "category": "undocumented_live",
+      "summary": "Mixed delete and tier subrequests return one embedded AllBatchSubRequestsShouldBeSameApi error.",
+      "expected_by_docs_or_sdk": "Learn requires homogeneous subrequests but does not specify the error code or where the failure appears for this container-scoped case.",
+      "observed_behavior": "Azure returns outer 202 with one embedded 400 and no Content-ID. The subsequent read finds the remaining blob unchanged.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/ad1abc07a0db92c69443f571a14c54413100e27f/docs-ref-conceptual/storageservices/blob-batch.md",
+          "detail": "The request-body section requires all subrequests to be the same request type."
+        },
+        {
+          "kind": "live",
+          "reference": "3a00d9514e463cde8067248c33ced8ec575d9266:tests/contracts/cassettes/blob-batch-mixed-results.json#mixed_batch",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=202; the sole part has status=400, error_header=mixed_batch_operations and no Content-ID. read_unaffected verifies state."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-018",
+      "service": "blob",
+      "operation": "Set Blob Tier",
+      "category": "undocumented_live",
+      "summary": "A P10 tier on a standard block blob returns InvalidHeaderValue with header details.",
+      "expected_by_docs_or_sdk": "Learn lists P10 for premium page blobs and a separate set of tiers for block blobs, but does not specify the response for using P10 on a standard block blob.",
+      "observed_behavior": "Azure returns 400 InvalidHeaderValue with HeaderName x-ms-access-tier and HeaderValue P10 in correlated XML. Cool tier, bytes, metadata and ETag are unchanged.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/01b1bfc52c2a9104d1000d2bda90fb178dffd7bd/docs-ref-conceptual/storageservices/set-blob-tier.md",
+          "detail": "The operation describes valid tiers by blob type but not this rejection payload."
+        },
+        {
+          "kind": "live",
+          "reference": "3a00d9514e463cde8067248c33ced8ec575d9266:tests/contracts/cassettes/blob-tier.json#reject_premium_tier",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=400 and error_header=invalid_header_value; rejected_tier details verify both echoed fields."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-020",
+      "service": "queue",
+      "operation": "List Queues",
+      "category": "undocumented_live",
+      "summary": "List Queues includes an empty Metadata element when metadata was requested but none is stored.",
+      "expected_by_docs_or_sdk": "Learn makes Metadata conditional on include=metadata but does not show how an empty metadata map is represented.",
+      "observed_behavior": "With include=metadata on both pages, the first queue has populated Metadata and the second has an empty Metadata element rather than no element.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/1fbdf8bcc8bb658b7685d53119ad8680e7254972/docs-ref-conceptual/storageservices/List-Queues1.md",
+          "detail": "Response body describes include=metadata and gives populated examples."
+        },
+        {
+          "kind": "live",
+          "reference": "d5a19598b1b864e205862d8606d991c4c83a4f3c:tests/contracts/cassettes/queue-lifecycle.json#next_page",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "body.metadata=empty on the continued page; first_page records metadata=updated."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-021",
+      "service": "table",
+      "operation": "Create Table / Query Tables / Delete Table",
+      "category": "live_vs_docs",
+      "summary": "Measured Table catalog errors do not include x-ms-error-code.",
+      "expected_by_docs_or_sdk": "The general Learn storage error page says failed operations from version 2017-07-29 onward also return the error code in the response header.",
+      "observed_behavior": "On these authenticated Table catalog errors the code is only in the negotiated OData JSON body. Neither x-ms-error-code nor DataServiceVersion is present. This does not describe entity or authorization errors.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/32af9f943b160c3276331209dad4fd0d80cdf078/docs-ref-conceptual/storageservices/Status-and-Error-Codes2.md",
+          "detail": "General error section says failed API operations also return the storage error code in x-ms-error-code starting in 2017-07-29."
+        },
+        {
+          "kind": "live",
+          "reference": "d5a19598b1b864e205862d8606d991c4c83a4f3c:tests/contracts/cassettes/table-lifecycle.json#repeat_create",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=409, media=json_no_metadata, error_header=missing and odata_version=missing; body.code=table_already_exists. Both observed missing-table errors also omit the headers."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-022",
+      "service": "table",
+      "operation": "Query Tables / Delete Table",
+      "category": "undocumented_live",
+      "summary": "Named Table catalog lookups and repeated deletes return ResourceNotFound.",
+      "expected_by_docs_or_sdk": "The Table-specific error list names TableNotFound at 404 but does not list ResourceNotFound; the Delete Table page does not specify this error code.",
+      "observed_behavior": "Reading the just-deleted table by name and repeating its deletion both return 404 ResourceNotFound in OData JSON.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/ede20618bc9a933eedfaa72d22c76ef581326087/docs-ref-conceptual/storageservices/Table-Service-Error-Codes.md",
+          "detail": "The error table lists TableNotFound but not ResourceNotFound."
+        },
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/2461c63e2a14e5af9d36a3b420a5482dc20343a1/docs-ref-conceptual/storageservices/Delete-Table.md",
+          "detail": "The operation documents successful deletion and the name reuse delay without naming the repeated-delete error."
+        },
+        {
+          "kind": "live",
+          "reference": "d5a19598b1b864e205862d8606d991c4c83a4f3c:tests/contracts/cassettes/table-lifecycle.json#read_missing",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=404 and body.code=resource_not_found after successful delete. repeat_delete records the same status, code and correlation."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-023",
+      "service": "blob",
+      "operation": "Copy Blob",
+      "category": "live_vs_docs",
+      "summary": "If-None-Match: * on an existing copy destination returns 409, not 412.",
+      "expected_by_docs_or_sdk": "The Copy Blob header table describes the wildcard as create-only and says an unmet If-None-Match condition returns 412.",
+      "observed_behavior": "The same-account block blob copy returns 409 BlobAlreadyExists with correlated XML. The destination keeps its bytes, ETag and copy ID.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/01b1bfc52c2a9104d1000d2bda90fb178dffd7bd/docs-ref-conceptual/storageservices/Copy-Blob.md",
+          "detail": "The If-None-Match row covers the wildcard and lists 412 for an unmet condition."
+        },
+        {
+          "kind": "live",
+          "reference": "4af9ed4150f828b864239b22cff0208bc43315cf:tests/contracts/cassettes/blob-completed-copy.json#reject_copy_destination",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "request.if_none_match_star=matches, status=409, and error_header=blob_already_exists. read_unchanged_copy verifies the destination."
+        }
+      ],
+      "status": "observed"
     }
   ],
   "observations": [
@@ -161,11 +449,11 @@
         },
         {
           "kind": "live",
-          "reference": "cf4ae1673295b316bbd3ba8e9a12c6e5369fa909:tests/contracts/cassettes/blob-user-delegation-sas-list.json#list_next",
+          "reference": "b4b07c1de8e2d18178829c76fab1ea4853463f26:tests/contracts/cassettes/blob-user-delegation-sas-list.json#list_next",
           "source": "azure",
           "api_version": "2023-11-03",
           "auth_mode": "user_delegation_sas",
-          "detail": "status=200; body.echoed_marker=matches. Recording inspected on the unmerged cassette branch."
+          "detail": "status=200; body.echoed_marker=matches."
         }
       ],
       "status": "documented_match"
@@ -191,6 +479,36 @@
         }
       ],
       "status": "needs_evidence"
+    },
+    {
+      "id": "WD-019",
+      "service": "blob",
+      "operation": "Lease Blob",
+      "category": "documented_match",
+      "summary": "Acquiring with the current lease ID during a break returns the documented 409.",
+      "expected_by_docs_or_sdk": "The Lease Blob transition table specifies 409 for acquiring with the current ID while Breaking; the Blob error table names LeaseIsBreakingAndCannotBeAcquired.",
+      "observed_behavior": "Azure returns 409 LeaseIsBreakingAndCannotBeAcquired with correlated XML. After the break expires, acquisition succeeds.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/7311e3c3222f07325501561cc216c4161547a961/docs-ref-conceptual/storageservices/Lease-Blob.md",
+          "detail": "Transition table: Acquire (A) in Breaking (A) fails with 409."
+        },
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/73da3c4c8e320ec0097168c335707da920c789d2/docs-ref-conceptual/storageservices/Blob-Service-Error-Codes.md",
+          "detail": "Lists LeaseIsBreakingAndCannotBeAcquired with the same status and message."
+        },
+        {
+          "kind": "live",
+          "reference": "3a00d9514e463cde8067248c33ced8ec575d9266:tests/contracts/cassettes/blob-finite-lease.json#reject_acquire_while_breaking",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=409 and error_header=lease_breaking_no_acquire; read_broken_blob and reacquire_blob_lease confirm the later transition."
+        }
+      ],
+      "status": "documented_match"
     }
   ]
 }

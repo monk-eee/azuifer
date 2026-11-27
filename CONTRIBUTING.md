@@ -30,13 +30,14 @@ unsubstantiated leads belong in `observations`, not the running discrepancy tall
 Ledger validation does not establish Azuifer parity.
 
 Run these stdlib-only checks with an active virtualenv's Python (or use `uv run`
-for the audit script):
+for the audit scripts):
 
 ```sh
+python scripts/audit-azure-recording-plan.py
 python scripts/audit-wire-discrepancies.py
-python -m unittest discover -s scripts -p test_audit_wire_discrepancies.py
+python -m unittest discover -s scripts -p "test_*.py"
 ```
 
-Both run in CI on Linux, macOS, and Windows. The same checks are available through
-the [local pre-commit hooks](.pre-commit-config.yaml) with `pre-commit run --all-files`
-when pre-commit is installed in your development environment.
+These run in CI on Linux, macOS, and Windows. The wire ledger audit and its tests
+are also available through the [local pre-commit hooks](.pre-commit-config.yaml)
+with `pre-commit run --all-files`.

@@ -1,0 +1,138 @@
+{
+  "schema_version": 2,
+  "source": "azure",
+  "case": "blob-conditional-reads",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "head_not_modified",
+      "request": {
+        "method": "head",
+        "operation": "blob",
+        "body_bytes": 0,
+        "if_none_match_etag": "matches"
+      },
+      "status": 304,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "condition_not_met",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "reject_stale_read",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0,
+        "if_match": "different"
+      },
+      "status": 412,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "condition_not_met",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "condition_not_met",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "get_not_modified",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0,
+        "if_modified_since": "same"
+      },
+      "status": 304,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "condition_not_met",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "reject_old_unmodified_since",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0,
+        "if_unmodified_since": "earlier"
+      },
+      "status": 412,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "condition_not_met",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "condition_not_met",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "read_matching_range",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0,
+        "if_match": "matches",
+        "range": {
+          "start": 0,
+          "end": 4
+        }
+      },
+      "status": 206,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 5,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      },
+      "details": {
+        "kind": "range",
+        "content_range": "matches",
+        "md5": "missing",
+        "crc64": "missing"
+      }
+    },
+    {
+      "step": "mixed_not_modified",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0,
+        "if_match": "matches",
+        "if_none_match_etag": "different",
+        "if_modified_since": "same",
+        "if_unmodified_since": "same"
+      },
+      "status": 304,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "condition_not_met",
+      "body": {
+        "kind": "empty"
+      }
+    }
+  ]
+}

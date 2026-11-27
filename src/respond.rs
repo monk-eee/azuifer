@@ -1,15 +1,15 @@
 //! Maps typed Blob outcomes to Azure responses: headers, XML bodies, and errors.
 
 use crate::{
-    blob_page::BlobKind,
+    blob_page::{BlobKind, PageError},
     blob_sas::Overrides,
     domain::{
-        BlobInfo, BlobListing, ContainerInfo, Entity, Error, Include, ListEntry, Metadata, Page,
-        PublicAccess, Result, SignedIdentifier,
+        BlobInfo, BlobListing, ContainerInfo, Entity, Error, Include, ListEntry, ListRequest,
+        Metadata, Page, PageRequest, PublicAccess, Result, SignedIdentifier,
     },
     lease::LeaseView,
     store::{Download, Payload},
-    wire::Xml,
+    wire::{Xml, correlated_error_message, xml_error, xml_error_with_details},
 };
 use axum::{
     body::Body,
@@ -17,7 +17,7 @@ use axum::{
     response::Response,
 };
 use futures_util::TryStreamExt as _;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt as _;
 use tokio_util::io::ReaderStream;
 
@@ -271,8 +271,8 @@ pub(crate) fn blob_metadata_response(download: Download) -> Result<Response> {
 pub(crate) fn container_response(info: ContainerInfo, metadata_only: bool) -> Result<Response> {
     let mut response = entity_response(StatusCode::OK, info.entity)?;
     let headers = response.headers_mut();
-    lease_headers(headers, info.lease)?;
     if !metadata_only {
+        lease_headers(headers, info.lease)?;
         if let Some(access) = info.public_access.name() {
             set(headers, "x-ms-blob-public-access", access)?;
         }
@@ -327,19 +327,28 @@ pub(crate) fn lease_elements(xml: &mut Xml, view: LeaseView) {
     }
 }
 
+pub(crate) fn container_list_xml(endpoint: &str, page: &PageRequest) -> Xml {
+    let mut xml = Xml::root("EnumerationResults", &[("ServiceEndpoint", endpoint)]);
+    paging_elements(&mut xml, page);
+    xml.open("Containers");
+    xml
+}
+
+fn paging_elements(xml: &mut Xml, page: &PageRequest) {
+    if !page.prefix.is_empty() {
+        xml.element("Prefix", &page.prefix);
+    }
+    if let Some(marker) = page.marker() {
+        xml.element("Marker", &marker);
+    }
+    xml.element("MaxResults", &page.limit.to_string());
+}
+
 pub(crate) fn list_containers(
-    endpoint: &str,
-    limit: u32,
-    prefix: &str,
+    mut xml: Xml,
     page: Page<ContainerInfo>,
     metadata: bool,
 ) -> Result<Response> {
-    let mut xml = Xml::root("EnumerationResults", &[("ServiceEndpoint", endpoint)]);
-    if !prefix.is_empty() {
-        xml.element("Prefix", prefix);
-    }
-    xml.element("MaxResults", &limit.to_string());
-    xml.open("Containers");
     for (name, info) in page.items {
         xml.open("Container");
         xml.element("Name", &name);
@@ -364,26 +373,25 @@ pub(crate) fn list_containers(
     Ok(xml.finish("EnumerationResults", StatusCode::OK))
 }
 
-pub(crate) fn list_blobs(
-    endpoint: &str,
-    container: &str,
-    (prefix, delimiter, limit): (&str, Option<&str>, u32),
-    listing: BlobListing,
-    include: &[Include],
-    hierarchical: bool,
-) -> Result<Response> {
+pub(crate) fn blob_list_xml(endpoint: &str, container: &str, request: &ListRequest) -> Xml {
     let mut xml = Xml::root(
         "EnumerationResults",
         &[("ServiceEndpoint", endpoint), ("ContainerName", container)],
     );
-    if !prefix.is_empty() {
-        xml.element("Prefix", prefix);
-    }
-    xml.element("MaxResults", &limit.to_string());
-    if let Some(delimiter) = delimiter {
+    paging_elements(&mut xml, &request.page);
+    if let Some(delimiter) = &request.delimiter {
         xml.element("Delimiter", delimiter);
     }
     xml.open("Blobs");
+    xml
+}
+
+pub(crate) fn list_blobs(
+    mut xml: Xml,
+    listing: BlobListing,
+    include: &[Include],
+    hierarchical: bool,
+) -> Result<Response> {
     for entry in listing.entries {
         match entry {
             ListEntry::Prefix(name) => {
@@ -443,7 +451,11 @@ pub(crate) fn blob_properties(
         return Ok(());
     }
     xml.element("Creation-Time", &http_date(info.created)?);
-    xml.entity(info.entity)?;
+    // The XML uses the opaque value without the HTTP ETag's quotes.
+    xml.entity_properties(
+        info.entity.modified,
+        info.entity.etag().as_str().trim_matches('"'),
+    )?;
     xml.element("Content-Length", &info.length.0.to_string());
     xml.element("Content-Type", &info.headers.content_type);
     xml.element("Content-Encoding", &info.headers.encoding);
@@ -490,8 +502,12 @@ pub(crate) fn blob_properties(
 
 impl Xml {
     pub(crate) fn entity(&mut self, entity: Entity) -> Result<()> {
-        self.element("Last-Modified", &http_date(entity.modified)?);
-        self.element("Etag", entity.etag().as_str());
+        self.entity_properties(entity.modified, entity.etag().as_str())
+    }
+
+    fn entity_properties(&mut self, modified: u64, etag: &str) -> Result<()> {
+        self.element("Last-Modified", &http_date(modified)?);
+        self.element("Etag", etag);
         Ok(())
     }
 
@@ -505,9 +521,9 @@ impl Xml {
 }
 
 /// The Azure status, error code, and message for a domain error.
-fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
+fn describe(error: Error) -> (StatusCode, &'static str, &'static str) {
     use StatusCode as S;
-    Some(match error {
+    match error {
         Error::AuthenticationFailed => (
             S::FORBIDDEN,
             "AuthenticationFailed",
@@ -527,6 +543,11 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
             S::BAD_REQUEST,
             "InvalidHeaderValue",
             "A request header is invalid or missing.",
+        ),
+        Error::IncompatibleBlobTier => (
+            S::BAD_REQUEST,
+            "InvalidHeaderValue",
+            "The value for one of the HTTP headers is not in the correct format.",
         ),
         Error::InvalidVersion => (
             S::BAD_REQUEST,
@@ -573,6 +594,11 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
             "InvalidBlockId",
             "The block ID is malformed or has inconsistent length.",
         ),
+        Error::BlockIdWidthMismatch => (
+            S::BAD_REQUEST,
+            "InvalidBlobOrBlock",
+            "The specified blob or block content is invalid.",
+        ),
         Error::InvalidBlockList => (
             S::BAD_REQUEST,
             "InvalidBlockList",
@@ -596,7 +622,7 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
         Error::ContainerExists => (
             S::CONFLICT,
             "ContainerAlreadyExists",
-            "The container already exists.",
+            "The specified container already exists.",
         ),
         Error::ContainerMissing => (
             S::NOT_FOUND,
@@ -623,8 +649,12 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
             "ResourceNotFound",
             "The specified resource does not exist.",
         ),
-        Error::ConditionNotMet => (
-            S::PRECONDITION_FAILED,
+        Error::ConditionNotMet | Error::NotModified => (
+            if error == Error::NotModified {
+                S::NOT_MODIFIED
+            } else {
+                S::PRECONDITION_FAILED
+            },
             "ConditionNotMet",
             "The condition specified using HTTP conditional header(s) is not met.",
         ),
@@ -633,7 +663,16 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
             "SourceConditionNotMet",
             "The source condition specified using HTTP conditional header(s) is not met.",
         ),
-        Error::NotModified | Error::InvalidRange(_) => return None,
+        Error::InvalidRange(_) => (
+            S::RANGE_NOT_SATISFIABLE,
+            "InvalidRange",
+            "The range specified is invalid for the current size of the resource.",
+        ),
+        Error::ConflictingRangeChecksums => (
+            S::BAD_REQUEST,
+            "BothCrc64AndMd5RangeHeaderPresent",
+            "Both x-ms-range-get-content-crc64 header and x-ms-range-get-content-md5 header are present.",
+        ),
         Error::QuotaExceeded => (
             S::INSUFFICIENT_STORAGE,
             "InsufficientStorage",
@@ -697,7 +736,12 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
         Error::LeaseIdMissing => (
             S::PRECONDITION_FAILED,
             "LeaseIdMissing",
-            "There is currently a lease on the resource and no lease ID was specified in the request.",
+            "There is currently a lease on the container and no lease ID was specified in the request.",
+        ),
+        Error::LeaseIdMissingBlob => (
+            S::PRECONDITION_FAILED,
+            "LeaseIdMissing",
+            "There is currently a lease on the blob and no lease ID was specified in the request.",
         ),
         Error::LeaseLost => (
             S::PRECONDITION_FAILED,
@@ -722,7 +766,12 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
         Error::LeaseMismatchLease => (
             S::CONFLICT,
             "LeaseIdMismatchWithLeaseOperation",
-            "The lease ID specified did not match the lease ID for the resource.",
+            "The lease ID specified did not match the lease ID for the blob.",
+        ),
+        Error::LeaseMismatchContainerLease => (
+            S::CONFLICT,
+            "LeaseIdMismatchWithLeaseOperation",
+            "The lease ID specified did not match the lease ID for the container.",
         ),
         Error::LeaseNotPresentBlob => (
             S::PRECONDITION_FAILED,
@@ -777,7 +826,7 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
         Error::SnapshotsPresent => (
             S::CONFLICT,
             "SnapshotsPresent",
-            "This operation is not permitted while the blob has snapshots.",
+            "This operation is not permitted because the blob has snapshots.",
         ),
         Error::InvalidTag => (
             S::BAD_REQUEST,
@@ -789,10 +838,15 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
             "TagsTooLarge",
             "The tags specified exceed the permitted number or length.",
         ),
-        Error::InvalidInput => (
+        Error::InvalidInput | Error::InvalidBatchEnvelope => (
             S::BAD_REQUEST,
             "InvalidInput",
             "One of the request inputs is not valid.",
+        ),
+        Error::MixedBatchOperations => (
+            S::BAD_REQUEST,
+            "AllBatchSubRequestsShouldBeSameApi",
+            "All batch subrequests should be the same api.",
         ),
         Error::CorsPreflight => (
             S::FORBIDDEN,
@@ -801,31 +855,110 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
         ),
         Error::Page(error) => error.describe(),
         Error::Ext(error) => error.describe(),
-    })
+    }
 }
 
 pub(crate) fn error_response(error: Error) -> Response {
-    let Some((status, code, message)) = describe(error) else {
-        return match error {
-            Error::InvalidRange(length) => {
-                let mut response = crate::wire::xml_error(
-                    StatusCode::RANGE_NOT_SATISFIABLE,
-                    "InvalidRange",
-                    "The range is outside the blob.",
-                );
-                if set(
-                    response.headers_mut(),
-                    "content-range",
-                    &format!("bytes */{length}"),
-                )
-                .is_err()
-                {
-                    return error_response(Error::Internal);
-                }
-                response
-            }
-            _ => empty(StatusCode::NOT_MODIFIED),
-        };
+    render_error(error, None)
+}
+
+pub(crate) fn correlated_error_response(
+    error: Error,
+    request_id: &str,
+    now: SystemTime,
+) -> Response {
+    render_error(error, Some((request_id, now)))
+}
+
+pub(crate) fn request_error_response(
+    error: Error,
+    request_headers: &HeaderMap,
+    request_id: &str,
+    now: SystemTime,
+) -> Response {
+    let rejected_header = match error {
+        Error::Page(PageError::UnalignedPageRange) => Some((
+            "Range",
+            request_headers
+                .get("x-ms-range")
+                .or_else(|| request_headers.get("range")),
+        )),
+        Error::IncompatibleBlobTier => {
+            Some(("x-ms-access-tier", request_headers.get("x-ms-access-tier")))
+        }
+        _ => None,
     };
-    crate::wire::xml_error(status, code, message)
+    if let Some((name, value)) = rejected_header {
+        let Some(value) = value.and_then(|value| value.to_str().ok()) else {
+            tracing::error!(header = name, "missing rejected Blob request header");
+            return error_response(Error::Internal);
+        };
+        let (status, code, message) = describe(error);
+        return xml_error_with_details(
+            status,
+            code,
+            &correlated_error_message(message, request_id, now),
+            &[("HeaderName", name), ("HeaderValue", value)],
+        );
+    }
+    let correlation = matches!(
+        error,
+        Error::PermissionMismatch
+            | Error::BlobAlreadyExists
+            | Error::ConditionNotMet
+            | Error::SourceConditionNotMet
+            | Error::NoPendingCopy
+            | Error::BlobMissing
+            | Error::ContainerExists
+            | Error::ContainerMissing
+            | Error::InvalidBlockList
+            | Error::BlockIdWidthMismatch
+            | Error::InvalidRange(_)
+            | Error::ConflictingRangeChecksums
+            | Error::LeaseIdMissing
+            | Error::LeaseIdMissingBlob
+            | Error::LeaseMismatchBlob
+            | Error::LeaseMismatchLease
+            | Error::LeaseMismatchContainerLease
+            | Error::LeaseBreakingNoAcquire
+            | Error::SnapshotsPresent
+            | Error::Page(
+                PageError::AppendPositionConditionNotMet
+                    | PageError::SequenceNumberConditionNotMet
+                    | PageError::MaxBlobSizeConditionNotMet
+                    | PageError::BlobIsSealed
+            )
+    )
+    .then_some((request_id, now));
+    render_error(error, correlation)
+}
+
+fn render_error(error: Error, correlation: Option<(&str, SystemTime)>) -> Response {
+    let (status, code, message) = describe(error);
+    if status == StatusCode::NOT_MODIFIED {
+        let mut response = empty(status);
+        response
+            .headers_mut()
+            .insert("x-ms-error-code", HeaderValue::from_static(code));
+        return response;
+    }
+    let mut response = match correlation {
+        Some((request_id, now)) => xml_error(
+            status,
+            code,
+            &correlated_error_message(message, request_id, now),
+        ),
+        None => xml_error(status, code, message),
+    };
+    if let Error::InvalidRange(length) = error
+        && set(
+            response.headers_mut(),
+            "content-range",
+            &format!("bytes */{length}"),
+        )
+        .is_err()
+    {
+        return error_response(Error::Internal);
+    }
+    response
 }

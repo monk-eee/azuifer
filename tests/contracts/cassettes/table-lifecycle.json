@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "table-lifecycle",
+  "api_version": "2023-11-03",
+  "exchanges": [
+    {
+      "step": "create",
+      "status": 204,
+      "api_version": "matches",
+      "request_id": "matches",
+      "odata_version": "missing",
+      "media": "missing",
+      "error_header": "missing",
+      "body": {
+        "kind": "table_created",
+        "empty": true,
+        "preference": "matches",
+        "location": "matches",
+        "resource_id": "matches"
+      }
+    },
+    {
+      "step": "repeat_create",
+      "status": 409,
+      "api_version": "matches",
+      "request_id": "matches",
+      "odata_version": "missing",
+      "media": "json_no_metadata",
+      "error_header": "missing",
+      "body": {
+        "kind": "table_error",
+        "code": "table_already_exists",
+        "english": true,
+        "message_matches": true,
+        "correlation": "matches",
+        "extra_properties": false
+      }
+    },
+    {
+      "step": "first_page",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "odata_version": "missing",
+      "media": "json_no_metadata",
+      "error_header": "missing",
+      "body": {
+        "kind": "table_page",
+        "continuation": "matches",
+        "expected_table": true,
+        "no_odata_metadata": true
+      }
+    },
+    {
+      "step": "next_page",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "odata_version": "missing",
+      "media": "json_no_metadata",
+      "error_header": "missing",
+      "body": {
+        "kind": "table_page",
+        "continuation": "missing",
+        "expected_table": true,
+        "no_odata_metadata": true
+      }
+    },
+    {
+      "step": "delete",
+      "status": 204,
+      "api_version": "matches",
+      "request_id": "matches",
+      "odata_version": "missing",
+      "media": "missing",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty",
+        "empty": true
+      }
+    },
+    {
+      "step": "read_missing",
+      "status": 404,
+      "api_version": "matches",
+      "request_id": "matches",
+      "odata_version": "missing",
+      "media": "json_no_metadata",
+      "error_header": "missing",
+      "body": {
+        "kind": "table_error",
+        "code": "resource_not_found",
+        "english": true,
+        "message_matches": true,
+        "correlation": "matches",
+        "extra_properties": false
+      }
+    },
+    {
+      "step": "repeat_delete",
+      "status": 404,
+      "api_version": "matches",
+      "request_id": "matches",
+      "odata_version": "missing",
+      "media": "json_no_metadata",
+      "error_header": "missing",
+      "body": {
+        "kind": "table_error",
+        "code": "resource_not_found",
+        "english": true,
+        "message_matches": true,
+        "correlation": "matches",
+        "extra_properties": false
+      }
+    }
+  ]
+}

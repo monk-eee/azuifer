@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "empty_batch",
+  "api_version": "2023-11-03",
+  "response": {
+    "status": 202,
+    "request_id": "matches",
+    "api_version": "matches",
+    "header_code": "missing",
+    "body": {
+      "kind": "multipart",
+      "status": 400,
+      "content_id_present": false,
+      "header_code": "invalid_input",
+      "request_id": true,
+      "api_version": "matches",
+      "error": {
+        "code": "invalid_input",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    }
+  }
+}

@@ -48,7 +48,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "DELETE /Tables('name') returns 204 and removes the table and its entities immediately; there is no asynchronous TableBeingDeleted window. Missing tables return 404 TableNotFound."
+      "notes": "DELETE /Tables('name') returns 204 and removes the table and its entities immediately; there is no asynchronous TableBeingDeleted window. Missing tables return 404 ResourceNotFound in the negotiated OData JSON."
     },
     {
       "name": "Entity Group Transactions",
@@ -171,7 +171,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "GET /Tables with $filter on TableName, $top (default and maximum 1000) and NextTableName continuation (x-ms-continuation-NextTableName). Results are ordered by case-folded table name. Also serves GET /Tables('name') for one table. A service SAS cannot list tables."
+      "notes": "GET /Tables with $filter on TableName, $top (default and maximum 1000) and NextTableName continuation (x-ms-continuation-NextTableName). Results are ordered by case-folded table name. GET /Tables('name') returns one table or 404 ResourceNotFound in the negotiated OData JSON. A service SAS cannot list tables."
     },
     {
       "name": "Set Table ACL",

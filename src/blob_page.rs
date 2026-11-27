@@ -77,6 +77,7 @@ impl BlobKind {
 pub(crate) enum PageError {
     InvalidBlobType,
     InvalidPageRange,
+    UnalignedPageRange,
     SequenceNumberConditionNotMet,
     SequenceNumberOverflow,
     AppendPositionConditionNotMet,
@@ -98,6 +99,11 @@ impl PageError {
                 "InvalidPageRange",
                 "The page range specified is invalid.",
             ),
+            Self::UnalignedPageRange => (
+                S::BAD_REQUEST,
+                "InvalidHeaderValue",
+                "The value for one of the HTTP headers is not in the correct format.",
+            ),
             Self::SequenceNumberConditionNotMet => (
                 S::PRECONDITION_FAILED,
                 "SequenceNumberConditionNotMet",
@@ -118,7 +124,11 @@ impl PageError {
                 "MaxBlobSizeConditionNotMet",
                 "The max blob size condition specified was not met.",
             ),
-            Self::BlobIsSealed => (S::CONFLICT, "BlobIsSealed", "The blob is sealed."),
+            Self::BlobIsSealed => (
+                S::CONFLICT,
+                "BlobIsSealed",
+                "The blob is sealed and its contents cannot be modified.",
+            ),
         }
     }
 }
@@ -276,7 +286,7 @@ pub(crate) fn page_range(text: &str) -> Result<Range<u64>> {
     }
     let end = end.checked_add(1).ok_or(Error::InvalidHeader)?;
     if !start.is_multiple_of(PAGE_SIZE) || !end.is_multiple_of(PAGE_SIZE) {
-        return Err(Error::Page(PageError::InvalidPageRange));
+        return Err(Error::Page(PageError::UnalignedPageRange));
     }
     Ok(start..end)
 }
@@ -497,7 +507,7 @@ mod tests {
         for unaligned in ["bytes=1-511", "bytes=0-512", "bytes=0-1022"] {
             assert_eq!(
                 page_range(unaligned),
-                Err(Error::Page(PageError::InvalidPageRange)),
+                Err(Error::Page(PageError::UnalignedPageRange)),
                 "{unaligned}"
             );
         }

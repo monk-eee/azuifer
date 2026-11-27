@@ -1363,7 +1363,7 @@ fn rejected_block_requests_leave_staged_bytes_and_quota_intact() {
     error(
         server.request(Method::PUT, &block("QUM="), &[], b"wide"),
         400,
-        "InvalidBlockId",
+        "InvalidBlobOrBlock",
     );
     assert_eq!(
         server
@@ -3101,7 +3101,7 @@ fn range_reads_can_return_a_checksum_of_the_range() {
             b"",
         ),
         400,
-        "InvalidHeaderValue",
+        "BothCrc64AndMd5RangeHeaderPresent",
     );
 }
 

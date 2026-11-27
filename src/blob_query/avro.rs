@@ -1,12 +1,12 @@
 //! The Avro object container Query Blob Contents answers with: a union of four record types
-//! (`resultData`, `progress`, `end`, `error`) in the schema, then one block of records.
+//! (`resultData`, `error`, `progress`, `end`) in the schema, then a block per record.
 
-const SCHEMA: &str = r#"[{"type":"record","name":"resultData","namespace":"com.microsoft.azure.storage.queryBlobContents","fields":[{"name":"data","type":"bytes"}]},{"type":"record","name":"progress","namespace":"com.microsoft.azure.storage.queryBlobContents","fields":[{"name":"bytesScanned","type":"long"},{"name":"totalBytes","type":"long"}]},{"type":"record","name":"end","namespace":"com.microsoft.azure.storage.queryBlobContents","fields":[{"name":"totalBytes","type":"long"}]},{"type":"record","name":"error","namespace":"com.microsoft.azure.storage.queryBlobContents","fields":[{"name":"fatal","type":"boolean"},{"name":"name","type":"string"},{"name":"description","type":"string"},{"name":"position","type":"long"}]}]"#;
+const SCHEMA: &str = r#"[{"type":"record","name":"resultData","namespace":"com.microsoft.azure.storage.queryBlobContents","fields":[{"name":"data","type":"bytes"}]},{"type":"record","name":"error","namespace":"com.microsoft.azure.storage.queryBlobContents","fields":[{"name":"fatal","type":"boolean"},{"name":"name","type":"string"},{"name":"description","type":"string"},{"name":"position","type":"long"}]},{"type":"record","name":"progress","namespace":"com.microsoft.azure.storage.queryBlobContents","fields":[{"name":"bytesScanned","type":"long"},{"name":"totalBytes","type":"long"}]},{"type":"record","name":"end","namespace":"com.microsoft.azure.storage.queryBlobContents","fields":[{"name":"totalBytes","type":"long"}]}]"#;
 
 const DATA: i64 = 0;
-const PROGRESS: i64 = 1;
-const END: i64 = 2;
-const ERROR: i64 = 3;
+const ERROR: i64 = 1;
+const PROGRESS: i64 = 2;
+const END: i64 = 3;
 
 /// Appends an Avro `long`: zigzag, then base-128 with the low group first.
 fn long(out: &mut Vec<u8>, value: i64) {
@@ -28,63 +28,66 @@ fn count(value: u64) -> i64 {
 }
 
 pub(super) struct Writer {
-    records: Vec<u8>,
-    count: i64,
+    stream: Vec<u8>,
+    record: Vec<u8>,
+    sync: [u8; 16],
 }
 
 impl Writer {
     pub(super) fn new() -> Self {
+        let sync = *uuid::Uuid::new_v4().as_bytes();
+        let mut stream = b"Obj\x01".to_vec();
+        long(&mut stream, 1);
+        bytes(&mut stream, b"avro.schema");
+        bytes(&mut stream, SCHEMA.as_bytes());
+        long(&mut stream, 0);
+        stream.extend_from_slice(&sync);
         Self {
-            records: Vec::new(),
-            count: 0,
+            stream,
+            record: Vec::new(),
+            sync,
         }
     }
 
-    fn start(&mut self, kind: i64) {
-        long(&mut self.records, kind);
-        self.count += 1;
+    fn write(&mut self, kind: i64, fields: impl FnOnce(&mut Vec<u8>)) {
+        self.record.clear();
+        long(&mut self.record, kind);
+        fields(&mut self.record);
+        long(&mut self.stream, 1);
+        bytes(&mut self.stream, &self.record);
+        self.stream.extend_from_slice(&self.sync);
     }
 
     pub(super) fn data(&mut self, payload: &[u8]) {
-        self.start(DATA);
-        bytes(&mut self.records, payload);
+        self.write(DATA, |record| bytes(record, payload));
     }
 
     pub(super) fn progress(&mut self, scanned: u64, total: u64) {
-        self.start(PROGRESS);
-        long(&mut self.records, count(scanned));
-        long(&mut self.records, count(total));
+        self.write(PROGRESS, |record| {
+            long(record, count(scanned));
+            long(record, count(total));
+        });
     }
 
     pub(super) fn end(&mut self, total: u64) {
-        self.start(END);
-        long(&mut self.records, count(total));
+        self.write(END, |record| long(record, count(total)));
     }
 
     pub(super) fn error(&mut self, fatal: bool, name: &str, description: &str, position: u64) {
-        self.start(ERROR);
-        self.records.push(u8::from(fatal));
-        bytes(&mut self.records, name.as_bytes());
-        bytes(&mut self.records, description.as_bytes());
-        long(&mut self.records, count(position));
+        self.write(ERROR, |record| {
+            record.push(u8::from(fatal));
+            bytes(record, name.as_bytes());
+            bytes(record, description.as_bytes());
+            long(record, count(position));
+        });
     }
 
-    /// The complete container: header, then every record in one block.
     pub(super) fn finish(self) -> Vec<u8> {
-        let sync = *uuid::Uuid::new_v4().as_bytes();
-        let mut out = b"Obj\x01".to_vec();
-        long(&mut out, 2);
-        bytes(&mut out, b"avro.schema");
-        bytes(&mut out, SCHEMA.as_bytes());
-        bytes(&mut out, b"avro.codec");
-        bytes(&mut out, b"null");
-        long(&mut out, 0);
-        out.extend_from_slice(&sync);
-        long(&mut out, self.count);
-        long(&mut out, count(self.records.len() as u64));
-        out.extend_from_slice(&self.records);
-        out.extend_from_slice(&sync);
-        out
+        self.stream
+    }
+
+    pub(super) fn encoded_len(&self) -> usize {
+        self.stream.len()
     }
 }
 
@@ -114,9 +117,8 @@ mod tests {
         let file = writer.finish();
         assert!(file.starts_with(b"Obj\x01"));
         let sync = &file[file.len() - 16..];
-        assert_eq!(file.windows(16).filter(|window| *window == sync).count(), 2);
-        // Union index 0 and a two byte `bytes` value, then union index 2 and the total.
-        let records = &file[file.len() - 16 - 6..file.len() - 16];
-        assert_eq!(records, [0, 4, b'h', b'i', 4, 4]);
+        assert_eq!(file.windows(16).filter(|window| *window == sync).count(), 3);
+        let end_block = &file[file.len() - 16 - 4..file.len() - 16];
+        assert_eq!(end_block, [2, 4, 6, 4]);
     }
 }

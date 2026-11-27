@@ -13,7 +13,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Copies complete synchronously, so no copy is ever pending: the request answers NoPendingCopyOperation, or CopyIdMismatch for a different copy id."
+      "notes": "Copies complete synchronously, so no copy is ever pending. Aborting a completed copy with its matching ID returns 409 NoPendingCopyOperation with request correlation; a different ID returns CopyIdMismatch."
     },
     {
       "name": "Append Block",
@@ -52,7 +52,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Sources on this listener (path-style or host-style URLs); other hosts answer NotImplemented unless the operator allowlists them with --allow-external-copy-sources (ADR-0024), in which case the source is fetched synchronously with SSRF guards. Completes synchronously with x-ms-copy-status: success and a copy id. The source is read with the caller's own Shared Key in the same account, a read SAS on the source URL, or public access, and may name a snapshot or version of a block blob. Source and destination conditions and leases apply. Block blob bytes are copied rather than shared; page and append blob copies keep their type and share extents, and a copied append blob is not sealed. Sealed copies are unsupported; incremental copy is a separate operation."
+      "notes": "Sources on this listener (path-style or host-style URLs); other hosts answer NotImplemented unless the operator allowlists them with --allow-external-copy-sources (ADR-0024), in which case the source is fetched synchronously with SSRF guards. Completes synchronously with x-ms-copy-status: success and a copy id. The source may name a snapshot or version of a block blob and can be read with same-account Shared Key or bearer credentials, a read SAS on the source URL, or public access. Copy properties preserve the source scheme and omit the query. Source and destination conditions and leases apply. Block blob bytes are copied rather than shared; page and append blob copies keep their type and share extents, and a copied append blob is not sealed. Sealed copies are unsupported; incremental copy is a separate operation."
     },
     {
       "name": "Create Container",
@@ -244,7 +244,7 @@
         "Anonymous",
         "Bearer"
       ],
-      "notes": "GET and HEAD with comp=metadata; anonymous access requires container-level public access. Metadata names are returned in lowercase because the HTTP layer folds header case."
+      "notes": "GET and HEAD with comp=metadata return metadata without lease properties; anonymous access requires container-level public access. Metadata names are returned in lowercase because the HTTP layer folds header case."
     },
     {
       "name": "Get Container Properties",
@@ -271,7 +271,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Lists allocated ranges with a byte window, marker, and maxresults; touching ranges merge. snapshot lists a snapshot's ranges, and prevsnapshot returns the diff (PageRange for changed ranges, ClearRange for ranges cleared since) against the live blob or a newer snapshot. Page range diffs have not been compared with Azure."
+      "notes": "Lists allocated ranges with a byte window, marker, and maxresults; touching ranges merge. Unpaged listings omit NextMarker. snapshot lists a snapshot's ranges, and prevsnapshot returns the diff (PageRange for changed ranges, ClearRange for ranges cleared since) against the live blob or a newer snapshot. Page range diffs have not been compared with Azure."
     },
     {
       "name": "Get User Delegation Key",
@@ -332,7 +332,7 @@
         "Anonymous",
         "Bearer"
       ],
-      "notes": "Flat and hierarchical (delimiter with BlobPrefix) listings with prefix, marker, maxresults, and include of metadata, copy, uncommittedblobs, snapshots, versions, deleted, and tags; snapshots, versions, deleted, and tags cannot be combined with uncommittedblobs. Within a name, snapshots and versions list oldest first and the current blob last. Reports BlobType and, for page and append blobs, the sequence number and sealed state. Uncommitted blobs list with minimal properties. The permissions include answers NotImplemented. Anonymous access requires container-level public access. Markers are opaque local tokens."
+      "notes": "Flat and hierarchical (delimiter with BlobPrefix) listings with prefix, marker, maxresults, and include of metadata, copy, uncommittedblobs, snapshots, versions, deleted, and tags; snapshots, versions, deleted, and tags cannot be combined with uncommittedblobs. Within a name, snapshots and versions list oldest first and the current blob last. Reports BlobType and, for page and append blobs, the sequence number and sealed state. Blob ETags in the XML are unquoted. Uncommitted blobs list with minimal properties. The permissions include answers NotImplemented. Anonymous access requires container-level public access. Markers are opaque local tokens; a nonempty request marker is echoed in the response."
     },
     {
       "name": "List Containers",
@@ -343,7 +343,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Supports prefix, marker, maxresults, and include=metadata; the listing carries lease state and public access. include=deleted and include=system answer NotImplemented. Markers are opaque local tokens."
+      "notes": "Supports prefix, marker, maxresults, and include=metadata,deleted; the listing carries lease state and public access. include=system answers NotImplemented. Markers are opaque local tokens, and a nonempty request marker is echoed in the response."
     },
     {
       "name": "Preflight Blob Request",
@@ -391,7 +391,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Per-block limit defaults to 5000 MiB (--max-block-bytes). Staged blocks survive restart and require the lease id while the blob is leased. Azure's staging expiration is not modeled. Page and append blobs answer InvalidBlobType."
+      "notes": "Per-block limit defaults to 5000 MiB (--max-block-bytes). Staged blocks survive restart and require the lease id while the blob is leased. A block ID width that conflicts with staged IDs returns InvalidBlobOrBlock. Azure's staging expiration is not modeled. Page and append blobs answer InvalidBlobType."
     },
     {
       "name": "Put Block From URL",
@@ -430,7 +430,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Update and clear of 512-byte-aligned ranges, 4 MiB per update, Content-MD5 or crc64, sequence-number conditions, and leases. Each update stores a new extent, so partly overwritten extents stay until fully replaced."
+      "notes": "Update and clear of 512-byte-aligned ranges, 4 MiB per update, Content-MD5 or crc64, sequence-number conditions, and leases. An unaligned range returns InvalidHeaderValue with the rejected range. Each update stores a new extent, so partly overwritten extents stay until fully replaced."
     },
     {
       "name": "Put Page From URL",
@@ -456,7 +456,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "A SQL subset (SELECT, WHERE, LIMIT, comparisons, LIKE, IN, BETWEEN, CAST, a few string functions, and COUNT/SUM/AVG/MIN/MAX without GROUP BY) over delimited text and JSON lines, answered as an Avro stream of result, progress, end, and error records. Arrow and Parquet answer NotImplemented. The whole blob is read into memory. The wire format follows the Python SDK decoder, not a recording of Azure: the ParseError status and code, runtime error names, progress cadence, and SQL dialect details are unverified."
+      "notes": "A SQL subset (SELECT, WHERE, LIMIT, comparisons, LIKE, IN, BETWEEN, CAST, a few string functions, and COUNT/SUM/AVG/MIN/MAX without GROUP BY) over delimited text and JSON lines, answered as an Avro stream. Small bearer CSV/JSON queries, empty results, projection conversion errors, invalid SQL and malformed XML are covered by Azure cassettes at the baseline. The whole blob is read into memory, and other SQL, serialization, progress cadence and runtime error cases remain unverified. Arrow and Parquet answer NotImplemented."
     },
     {
       "name": "Rename Container",
@@ -603,7 +603,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Stores Hot, Cool, Cold, or Archive for block blobs and P4 to P80 for page blobs (stored and reported only). Changes take effect immediately: leaving Archive answers 202 but completes at once, with no rehydration priority or pending state. Archived blobs cannot be read (BlobArchived)."
+      "notes": "Stores Hot, Cool, Cold, or Archive for block blobs and P4 to P80 for page blobs (stored and reported only). The bearer cassette verifies Cool and rejection of a premium tier on a block blob with a correlated InvalidHeaderValue and header echo. Leaving Archive answers 202 but completes at once, with no rehydration priority or pending state. Archived blobs cannot be read (BlobArchived)."
     },
     {
       "name": "Set Container ACL",
@@ -661,7 +661,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Delete Blob or Set Blob Tier sub-requests, one kind per batch, at most 256, account or container scope; each sub-request is authenticated and authorized separately and reported with its own status."
+      "notes": "Delete Blob or Set Blob Tier subrequests, one kind per batch, at most 256, account or container scope; each subrequest is authenticated and authorized separately and reported with its own status. Container-scoped Bearer recordings cover independent success and missing-blob responses. A mixed delete/tier batch returns an embedded 400 AllBatchSubRequestsShouldBeSameApi in an outer 202; an empty envelope or truncated part returns embedded InvalidInput. Rejected envelopes execute no subrequests."
     },
     {
       "name": "Undelete Blob",

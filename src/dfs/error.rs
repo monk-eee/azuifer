@@ -206,7 +206,7 @@ fn request_error(error: Error) -> Described {
             "DirectoryNotEmpty",
             "The recursive query parameter value must be true to delete a non-empty directory.",
         ),
-        Error::LeaseIdMissing => (
+        Error::LeaseIdMissing | Error::LeaseIdMissingBlob => (
             S::PRECONDITION_FAILED,
             "LeaseIdMissing",
             "There is currently a lease on the resource and no lease ID was specified.",

@@ -101,18 +101,10 @@ fn policy_response(protection: &Protection) -> Result<Response> {
 /// List Containers with `include=deleted`: soft-deleted containers appear with
 /// `Deleted`, `Version`, `DeletedTime`, and `RemainingRetentionDays`.
 pub(super) fn list_containers(
-    endpoint: &str,
-    limit: u32,
-    prefix: &str,
+    mut xml: Xml,
     page: Page<ListedContainer>,
     metadata: bool,
 ) -> Result<Response> {
-    let mut xml = Xml::root("EnumerationResults", &[("ServiceEndpoint", endpoint)]);
-    if !prefix.is_empty() {
-        xml.element("Prefix", prefix);
-    }
-    xml.element("MaxResults", &limit.to_string());
-    xml.open("Containers");
     for (_, listed) in page.items {
         let ListedContainer {
             name,

@@ -11,12 +11,12 @@ the ledger audit and category tally automatically; no core edits are needed.
 Use the checkout being audited as `--repo`: unmerged extension files in another
 worktree are not loaded.
 
-The recording-plan audit is conditional until the cassette branch supplies
-its script. A `skipped` result means evidence auditing is unavailable, **not a
-passing conformance gate**. Once the script exists, its failures must be reported.
-Missing or malformed ledger data must fail the mandatory ledger audit, even if
-the core tally reader omits it. Core audit exit status alone is not a four-gate
-pass: inspect extension results, merge conflicts, overlaps, and safety findings.
+CI runs the wire-ledger and recording-plan audits. A `skipped` result from the
+governor in an older checkout means evidence auditing is unavailable, **not a
+passing conformance gate**. Missing or malformed ledger data must fail the
+mandatory ledger audit, even if the core tally reader omits it. Core audit exit
+status alone is not a four-gate pass: inspect extension results, merge conflicts,
+overlaps, and safety findings.
 
 ## 1. Conformance Honesty
 - Never mark an operation `exact` in `specs/conformance/*.json` without a reviewed, passing live Azure cassette for that operation, API version, and auth mode.
@@ -24,7 +24,7 @@ pass: inspect extension results, merge conflicts, overlaps, and safety findings.
 - Keep operation names synchronized across Rust `Operation::name()`, the [service manifests](../specs/conformance), and the recording plan when present.
 
 ## 2. Anti-Fossilization
-- Every new `known-difference` behavior or ADR section listing unverified/undocumented Azure behavior must have a corresponding pending row in the recording plan naming the Azure profile required to verify it. Until that plan lands, explicitly report the missing tracking coverage rather than crediting it as verified.
+- Every new `known-difference` behavior or ADR section listing unverified/undocumented Azure behavior must have a corresponding pending row in the recording plan naming the Azure profile required to verify it. If tracking is missing, report the gap rather than crediting it as verified.
 - Track verification debt (`matched / target`) per service on every cycle; call out any branch that expands unverified surface area without logging its recording rows.
 
 ## 3. Docs vs. SDK vs. Live-Wire Discrepancy Ledger
@@ -36,7 +36,7 @@ pass: inspect extension results, merge conflicts, overlaps, and safety findings.
   - `docs_inconsistency` — Microsoft Learn claims disagree, within one page or across pages.
   - `undocumented_live` — live detail absent from the cited Learn pages; not proof that no documentation anywhere mentions it.
 - Count `entries` only. Keep documented matches and unsubstantiated leads in `observations`, excluded from the discrepancy tally. Do not invent a disagreement to make a category non-zero.
-- Live references use `commit:tests/contracts/cassettes/name.json#step`, `source=azure`, API version, and auth mode. The initial live references are on the unmerged cassette branch; their allowlisted findings are described in the ledger, but their fixtures are not available for replay on `main` yet. Do not advertise them as merged fixtures or new passing differential tests.
+- Live references use `commit:tests/contracts/cassettes/name.json#step` (`#response` for a single-response cassette), `source=azure`, API version, and auth mode. Verify the commit is in the history being merged and contains the named fixture and exchange. Preserve those commits when merging, or update the references to the new history.
 - `observed` means a source finding, not Azuifer alignment. NFS SDK/docs mismatches remain `awaiting_live_recording`; ledger validation checks structure and scope, not live parity.
 - Initial IDs WD-005 through WD-008 are not counted: the prior draft did not establish a docs/SDK disagreement for those claims. Preserve the surviving IDs rather than renumbering history.
 - Validate with `python scripts/audit-wire-discrepancies.py` (or `uv run scripts/audit-wire-discrepancies.py`).

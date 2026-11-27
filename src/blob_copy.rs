@@ -133,7 +133,7 @@ impl CopySource {
             .transpose()?
             .flatten();
         let sas = query.filter(|query| query.contains_key("sig"));
-        let scheme_free = format!("http://{authority}{}", self.path);
+        let display = format!("{}://{authority}{}", self.scheme, self.path);
         Ok(Resolved {
             key: BlobKey {
                 container: ContainerKey {
@@ -142,7 +142,7 @@ impl CopySource {
                 },
                 path: blob,
             },
-            display: scheme_free,
+            display,
             selector,
             sas,
         })
@@ -150,7 +150,7 @@ impl CopySource {
 }
 
 /// Decides whether the copy request may read the source: a valid read SAS on the
-/// source, the caller's own Shared Key within the same account, or public access.
+/// source, same-account Shared Key or bearer credentials, or public access.
 pub(crate) async fn authorize_source(
     store: &Store,
     config: &Config,

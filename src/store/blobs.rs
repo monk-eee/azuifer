@@ -407,7 +407,12 @@ impl Store {
     ) -> Result<bool> {
         self.run(move |db, _, now| {
             let old = require_blob(db, &key, now)?;
-            crate::blob_page::check_tier(old.info.kind, Some(tier))?;
+            crate::blob_page::check_tier(old.info.kind, Some(tier)).map_err(
+                |error| match error {
+                    Error::InvalidHeader => Error::IncompatibleBlobTier,
+                    other => other,
+                },
+            )?;
             old.lease
                 .check(lease, LeaseNeed::Optional, LeaseOwner::Blob, now)?;
             let [account, container, name] = blob_params(&key);

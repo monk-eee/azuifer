@@ -1,7 +1,7 @@
 use anyhow::{Result, ensure};
 use quick_xml::{Reader, events::Event};
 use reqwest::header::HeaderMap;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
 
 use super::{BLOB_BYTES, RANGE_END, RANGE_START, VERSION};
@@ -52,12 +52,47 @@ pub(super) enum Header {
     Different,
 }
 
+pub(super) fn echoed(actual: Option<&str>, expected: Option<&str>) -> Header {
+    match actual {
+        Some(value) if Some(value) == expected => Header::Matches,
+        Some(_) => Header::Different,
+        None => Header::Missing,
+    }
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum XmlEtag {
+    Matches,
+    UnquotedMatch,
+    Missing,
+    Different,
+}
+
+impl XmlEtag {
+    pub(super) fn observe(value: Option<&str>, expected: Option<&str>) -> Self {
+        match (value, expected) {
+            (Some(actual), Some(expected)) if actual == expected => Self::Matches,
+            (Some(actual), Some(expected)) if actual == expected.trim_matches('"') => {
+                Self::UnquotedMatch
+            }
+            (None, _) => Self::Missing,
+            _ => Self::Different,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Media {
     Missing,
     TextPlain,
+    OctetStream,
+    AvroBinary,
     Xml,
+    JsonNoMetadata,
+    JsonMinimalMetadata,
+    Json,
     Other,
 }
 
@@ -69,10 +104,37 @@ pub(super) enum ErrorCode {
     AuthenticationFailed,
     AuthorizationFailure,
     BlobNotFound,
+    BlobAlreadyExists,
+    ConditionNotMet,
+    InvalidBlockList,
+    LeaseIdMissing,
+    LeaseMismatchBlob,
+    LeaseMismatchLease,
+    LeaseBreakingNoAcquire,
+    LeaseAlreadyPresent,
+    SnapshotsPresent,
+    AppendPositionConditionNotMet,
+    SequenceNumberConditionNotMet,
     ContainerNotFound,
+    ContainerAlreadyExists,
+    InvalidBlockId,
+    InvalidBlobOrBlock,
+    InvalidPageRange,
+    MaxBlobSizeConditionNotMet,
+    BlobIsSealed,
     InvalidInput,
+    InvalidHeaderValue,
+    InvalidRange,
+    BothCrc64AndMd5RangeHeaderPresent,
+    MixedBatchOperations,
+    QueryExpression,
     InvalidXmlDocument,
     InvalidXmlNodeValue,
+    QueueNotFound,
+    TableAlreadyExists,
+    ResourceNotFound,
+    SourceConditionNotMet,
+    NoPendingCopyOperation,
     Other,
 }
 
@@ -84,13 +146,57 @@ impl ErrorCode {
             Some("AuthenticationFailed") => Self::AuthenticationFailed,
             Some("AuthorizationFailure") => Self::AuthorizationFailure,
             Some("BlobNotFound") => Self::BlobNotFound,
+            Some("BlobAlreadyExists") => Self::BlobAlreadyExists,
+            Some("ConditionNotMet") => Self::ConditionNotMet,
+            Some("InvalidBlockList") => Self::InvalidBlockList,
+            Some("LeaseIdMissing") => Self::LeaseIdMissing,
+            Some("LeaseIdMismatchWithBlobOperation") => Self::LeaseMismatchBlob,
+            Some("LeaseIdMismatchWithLeaseOperation") => Self::LeaseMismatchLease,
+            Some("LeaseIsBreakingAndCannotBeAcquired") => Self::LeaseBreakingNoAcquire,
+            Some("LeaseAlreadyPresent") => Self::LeaseAlreadyPresent,
+            Some("SnapshotsPresent") => Self::SnapshotsPresent,
+            Some("AppendPositionConditionNotMet") => Self::AppendPositionConditionNotMet,
+            Some("SequenceNumberConditionNotMet") => Self::SequenceNumberConditionNotMet,
             Some("ContainerNotFound") => Self::ContainerNotFound,
+            Some("ContainerAlreadyExists") => Self::ContainerAlreadyExists,
+            Some("InvalidBlockId") => Self::InvalidBlockId,
+            Some("InvalidBlobOrBlock") => Self::InvalidBlobOrBlock,
+            Some("InvalidPageRange") => Self::InvalidPageRange,
+            Some("MaxBlobSizeConditionNotMet") => Self::MaxBlobSizeConditionNotMet,
+            Some("BlobIsSealed") => Self::BlobIsSealed,
             Some("InvalidInput") => Self::InvalidInput,
+            Some("InvalidHeaderValue") => Self::InvalidHeaderValue,
+            Some("InvalidRange") => Self::InvalidRange,
+            Some("BothCrc64AndMd5RangeHeaderPresent") => Self::BothCrc64AndMd5RangeHeaderPresent,
+            Some("AllBatchSubRequestsShouldBeSameApi") => Self::MixedBatchOperations,
+            Some("ErrorProcessingQueryExpression") => Self::QueryExpression,
             Some("InvalidXmlDocument") => Self::InvalidXmlDocument,
             Some("InvalidXmlNodeValue") => Self::InvalidXmlNodeValue,
+            Some("QueueNotFound") => Self::QueueNotFound,
+            Some("TableAlreadyExists") => Self::TableAlreadyExists,
+            Some("ResourceNotFound") => Self::ResourceNotFound,
+            Some("SourceConditionNotMet") => Self::SourceConditionNotMet,
+            Some("NoPendingCopyOperation") => Self::NoPendingCopyOperation,
             Some(_) => Self::Other,
         }
     }
+}
+
+pub(super) fn project_xml<T: DeserializeOwned>(bytes: &[u8], root: &str) -> Result<T> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| anyhow::anyhow!("invalid {root} response encoding"))?
+        .trim_start_matches('\u{feff}');
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(true);
+    let start = match reader.read_event() {
+        Ok(Event::Decl(_)) => reader.read_event(),
+        event => event,
+    };
+    ensure!(
+        matches!(start, Ok(Event::Start(tag) | Event::Empty(tag)) if tag.name().as_ref() == root),
+        "unexpected {root} XML envelope"
+    );
+    quick_xml::de::from_str(text).map_err(|_| anyhow::anyhow!("invalid {root} XML fields"))
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -99,13 +205,26 @@ enum Body {
     Empty {},
     FixtureRange {},
     FixtureFull {},
-    XmlError {
-        code: ErrorCode,
-        permission_message: bool,
-        correlation: Header,
-        extra_elements: bool,
-    },
+    XmlError(XmlError),
     Other {},
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct XmlError {
+    code: ErrorCode,
+    permission_message: bool,
+    correlation: Header,
+    extra_elements: bool,
+}
+
+impl XmlError {
+    pub(super) fn permission_denial(&self) -> bool {
+        self.code == ErrorCode::PermissionMismatch
+            && self.permission_message
+            && self.correlation == Header::Matches
+            && !self.extra_elements
+    }
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -170,6 +289,15 @@ impl Cassette {
         Ok(value)
     }
 
+    pub(super) fn load_azure(bytes: &[u8]) -> Result<Self> {
+        let value = Self::load(bytes)?;
+        ensure!(
+            value.source == Source::Azure,
+            "expected a recorded Azure SAS cassette"
+        );
+        Ok(value)
+    }
+
     pub(super) fn compare(&self, actual: &Self) -> Result<()> {
         for (expected, observed) in self.exchanges.iter().zip(&actual.exchanges) {
             ensure!(
@@ -218,7 +346,16 @@ pub(super) fn header(
 pub(super) fn media(headers: &HeaderMap) -> Media {
     match header_text(headers, "content-type") {
         Some("text/plain") => Media::TextPlain,
+        Some("application/octet-stream") => Media::OctetStream,
+        Some("avro/binary") => Media::AvroBinary,
         Some("application/xml" | "application/xml; charset=utf-8") => Media::Xml,
+        Some("application/json;odata=nometadata;streaming=true;charset=utf-8") => {
+            Media::JsonNoMetadata
+        }
+        Some("application/json;odata=minimalmetadata;streaming=true;charset=utf-8") => {
+            Media::JsonMinimalMetadata
+        }
+        Some("application/json") => Media::Json,
         None if !headers.contains_key("content-type") => Media::Missing,
         _ => Media::Other,
     }
@@ -233,15 +370,7 @@ impl Exchange {
             return self.status == 403
                 && self.media == Media::Xml
                 && self.error_header == ErrorCode::PermissionMismatch
-                && matches!(
-                    self.body,
-                    Body::XmlError {
-                        code: ErrorCode::PermissionMismatch,
-                        permission_message: true,
-                        correlation: Header::Matches | Header::Missing,
-                        extra_elements: false,
-                    }
-                );
+                && matches!(&self.body, Body::XmlError(error) if error.permission_denial());
         }
         if self.etag != Header::Matches
             || self.media != Media::TextPlain
@@ -287,7 +416,7 @@ impl Exchange {
         } else if step == Step::ReadBack && bytes == BLOB_BYTES {
             Body::FixtureFull {}
         } else {
-            xml_error(bytes, get("x-ms-request-id")).unwrap_or(Body::Other {})
+            xml_error(bytes, get("x-ms-request-id")).map_or(Body::Other {}, Body::XmlError)
         };
         Self {
             step,
@@ -318,11 +447,11 @@ impl Exchange {
     }
 }
 
-fn xml_error(bytes: &[u8], request_id: Option<&str>) -> Option<Body> {
+pub(super) fn xml_error(bytes: &[u8], request_id: Option<&str>) -> Option<XmlError> {
     let fields = flat_xml(std::str::from_utf8(bytes).ok()?, "Error")?;
     let code = ErrorCode::from_value(fields.get("Code").map(String::as_str));
     let (message, correlation) = error_message(fields.get("Message")?, request_id);
-    Some(Body::XmlError {
+    Some(XmlError {
         code,
         permission_message: message == PERMISSION_MESSAGE,
         correlation,
@@ -338,19 +467,24 @@ pub(super) fn error_message<'a>(message: &'a str, request_id: Option<&str>) -> (
         (Some(id), Some(time), None)
             if request_id
                 .is_some_and(|expected| id.trim().strip_prefix("RequestId:") == Some(expected))
-                && time.trim().strip_prefix("Time:").is_some_and(|value| {
-                    value.ends_with('Z')
-                        && value.contains('T')
-                        && value
-                            .bytes()
-                            .all(|b| b.is_ascii_digit() || b"-:.TZ".contains(&b))
-                }) =>
+                && time
+                    .trim()
+                    .strip_prefix("Time:")
+                    .is_some_and(is_utc_timestamp) =>
         {
             Header::Matches
         }
         _ => Header::Different,
     };
     (prefix, correlation)
+}
+
+pub(super) fn is_utc_timestamp(value: &str) -> bool {
+    value.ends_with('Z')
+        && value.contains('T')
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b"-:.TZ".contains(&b))
 }
 
 // These two Azure envelopes contain only text leaves. Never include a parse error's input.
@@ -432,7 +566,7 @@ fn serialization_never_contains_headers_credentials_or_arbitrary_bodies() {
         .to_string();
     assert!(!rejected.contains(secret));
 
-    let mut unsafe_body: serde_json::Value = serde_json::from_slice(super::SYNTHETIC).unwrap();
+    let mut unsafe_body: serde_json::Value = serde_json::from_slice(super::SAS_CASSETTE).unwrap();
     unsafe_body["exchanges"][0]["body"]["raw_body"] = serde_json::json!(secret);
     let rejected = Cassette::load(&serde_json::to_vec(&unsafe_body).unwrap())
         .unwrap_err()
@@ -467,13 +601,7 @@ fn azure_error_correlation_normalizes_values_but_detects_a_missing_request_id() 
         "2026-01-02T03:04:07.002Z",
     );
     assert_eq!(original, later);
-    assert!(matches!(
-        original,
-        Body::XmlError {
-            correlation: Header::Matches,
-            ..
-        }
-    ));
+    assert_eq!(original.correlation, Header::Matches);
     let without_correlation = format!(
         "<Error><Code>AuthorizationPermissionMismatch</Code><Message>{PERMISSION_MESSAGE}</Message></Error>"
     );

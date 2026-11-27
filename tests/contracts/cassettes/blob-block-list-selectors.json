@@ -1,0 +1,152 @@
+{
+  "schema_version": 2,
+  "source": "azure",
+  "case": "blob-block-list-selectors",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "list_uncommitted_blocks",
+      "request": {
+        "method": "get",
+        "operation": "get_block_list",
+        "body_bytes": 0,
+        "block_list_type": "uncommitted"
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "block_list",
+        "media": "xml",
+        "blob_length": 6,
+        "committed": null,
+        "uncommitted": [
+          {
+            "id": "a",
+            "size": 18
+          },
+          {
+            "id": "b",
+            "size": 7
+          }
+        ]
+      }
+    },
+    {
+      "step": "list_committed_blocks",
+      "request": {
+        "method": "get",
+        "operation": "get_block_list",
+        "body_bytes": 0,
+        "block_list_type": "committed"
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "block_list",
+        "media": "xml",
+        "blob_length": 6,
+        "committed": [
+          {
+            "id": "a",
+            "size": 6
+          }
+        ],
+        "uncommitted": null
+      }
+    },
+    {
+      "step": "commit_selected_blocks",
+      "request": {
+        "method": "put",
+        "operation": "commit_block_list",
+        "body_bytes": 81
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "changed",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "list_all_blocks",
+      "request": {
+        "method": "get",
+        "operation": "get_block_list",
+        "body_bytes": 0,
+        "block_list_type": "all"
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "block_list",
+        "media": "xml",
+        "blob_length": 13,
+        "committed": [
+          {
+            "id": "b",
+            "size": 7
+          },
+          {
+            "id": "a",
+            "size": 6
+          }
+        ],
+        "uncommitted": []
+      }
+    },
+    {
+      "step": "reject_block_width",
+      "request": {
+        "method": "put",
+        "operation": "stage_block",
+        "body_bytes": 11
+      },
+      "status": 400,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "invalid_blob_or_block",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "invalid_blob_or_block",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "read_committed",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 13,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      }
+    }
+  ]
+}
