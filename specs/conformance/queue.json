@@ -68,7 +68,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "GET /{account}/{queue}?comp=acl returns the stored SignedIdentifiers with times normalized to seven fractional digits. A service SAS cannot grant this operation."
+      "notes": "GET /{account}/{queue}?comp=acl returns the stored SignedIdentifiers with times normalized to seven fractional digits. The 2023-11-03 recording checks an empty ACL on a fresh queue using bearer authorization. A service SAS cannot grant this operation."
     },
     {
       "name": "Get Queue Metadata",
@@ -91,7 +91,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "GET /{account}?restype=service&comp=properties. Returns the stored Logging, HourMetrics, MinuteMetrics and Cors sections, or Azure's documented defaults when never set. Not available to a service SAS."
+      "notes": "GET /{account}?restype=service&comp=properties returns the stored Logging, HourMetrics, MinuteMetrics and Cors sections or local defaults. The recorded bearer profile has disabled logging, metrics and retention and no CORS rules; it does not establish Azure defaults. Not available to a service SAS."
     },
     {
       "name": "Get Queue Service Stats",
@@ -134,7 +134,7 @@
         "Anonymous",
         "Bearer"
       ],
-      "notes": "OPTIONS on any queue URL. Matches Origin, Access-Control-Request-Method and Access-Control-Request-Headers (exact or trailing-wildcard patterns) against the account's stored CORS rules; no match returns 403 CorsPreflightFailure, a missing CORS header returns 400."
+      "notes": "OPTIONS on any queue URL. Matches Origin, Access-Control-Request-Method and Access-Control-Request-Headers (exact or trailing-wildcard patterns) against the stored CORS rules. The 2023-11-03 anonymous recording without CORS rules checks 403 CorsPreflightFailure and 400 InvalidHeaderValue for missing Origin or Access-Control-Request-Method, with MessageDetails in the XML. Successful preflight is not recorded."
     },
     {
       "name": "Put Message",

@@ -36,6 +36,8 @@ Every response carries `x-ms-request-id`, `x-ms-version` and `date`; `x-ms-clien
 
 With `include=metadata`, List Queues includes a `Metadata` element even for queues without metadata. The [Azure Queue lifecycle cassette](../../tests/contracts/cassettes/queue-lifecycle.json) replays the populated and empty cases across an opaque continuation.
 
+The [read-only settings cassette](../../tests/contracts/cassettes/queue-read-only-settings.json) checks service properties with analytics and CORS disabled and an empty ACL on a fresh queue. On that profile, anonymous preflight returns `403 CorsPreflightFailure` for a rule miss or `400 InvalidHeaderValue` when `Origin` or `Access-Control-Request-Method` is missing. Both errors include `MessageDetails`; configured CORS rules and SAS policy writes were not recorded.
+
 ## Authentication
 
 | Mode | Notes |

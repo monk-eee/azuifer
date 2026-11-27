@@ -39,7 +39,7 @@ struct App {
 }
 
 #[derive(Clone, Copy)]
-struct OdataResponse;
+struct NoDataServiceVersion;
 
 pub(crate) async fn router(
     config: Arc<Config>,
@@ -89,7 +89,10 @@ async fn dispatch(State(app): State<Arc<App>>, request: Request) -> Response {
     };
     let mut response =
         outcome.unwrap_or_else(|error| handlers::request_error_response(&error, &request_id, now));
-    let legacy_odata = response.extensions().get::<OdataResponse>().is_none();
+    let legacy_odata = response
+        .extensions()
+        .get::<NoDataServiceVersion>()
+        .is_none();
     let version = version.unwrap_or_else(|_| app.config.api_version.as_str().to_owned());
     let client_request_id = parts
         .headers
@@ -210,13 +213,20 @@ async fn handle(
             | protocol::Operation::GetTable(_)
             | protocol::Operation::QueryTables(_)
     );
+    let service_xml_read = matches!(
+        &request.operation,
+        protocol::Operation::GetServiceProperties | protocol::Operation::GetAcl(_)
+    );
     let level = request.format.level;
     let result = handlers::execute(&ctx, request).await;
-    if !catalog {
-        return result;
+    let mut response = if catalog {
+        result
+            .unwrap_or_else(|error| handlers::catalog_error_response(error, level, request_id, now))
+    } else {
+        result?
+    };
+    if catalog || service_xml_read {
+        response.extensions_mut().insert(NoDataServiceVersion);
     }
-    let mut response = result
-        .unwrap_or_else(|error| handlers::catalog_error_response(error, level, request_id, now));
-    response.extensions_mut().insert(OdataResponse);
     Ok(response)
 }

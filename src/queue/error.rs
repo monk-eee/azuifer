@@ -21,6 +21,7 @@ pub(super) enum QueueError {
     InvalidResourceName,
     OutOfRangeName,
     MissingHeader(&'static str),
+    MissingCorsHeader(&'static str),
     InvalidVersion(String),
     MalformedHeaders,
     InvalidQuery(&'static str, String, &'static str),
@@ -108,6 +109,11 @@ impl QueueError {
                 "MissingRequiredHeader",
                 "An HTTP header that's mandatory for this request is not specified.",
             ),
+            Self::MissingCorsHeader(_) => (
+                S::BAD_REQUEST,
+                "InvalidHeaderValue",
+                "A required CORS header is not present.",
+            ),
             Self::InvalidQuery(..) => (
                 S::BAD_REQUEST,
                 "InvalidQueryParameterValue",
@@ -184,6 +190,14 @@ impl QueueError {
                 ("HeaderValue", value.clone()),
             ],
             Self::MissingHeader(name) => vec![("HeaderName", (*name).into())],
+            Self::MissingCorsHeader(name) => vec![(
+                "MessageDetails",
+                format!("Missing required CORS header {name}"),
+            )],
+            Self::CorsPreflightFailure => vec![(
+                "MessageDetails",
+                "No CORS rules matches this request".into(),
+            )],
             Self::InvalidQuery(name, value, reason) => vec![
                 ("QueryParameterName", (*name).into()),
                 ("QueryParameterValue", value.clone()),

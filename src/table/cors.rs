@@ -50,13 +50,17 @@ pub(super) async fn preflight(
     now: SystemTime,
 ) -> Response {
     let headers = &parts.headers;
+    let json_level = header_text(headers, "accept").and_then(protocol::explicit_json_level);
     let (Some(origin), Some(method)) = (
         header_text(headers, "origin"),
         header_text(headers, "access-control-request-method"),
     ) else {
-        return handlers::error_response(
-            &TableError::new(Kind::MissingRequiredHeader),
-            None,
+        return handlers::cors_error_response(
+            &TableError::with(
+                Kind::InvalidHeaderValue,
+                "A required CORS header is not present.",
+            ),
+            json_level,
             request_id,
             now,
         );
@@ -72,9 +76,9 @@ pub(super) async fn preflight(
                 .extend(blob_cors::preflight(rule, origin, method, requested));
             response
         }
-        None => handlers::error_response(
+        None => handlers::cors_error_response(
             &TableError::new(Kind::CorsPreflightFailure),
-            None,
+            json_level,
             request_id,
             now,
         ),

@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "queue",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "properties",
+      "status": 200,
+      "media": "xml",
+      "api_version": "matches",
+      "request_id": "matches",
+      "date": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "cors_headers_present": false,
+      "body": {
+        "kind": "properties",
+        "analytics_disabled": true,
+        "cors_count": 0
+      }
+    },
+    {
+      "step": "empty_acl",
+      "status": 200,
+      "media": "xml",
+      "api_version": "matches",
+      "request_id": "matches",
+      "date": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "cors_headers_present": false,
+      "body": {
+        "kind": "acl",
+        "policies": 0
+      }
+    },
+    {
+      "step": "rule_miss",
+      "status": 403,
+      "media": "xml",
+      "api_version": "matches",
+      "request_id": "matches",
+      "date": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "cors_preflight_failure",
+      "cors_headers_present": false,
+      "body": {
+        "kind": "queue_cors",
+        "error": {
+          "code": "cors_preflight_failure",
+          "correlation": "matches",
+          "message_matches": true,
+          "extra_elements": 1
+        },
+        "details_match": true
+      }
+    },
+    {
+      "step": "missing_method",
+      "status": 400,
+      "media": "xml",
+      "api_version": "matches",
+      "request_id": "matches",
+      "date": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "invalid_header_value",
+      "cors_headers_present": false,
+      "body": {
+        "kind": "queue_cors",
+        "error": {
+          "code": "invalid_header_value",
+          "correlation": "matches",
+          "message_matches": true,
+          "extra_elements": 1
+        },
+        "details_match": true
+      }
+    },
+    {
+      "step": "missing_origin",
+      "status": 400,
+      "media": "xml",
+      "api_version": "matches",
+      "request_id": "matches",
+      "date": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "invalid_header_value",
+      "cors_headers_present": false,
+      "body": {
+        "kind": "queue_cors",
+        "error": {
+          "code": "invalid_header_value",
+          "correlation": "matches",
+          "message_matches": true,
+          "extra_elements": 1
+        },
+        "details_match": true
+      }
+    }
+  ]
+}

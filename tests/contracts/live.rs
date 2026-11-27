@@ -1,6 +1,6 @@
 use super::{
     Cassette, Service, Source, account, batch, catalog, delegation, mutations, observe_blob,
-    observe_local, query, request_errors, reviewed_sas, sas_reads, with_local,
+    observe_local, query, request_errors, reviewed_sas, sas_reads, service_reads, with_local,
 };
 use anyhow::{Context as _, Result, anyhow, ensure};
 use reqwest::{Url, blocking::Client, redirect::Policy};
@@ -163,6 +163,7 @@ pub(super) enum Record<'a> {
     Batch(&'a batch::BatchCassette),
     Query(&'a query::QueryCassette),
     Catalog(&'a catalog::CatalogCassette),
+    ServiceRead(&'a service_reads::ServiceReadCassette),
 }
 
 pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
@@ -179,6 +180,7 @@ pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
         Record::Batch(_) => batch::CASE,
         Record::Query(_) => query::CASE,
         Record::Catalog(cassette) => cassette.case.file_stem(),
+        Record::ServiceRead(cassette) => cassette.case.file_stem(),
     };
     let name = format!("{scenario}-{}.json", Uuid::new_v4().simple());
     let target = directory.join(name);
@@ -571,6 +573,34 @@ fn check_live_blob_mutation_page_resize_sequence() -> Result<()> {
 #[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
 fn check_live_blob_mutation_append_sealing() -> Result<()> {
     live_mutation(mutations::Case::AppendSealing)
+}
+
+fn live_service_reads(case: service_reads::Case) -> Result<()> {
+    run_live(
+        case.service(),
+        || service_reads::reviewed(case),
+        |client, _, endpoint, bearer| {
+            service_reads::observe(client, endpoint, bearer, Source::Azure, case)
+        },
+        || service_reads::observe_local(case),
+        service_reads::ServiceReadCassette::compare,
+        |azure| {
+            azure.validate()?;
+            save_azure(Record::ServiceRead(azure))
+        },
+    )
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_read_only_settings_queue() -> Result<()> {
+    live_service_reads(service_reads::Case::Queue)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_read_only_settings_table() -> Result<()> {
+    live_service_reads(service_reads::Case::Table)
 }
 
 fn live_catalog(case: catalog::Case) -> Result<()> {

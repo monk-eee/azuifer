@@ -38,7 +38,6 @@ pub(super) enum Kind {
     MethodNotAllowed,
     NotImplemented,
     RequestBodyTooLarge,
-    MissingRequiredHeader,
     CorsPreflightFailure,
     Internal,
 }
@@ -98,7 +97,6 @@ impl Kind {
             Self::MethodNotAllowed => "MethodNotAllowed",
             Self::NotImplemented => "NotImplemented",
             Self::RequestBodyTooLarge => "RequestBodyTooLarge",
-            Self::MissingRequiredHeader => "MissingRequiredHeader",
             Self::CorsPreflightFailure => "CorsPreflightFailure",
             Self::Internal => "InternalError",
         }
@@ -158,9 +156,6 @@ impl Kind {
             }
             Self::RequestBodyTooLarge => {
                 "The request body is too large and exceeds the maximum permissible limit."
-            }
-            Self::MissingRequiredHeader => {
-                "An HTTP header that's mandatory for this request is not specified."
             }
             Self::CorsPreflightFailure => {
                 "CORS not enabled or no matching rule found for this request."

@@ -370,11 +370,11 @@ fn preflight(headers: &HeaderMap) -> Result<Preflight> {
     let text = |name: &'static str| {
         header(headers, name)?
             .map(str::to_owned)
-            .ok_or(QueueError::MissingHeader(name))
+            .ok_or(QueueError::MissingCorsHeader(name))
     };
     Ok(Preflight {
-        origin: text("origin")?,
-        method: text("access-control-request-method")?,
+        origin: text("Origin")?,
+        method: text("Access-Control-Request-Method")?,
         headers: header(headers, "access-control-request-headers")?
             .map(|value| {
                 value
@@ -692,7 +692,7 @@ mod tests {
         assert_eq!(p.headers, ["x-ms-version", "content-type"]);
         assert!(matches!(
             parse_request("OPTIONS", "/devstoreaccount1/myq", &[]),
-            Err(QueueError::MissingHeader("origin"))
+            Err(QueueError::MissingCorsHeader("Origin"))
         ));
     }
 }

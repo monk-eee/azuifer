@@ -2,11 +2,12 @@ use super::{
     Service, VERSION,
     cassette::{
         ApiVersion, ErrorCode, Header, Media, OdataError, Source, error_message, flat_xml, header,
-        header_text, media, project_xml,
+        header_text, media,
     },
     catalog, read_bounded, request, send, with_fresh_container, with_local_service,
 };
 use anyhow::{Context as _, Result, ensure};
+use quick_xml::{NsReader, events::Event, name::ResolveResult};
 use reqwest::{
     Method, Url,
     blocking::{Client, RequestBuilder},
@@ -74,6 +75,15 @@ pub(super) struct XmlError {
     extra_elements: usize,
 }
 
+impl XmlError {
+    pub(super) fn matches(&self, code: ErrorCode, extra_elements: usize) -> bool {
+        self.code == code
+            && self.correlation == Header::Matches
+            && self.message_matches
+            && self.extra_elements == extra_elements
+    }
+}
+
 pub(super) fn project_error(
     xml: &str,
     request_id: Option<&str>,
@@ -83,7 +93,7 @@ pub(super) fn project_error(
     project_xml_error(&fields, request_id, expected)
 }
 
-fn project_xml_error(
+pub(super) fn project_xml_error(
     fields: &BTreeMap<String, String>,
     request_id: Option<&str>,
     expected: &str,
@@ -120,13 +130,7 @@ enum Body {
         error: XmlError,
         limit_details_match: bool,
     },
-    TableXml {
-        code: ErrorCode,
-        namespace_matches: bool,
-        english: bool,
-        message_matches: bool,
-        correlation: Header,
-    },
+    TableXml(OdataXmlError),
     TableJson {
         media: Media,
         error: OdataError,
@@ -134,11 +138,55 @@ enum Body {
     Other {},
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct OdataXmlError {
+    code: ErrorCode,
+    namespace_matches: bool,
+    english: bool,
+    message_matches: bool,
+    correlation: Header,
+}
+
+impl OdataXmlError {
+    pub(super) fn project(bytes: &[u8], id: Option<&str>, expected: &str) -> Result<Self> {
+        let xml = std::str::from_utf8(bytes)
+            .context("invalid OData XML encoding")?
+            .trim_start_matches('\u{feff}');
+        let mut reader = NsReader::from_str(xml);
+        reader.config_mut().trim_text(true);
+        let namespace_matches = loop {
+            match reader.read_resolved_event() {
+                Ok((_, Event::Decl(_) | Event::PI(_) | Event::Comment(_))) => continue,
+                Ok((namespace, Event::Start(tag))) if tag.local_name().as_ref() == "error" => {
+                    break matches!(namespace, ResolveResult::Bound(ns) if ns.as_ref() == ODATA_XML_NS);
+                }
+                _ => anyhow::bail!("unexpected OData XML error element"),
+            }
+        };
+        let error: RawOdataError = quick_xml::de::from_str(xml)
+            .map_err(|_| anyhow::anyhow!("invalid OData XML error fields"))?;
+        let (message, correlation) = error_message(&error.message.value, id);
+        Ok(Self {
+            code: ErrorCode::from_value(Some(&error.code)),
+            namespace_matches,
+            english: error.message.lang == "en-US",
+            message_matches: message == expected,
+            correlation,
+        })
+    }
+
+    pub(super) fn matches(&self, code: ErrorCode) -> bool {
+        self.code == code
+            && self.namespace_matches
+            && self.english
+            && self.message_matches
+            && self.correlation == Header::Matches
+    }
+}
+
+#[derive(Deserialize)]
 struct RawOdataError {
-    #[serde(rename = "@xmlns")]
-    namespace: String,
     code: String,
     message: RawOdataMessage,
 }
@@ -226,23 +274,13 @@ impl Rejection {
                     (413, ErrorCode::RequestBodyTooLarge, 1)
                 };
                 response.status == status
-                    && error.code == code
                     && response.header_code == code
-                    && error.correlation == Header::Matches
-                    && error.message_matches
-                    && error.extra_elements == fields
+                    && error.matches(code, fields)
                     && *limit_details_match
             }
-            (
-                Body::TableXml {
-                    code: ErrorCode::AtomFormatNotSupported,
-                    namespace_matches: true,
-                    english: true,
-                    message_matches: true,
-                    correlation: Header::Matches,
-                },
-                Case::TableAtomAccept | Case::TableAtomFormat,
-            ) => response.is_table_rejection(415),
+            (Body::TableXml(error), Case::TableAtomAccept | Case::TableAtomFormat) => {
+                response.is_table_rejection(415) && error.matches(ErrorCode::AtomFormatNotSupported)
+            }
             (
                 Body::TableJson {
                     media: Media::JsonNoMetadata,
@@ -461,15 +499,11 @@ fn queue_error(case: Case, xml: &str, id: Option<&str>, media: Media) -> Option<
 fn table_error(case: Case, headers: &HeaderMap, bytes: &[u8], id: Option<&str>) -> Result<Body> {
     let media = media(headers);
     if media == Media::OdataXml {
-        let error: RawOdataError = project_xml(bytes, "error")?;
-        let (message, correlation) = error_message(&error.message.value, id);
-        return Ok(Body::TableXml {
-            code: ErrorCode::from_value(Some(&error.code)),
-            namespace_matches: error.namespace == ODATA_XML_NS,
-            english: error.message.lang == "en-US",
-            message_matches: message == ATOM_MESSAGE,
-            correlation,
-        });
+        return Ok(Body::TableXml(OdataXmlError::project(
+            bytes,
+            id,
+            ATOM_MESSAGE,
+        )?));
     }
     let message = if case == Case::TableIncompleteFilter {
         "Expression expected at position 15 in 'PartitionKey eq'."

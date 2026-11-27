@@ -1,7 +1,7 @@
 //! Executes typed Table operations against the store and shapes the Azure responses.
 
 use super::{
-    App, OdataResponse,
+    App, NoDataServiceVersion,
     auth::Credential,
     batch::{self, Batch},
     datetime::Ticks,
@@ -88,14 +88,38 @@ pub(super) fn request_error_response(
         Some(OdataErrorFormat::Json(level)) => {
             odata_error_response(error, None, request_id, now, level)
         }
-        Some(OdataErrorFormat::Xml) => odata_xml_error_response(error, request_id, now),
+        Some(OdataErrorFormat::Xml) => {
+            odata_xml_error_response(error, request_id, now, "application/xml;charset=utf-8")
+        }
         None => return error_response(error, None, request_id, now),
     };
-    response.extensions_mut().insert(OdataResponse);
+    response.extensions_mut().insert(NoDataServiceVersion);
     response
 }
 
-fn odata_xml_error_response(error: &TableError, request_id: &str, now: SystemTime) -> Response {
+pub(super) fn cors_error_response(
+    error: &TableError,
+    json_level: Option<Metadata>,
+    request_id: &str,
+    now: SystemTime,
+) -> Response {
+    let mut response = match json_level {
+        Some(level) => odata_error_response(error, None, request_id, now, level),
+        None => odata_xml_error_response(error, request_id, now, "application/xml"),
+    };
+    response
+        .headers_mut()
+        .insert("x-ms-error-code", HeaderValue::from_static(error.code()));
+    response.extensions_mut().insert(NoDataServiceVersion);
+    response
+}
+
+fn odata_xml_error_response(
+    error: &TableError,
+    request_id: &str,
+    now: SystemTime,
+    content_type: &'static str,
+) -> Response {
     let message = error.correlated_message(None, request_id, &Ticks::from_system(now).format());
     let body = format!(
         concat!(
@@ -108,10 +132,9 @@ fn odata_xml_error_response(error: &TableError, request_id: &str, now: SystemTim
     );
     let mut response = Response::new(Body::from(body));
     *response.status_mut() = error.status();
-    response.headers_mut().insert(
-        "content-type",
-        HeaderValue::from_static("application/xml;charset=utf-8"),
-    );
+    response
+        .headers_mut()
+        .insert("content-type", HeaderValue::from_static(content_type));
     response
 }
 

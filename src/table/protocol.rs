@@ -311,6 +311,17 @@ fn level_from_media(value: &str) -> Option<Metadata> {
     })
 }
 
+pub(super) fn explicit_json_level(accept: &str) -> Option<Metadata> {
+    accept
+        .split(',')
+        .filter(|item| {
+            item.split(';')
+                .next()
+                .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/json"))
+        })
+        .find_map(level_from_media)
+}
+
 fn atom_not_supported(format: OdataErrorFormat) -> TableError {
     TableError::new(Kind::AtomFormatNotSupported).with_odata_format(format)
 }
