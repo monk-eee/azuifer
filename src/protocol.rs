@@ -155,6 +155,8 @@ pub(crate) enum Operation {
     ReadBlob(BlobKey, BlobRead),
     /// A read of a snapshot or version; the flag asks for metadata only.
     ReadSelected(BlobKey, Selector, BlobRead, bool),
+    /// Query Blob Contents of the blob, or of one snapshot or version.
+    QueryBlob(BlobKey, Option<Selector>, UploadOptions, Guard),
     SnapshotBlob(BlobKey, Option<Metadata>, Guard),
     UndeleteBlob(BlobKey),
     SetBlobTags(BlobKey, Option<Ticks>, UploadOptions, Guard),
@@ -358,6 +360,7 @@ impl Operation {
             | Self::BlocksSelected(..)
             | Self::ReadBlob(..)
             | Self::ReadSelected(..)
+            | Self::QueryBlob(..)
             | Self::BlobMetadata(..) => READ_BLOB,
             Self::SnapshotBlob(..) => CREATE_BLOB,
             Self::UndeleteBlob(..) => WRITE_BLOB,
@@ -865,6 +868,19 @@ impl Request<'_> {
             (&Method::GET, Some("tags")) => {
                 self.check(&["comp", "versionid"], &[LEASE, TAG_CONDITION], false)?;
                 Operation::GetBlobTags(key, version_only(selector)?, guard()?)
+            }
+            (&Method::POST, Some("query")) => {
+                self.check(
+                    &["comp", "snapshot", "versionid"],
+                    &[CONDITIONS, LEASE, CHECKSUMS],
+                    false,
+                )?;
+                Operation::QueryBlob(
+                    key,
+                    selector,
+                    upload_options(self.headers, MAX_XML_BODY_BYTES)?,
+                    guard()?,
+                )
             }
             (&Method::PUT, Some("tier")) => {
                 self.check(

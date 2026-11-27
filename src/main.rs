@@ -12,6 +12,7 @@ mod blob_external;
 mod blob_immutability;
 mod blob_lifecycle;
 mod blob_page;
+mod blob_query;
 mod blob_sas;
 mod blob_snapshot;
 mod blob_tags;

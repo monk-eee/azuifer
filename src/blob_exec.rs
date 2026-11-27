@@ -311,6 +311,7 @@ pub(crate) async fn execute(
         }
         Operation::Page(operation) => page::execute(app, operation, body, ctx).await,
         Operation::Lifecycle(operation) => lifecycle::execute(app, operation, ctx).await,
+        Operation::QueryBlob(..) => crate::blob_query::execute(app, op, body, ctx).await,
         other => blob_snapshot::execute(app, other, body, ctx).await,
     }
 }

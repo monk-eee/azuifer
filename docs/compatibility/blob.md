@@ -15,7 +15,7 @@ This slice covers block, page, and append blobs, with snapshots, versions, and s
 | `…/{blob}?snapshot=…` or `?versionid=…` | `GET`, `HEAD`, `comp=metadata`, `comp=blocklist`, `comp=pagelist` (snapshots), and `DELETE` on a snapshot or version of a block, page, or append blob; `comp=tags` and `DELETE` also take `versionid`; a copy source URL may carry either |
 | any path | `OPTIONS` preflight, answered from the account's CORS rules |
 
-Anything else, including unsupported query parameters and `x-ms-*` headers, answers an Azure-shaped `NotImplemented` error instead of being ignored. Query Blob Contents (`comp=query`) and Rename Container (not a public Azure operation) are not implemented.
+Anything else, including unsupported query parameters and `x-ms-*` headers, answers an Azure-shaped `NotImplemented` error instead of being ignored. Rename Container (not a public Azure operation) is not implemented. Query Blob Contents is a SQL subset over delimited text and JSON ([ADR-0027](../adr.d/0027-query-blob-contents-with-a-small-sql-subset.md)); Arrow and Parquet answer `NotImplemented`.
 
 ### Page blobs and append blobs
 
