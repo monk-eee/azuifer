@@ -6,9 +6,12 @@ mod delegation;
 mod live;
 mod mutations;
 mod query;
+mod queue_messages;
 mod request_errors;
 mod sas_reads;
 mod service_reads;
+mod table_entities;
+mod table_transactions;
 
 use super::{ACCOUNT, Server, VERSION, basic_token, client, iso, sas_query};
 use anyhow::{Context as _, Result, anyhow, ensure};

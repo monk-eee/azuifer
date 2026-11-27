@@ -1,8 +1,9 @@
 //! Entity group transactions: `multipart/mixed` batch parsing and response assembly.
 
 use super::{
+    NoDataServiceVersion,
     error::{Kind, TableError},
-    protocol::{self, Operation, Request, Target},
+    protocol::{self, Format, Operation, Request, Target},
     store::WriteKind,
 };
 use axum::{
@@ -18,7 +19,7 @@ const MAX_PART_BYTES: usize = 8 * 1024 * 1024;
 
 pub(super) struct SubRequest {
     pub(super) request: Request,
-    pub(super) content_id: String,
+    pub(super) content_id: Option<String>,
 }
 
 pub(super) struct Batch {
@@ -32,11 +33,18 @@ pub(super) struct Batch {
 pub(super) struct BatchError {
     pub(super) index: Option<usize>,
     pub(super) error: TableError,
+    pub(super) format: Option<Format>,
+    pub(super) content_id: Option<String>,
 }
 
 impl From<TableError> for BatchError {
     fn from(error: TableError) -> Self {
-        Self { index: None, error }
+        Self {
+            index: None,
+            error,
+            format: None,
+            content_id: None,
+        }
     }
 }
 
@@ -192,11 +200,7 @@ fn parse_http<'a>(part: &Part<'a>, account: &str) -> Result<Http<'a>, TableError
     })
 }
 
-fn sub_request(
-    part: &Part<'_>,
-    account: &str,
-    default_id: usize,
-) -> Result<SubRequest, TableError> {
+fn sub_request(part: &Part<'_>, account: &str) -> Result<SubRequest, TableError> {
     let http = parse_http(part, account)?;
     let method = protocol::effective_method(&http.method, &http.headers)?;
     let query = protocol::parse_query(http.query)?;
@@ -213,8 +217,7 @@ fn sub_request(
         .headers
         .get("content-id")
         .and_then(|value| value.to_str().ok())
-        .or_else(|| part.header("content-id"))
-        .map_or_else(|| default_id.to_string(), str::to_owned);
+        .map(str::to_owned);
     let request = protocol::build(
         &method,
         target,
@@ -261,7 +264,10 @@ pub(super) fn parse(content_type: &str, body: &[u8], account: &str) -> Result<Ba
 }
 
 fn query_batch(part: &Part<'_>, account: &str) -> Result<Batch, BatchError> {
-    let sub = sub_request(part, account, 1)?;
+    let mut sub = sub_request(part, account)?;
+    if sub.content_id.is_none() {
+        sub.content_id = Some(part.header("content-id").unwrap_or("1").to_owned());
+    }
     if !matches!(
         sub.request.operation,
         Operation::GetEntity(..) | Operation::QueryEntities(..)
@@ -284,10 +290,14 @@ fn change_set(parts: &[Part<'_>], account: &str) -> Result<Batch, BatchError> {
     if parts.is_empty() {
         return Err(invalid("The batch request contains no operations.").into());
     }
-    let at = |index| {
+    let at = |index, sub: Option<&SubRequest>| {
+        let format = sub.map(|sub| sub.request.format);
+        let content_id = sub.and_then(|sub| sub.content_id.clone());
         move |error: TableError| BatchError {
             index: Some(index),
             error,
+            format,
+            content_id,
         }
     };
     let mut requests = Vec::with_capacity(parts.len());
@@ -297,28 +307,28 @@ fn change_set(parts: &[Part<'_>], account: &str) -> Result<Batch, BatchError> {
             .to_ascii_lowercase()
             .starts_with("application/http")
         {
-            return Err(at(index)(invalid(
+            return Err(at(index, None)(invalid(
                 "A change set operation must be application/http.",
             )));
         }
-        requests.push(sub_request(part, account, index + 1).map_err(at(index))?);
+        requests.push(sub_request(part, account).map_err(at(index, None))?);
     }
     let mut seen = HashSet::new();
     let mut first = None;
     for (index, sub) in requests.iter().enumerate() {
         let Operation::Write(table, op) = &sub.request.operation else {
-            return Err(at(index)(invalid(
+            return Err(at(index, Some(sub))(invalid(
                 "Only inserts, updates, and deletes may appear in a change set.",
             )));
         };
         let scope = (table.key(), op.key.partition.as_str());
         if *first.get_or_insert(scope.clone()) != scope {
-            return Err(at(index)(TableError::new(
+            return Err(at(index, Some(sub))(TableError::new(
                 Kind::CommandsInBatchActOnDifferentPartitions,
             )));
         }
         if !seen.insert(op.key.row.as_str()) {
-            return Err(at(index)(TableError::with(
+            return Err(at(index, Some(sub))(TableError::with(
                 Kind::InvalidDuplicateRow,
                 format!(
                     "A command with RowKey '{}' is already present in the batch. An entity can appear only once in a batch.",
@@ -329,7 +339,7 @@ fn change_set(parts: &[Part<'_>], account: &str) -> Result<Batch, BatchError> {
         // An insert may not be conditional; the other kinds read their own headers.
         if matches!(op.kind, WriteKind::Insert) && op.condition != super::model::Precondition::None
         {
-            return Err(at(index)(invalid(
+            return Err(at(index, Some(sub))(invalid(
                 "An insert cannot carry an If-Match header.",
             )));
         }
@@ -357,7 +367,7 @@ fn canonical(name: &str) -> String {
 }
 
 /// Renders one `application/http` response part.
-async fn render_part(content_id: &str, response: Response) -> Result<String, TableError> {
+async fn render_part(content_id: Option<&str>, response: Response) -> Result<String, TableError> {
     let (parts, body) = response.into_parts();
     let bytes = to_bytes(body, MAX_PART_BYTES)
         .await
@@ -365,10 +375,14 @@ async fn render_part(content_id: &str, response: Response) -> Result<String, Tab
     let mut text =
         String::from("Content-Type: application/http\r\nContent-Transfer-Encoding: binary\r\n\r\n");
     text.push_str(&format!(
-        "HTTP/1.1 {} {}\r\nContent-ID: {content_id}\r\nDataServiceVersion: 3.0;\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-cache\r\n",
+        "HTTP/1.1 {} {}\r\n",
         parts.status.as_u16(),
         parts.status.canonical_reason().unwrap_or("Unknown"),
     ));
+    if let Some(content_id) = content_id {
+        text.push_str(&format!("Content-ID: {content_id}\r\n"));
+    }
+    text.push_str("DataServiceVersion: 3.0;\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-cache\r\n");
     for (name, value) in &parts.headers {
         if let Ok(value) = value.to_str() {
             text.push_str(&format!("{}: {value}\r\n", canonical(name.as_str())));
@@ -381,7 +395,7 @@ async fn render_part(content_id: &str, response: Response) -> Result<String, Tab
 
 /// Assembles the `202 Accepted` multipart response from per-operation responses.
 pub(super) async fn assemble(
-    responses: Vec<(String, Response)>,
+    responses: Vec<(Option<String>, Response)>,
     transaction: bool,
 ) -> Result<Response, TableError> {
     let batch_id = format!("batchresponse_{}", Uuid::new_v4());
@@ -393,7 +407,7 @@ pub(super) async fn assemble(
         ));
     }
     for (content_id, response) in responses {
-        let part = render_part(&content_id, response).await?;
+        let part = render_part(content_id.as_deref(), response).await?;
         if transaction {
             text.push_str(&format!("--{change_id}\r\n"));
         }
@@ -406,6 +420,9 @@ pub(super) async fn assemble(
     text.push_str(&format!("--{batch_id}--\r\n"));
     let mut response = Response::new(Body::from(text));
     *response.status_mut() = StatusCode::ACCEPTED;
+    if transaction {
+        response.extensions_mut().insert(NoDataServiceVersion);
+    }
     response.headers_mut().insert(
         "content-type",
         HeaderValue::from_str(&format!("multipart/mixed; boundary={batch_id}"))
@@ -466,9 +483,9 @@ mod tests {
         let ids: Vec<_> = batch
             .requests
             .iter()
-            .map(|r| r.content_id.as_str())
+            .map(|r| r.content_id.as_deref())
             .collect();
-        assert_eq!(ids, ["1", "7", "3"]);
+        assert_eq!(ids, [None, Some("7"), None]);
         assert!(!batch.requests[0].request.format.return_content);
         assert!(
             matches!(&batch.requests[1].request.operation, Operation::Write(_, w) if matches!(w.kind, WriteKind::Merge))
@@ -548,7 +565,10 @@ mod tests {
         *ok.status_mut() = StatusCode::NO_CONTENT;
         ok.headers_mut()
             .insert("etag", HeaderValue::from_static("W/\"x\""));
-        let response = assemble(vec![("1".into(), ok)], true).await.ok().unwrap();
+        let response = assemble(vec![(Some("1".into()), ok)], true)
+            .await
+            .ok()
+            .unwrap();
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         let content_type = response.headers()["content-type"]
             .to_str()

@@ -132,6 +132,9 @@ fn lex(text: &str) -> Result<Vec<Token>> {
                     tokens.push(Token::Typed(word, value));
                     at = next;
                 } else if chars.get(at) == Some(&'(') {
+                    if word == "startswith" {
+                        return Err(TableError::new(Kind::NotImplemented));
+                    }
                     return Err(invalid("functions are not supported"));
                 } else {
                     tokens.push(Token::Word(word));
@@ -545,7 +548,6 @@ mod tests {
             "1 eq 1",
             "A EQ 1",
             "A eq 1 foo",
-            "startswith(A,'x') eq true",
             "A add 1 eq 2",
             "A eq guid'not-a-guid'",
             "A eq datetime'garbage'",
@@ -559,6 +561,10 @@ mod tests {
             let error = parse(bad).unwrap_err();
             assert_eq!(error.kind(), Kind::InvalidInput, "{bad}");
         }
+        assert_eq!(
+            parse("startswith(A,'x') eq true").unwrap_err().kind(),
+            Kind::NotImplemented
+        );
     }
 
     #[test]

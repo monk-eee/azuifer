@@ -79,6 +79,23 @@ pub(super) fn catalog_error_response(
     odata_error_response(&error, None, request_id, now, level)
 }
 
+pub(super) fn entity_error_response(
+    error: &TableError,
+    index: Option<usize>,
+    format: Format,
+    request_id: &str,
+    now: SystemTime,
+) -> Response {
+    let mut response = odata_error_response(error, index, request_id, now, format.level);
+    if !format.return_content {
+        response.headers_mut().insert(
+            "preference-applied",
+            HeaderValue::from_static("return-no-content"),
+        );
+    }
+    response
+}
+
 pub(super) fn request_error_response(
     error: &TableError,
     request_id: &str,
@@ -368,16 +385,18 @@ fn write_response(
             };
             text_header(&mut response, "location", &location)?;
             text_header(&mut response, "dataserviceid", &location)?;
-            text_header(
-                &mut response,
-                "preference-applied",
-                preference(format.return_content),
-            )?;
             response
         }
         (WriteKind::Delete, _) => return Ok(empty(StatusCode::NO_CONTENT)),
         _ => empty(StatusCode::NO_CONTENT),
     };
+    if matches!(kind, WriteKind::Insert) || !format.return_content {
+        text_header(
+            &mut response,
+            "preference-applied",
+            preference(format.return_content),
+        )?;
+    }
     text_header(&mut response, "etag", &etag)?;
     Ok(response)
 }
@@ -429,11 +448,15 @@ async fn execute_batch(ctx: &Context<'_>, batch: Batch) -> Result<Response> {
             batch::assemble(responses, true).await
         }
         Err(Failure { index, error }) => {
-            let content_id = meta
-                .into_iter()
-                .nth(index)
-                .map_or_else(|| (index + 1).to_string(), |(id, ..)| id);
-            let response = error_response(&error, Some(index), ctx.request_id, ctx.now);
+            let (content_id, mut format, kind, _) =
+                meta.into_iter().nth(index).ok_or_else(|| {
+                    crate::table::error::internal("missing failed changeset operation")
+                })?;
+            if matches!(kind, WriteKind::Delete) {
+                format.return_content = true;
+            }
+            let response =
+                entity_error_response(&error, Some(index), format, ctx.request_id, ctx.now);
             batch::assemble(vec![(content_id, response)], true).await
         }
     }
@@ -449,8 +472,13 @@ pub(super) async fn batch_failure(
     match error.index {
         None => Err(error.error),
         Some(index) => {
-            let response = error_response(&error.error, Some(index), request_id, now);
-            batch::assemble(vec![((index + 1).to_string(), response)], true).await
+            let response = match error.format {
+                Some(format) => {
+                    entity_error_response(&error.error, Some(index), format, request_id, now)
+                }
+                None => error_response(&error.error, Some(index), request_id, now),
+            };
+            batch::assemble(vec![(error.content_id, response)], true).await
         }
     }
 }

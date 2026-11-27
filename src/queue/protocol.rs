@@ -292,8 +292,8 @@ fn put_options(query: &Query) -> Result<PutOptions> {
 fn receipt(query: &Query) -> Result<PopReceipt> {
     query
         .get("popreceipt")
-        .map(|value| PopReceipt::parse(value))
         .ok_or(QueueError::MissingQuery("popreceipt"))
+        .and_then(|value| PopReceipt::parse(value))
 }
 
 fn metadata(headers: &HeaderMap) -> Result<Metadata> {
@@ -509,10 +509,14 @@ mod tests {
             ("DELETE", "/myq/messages", "ClearMessages"),
             (
                 "PUT",
-                "/myq/messages/id1?popreceipt=r&visibilitytimeout=5",
+                "/myq/messages/id1?popreceipt=AAAA&visibilitytimeout=5",
                 "UpdateMessage",
             ),
-            ("DELETE", "/myq/messages/id1?popreceipt=r", "DeleteMessage"),
+            (
+                "DELETE",
+                "/myq/messages/id1?popreceipt=AAAA",
+                "DeleteMessage",
+            ),
         ];
         for (method, rest, expected) in cases {
             let uri = format!("{base}{rest}");
@@ -573,7 +577,7 @@ mod tests {
             QueueError::MissingQuery("popreceipt")
         );
         assert_eq!(
-            err("PUT", "/devstoreaccount1/myq/messages/id?popreceipt=x"),
+            err("PUT", "/devstoreaccount1/myq/messages/id?popreceipt=AAAA"),
             QueueError::MissingQuery("visibilitytimeout")
         );
     }

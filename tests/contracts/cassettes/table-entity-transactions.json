@@ -1,0 +1,208 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "transactions",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "commit",
+      "status": 202,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "other",
+      "etag": "missing",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "transaction",
+        "parts": [
+          {
+            "status": 204,
+            "mime_content_id": null,
+            "http_content_id": null,
+            "etag": "matches",
+            "dataserviceversion": "matches",
+            "request_id_present": false,
+            "header_code": "missing",
+            "preference": "matches",
+            "error": null,
+            "empty": true
+          },
+          {
+            "status": 204,
+            "mime_content_id": null,
+            "http_content_id": null,
+            "etag": "matches",
+            "dataserviceversion": "matches",
+            "request_id_present": false,
+            "header_code": "missing",
+            "preference": "matches",
+            "error": null,
+            "empty": true
+          }
+        ]
+      }
+    },
+    {
+      "step": "read_first",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "json_no_metadata",
+      "etag": "valid",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "rows",
+        "matches": true,
+        "rows": 1
+      }
+    },
+    {
+      "step": "read_second",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "json_no_metadata",
+      "etag": "valid",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "rows",
+        "matches": true,
+        "rows": 1
+      }
+    },
+    {
+      "step": "rollback",
+      "status": 202,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "other",
+      "etag": "missing",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "transaction",
+        "parts": [
+          {
+            "status": 412,
+            "mime_content_id": null,
+            "http_content_id": null,
+            "etag": "missing",
+            "dataserviceversion": "matches",
+            "request_id_present": false,
+            "header_code": "missing",
+            "preference": "matches",
+            "error": {
+              "code": "update_condition_not_satisfied",
+              "english": true,
+              "message_matches": true,
+              "correlation": "matches",
+              "extra_properties": false
+            },
+            "empty": false
+          }
+        ]
+      }
+    },
+    {
+      "step": "unchanged",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "json_no_metadata",
+      "etag": "matches",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "rows",
+        "matches": true,
+        "rows": 1
+      }
+    },
+    {
+      "step": "mixed",
+      "status": 202,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "other",
+      "etag": "missing",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "transaction",
+        "parts": [
+          {
+            "status": 400,
+            "mime_content_id": null,
+            "http_content_id": null,
+            "etag": "missing",
+            "dataserviceversion": "matches",
+            "request_id_present": false,
+            "header_code": "missing",
+            "preference": "matches",
+            "error": {
+              "code": "commands_in_batch_act_on_different_partitions",
+              "english": true,
+              "message_matches": true,
+              "correlation": "matches",
+              "extra_properties": false
+            },
+            "empty": false
+          }
+        ]
+      }
+    },
+    {
+      "step": "read_final",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "json_no_metadata",
+      "etag": "missing",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "rows",
+        "matches": true,
+        "rows": 2
+      }
+    }
+  ]
+}

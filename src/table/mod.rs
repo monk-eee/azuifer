@@ -217,15 +217,32 @@ async fn handle(
         &request.operation,
         protocol::Operation::GetServiceProperties | protocol::Operation::GetAcl(_)
     );
-    let level = request.format.level;
+    let entity = matches!(
+        &request.operation,
+        protocol::Operation::QueryEntities(..)
+            | protocol::Operation::GetEntity(..)
+            | protocol::Operation::Write(..)
+    );
+    let mut format = request.format;
+    if !matches!(
+        &request.operation,
+        protocol::Operation::Write(_, write) if !matches!(&write.kind, store::WriteKind::Delete)
+    ) {
+        format.return_content = true;
+    }
     let result = handlers::execute(&ctx, request).await;
     let mut response = if catalog {
-        result
-            .unwrap_or_else(|error| handlers::catalog_error_response(error, level, request_id, now))
+        result.unwrap_or_else(|error| {
+            handlers::catalog_error_response(error, format.level, request_id, now)
+        })
+    } else if entity {
+        result.unwrap_or_else(|error| {
+            handlers::entity_error_response(&error, None, format, request_id, now)
+        })
     } else {
         result?
     };
-    if catalog || service_xml_read {
+    if catalog || service_xml_read || entity {
         response.extensions_mut().insert(NoDataServiceVersion);
     }
     Ok(response)

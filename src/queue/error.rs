@@ -34,7 +34,6 @@ pub(super) enum QueueError {
     QueueNotFound,
     QueueAlreadyExists,
     MessageNotFound,
-    PopReceiptMismatch,
     CorsPreflightFailure,
     Busy,
     Internal,
@@ -163,11 +162,6 @@ impl QueueError {
                 S::NOT_FOUND,
                 "MessageNotFound",
                 "The specified message does not exist.",
-            ),
-            Self::PopReceiptMismatch => (
-                S::BAD_REQUEST,
-                "PopReceiptMismatch",
-                "The specified pop receipt did not match the pop receipt for a dequeued message.",
             ),
             Self::CorsPreflightFailure => (
                 S::FORBIDDEN,
