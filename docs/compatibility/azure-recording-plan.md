@@ -2,16 +2,16 @@
 
 ## What this covers
 
-The target is the five Azure Storage REST services at **`2023-11-03`**, using the operations and authorization modes in the [conformance manifests](../../specs/conformance/). The audit includes every recognized operation, including endpoints Azuifer cannot replay yet. The manifest operation names and auth sets match public `main` at `e70ff77`; this plan also includes feature paths such as HNS and the special Blob containers.
+The target is the five Azure Storage REST services, using the operations and authorization modes in the [conformance manifests](../../specs/conformance/). The baseline is **`2023-11-03`** for all reviewed fixtures. The plan also tracks pending feature paths, including HNS, the special Blob containers, and FileREST NFS journeys that need their own newer API versions. The audit includes every recognized operation, including endpoints Azuifer cannot replay yet.
 
 | Service | Operations | Advertised operation/auth pairs | Unsupported operations | Journey exchanges | Extra grid exchanges | Target |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Blob | 55 | 303 | 1 | 255 | 244 | 499 |
-| DFS | 18 | 106 | 0 | 73 | 86 | 159 |
-| FileREST | 44 | 188 | 3 | 90 | 147 | 237 |
+| DFS | 18 | 106 | 0 | 108 | 86 | 194 |
+| FileREST | 44 | 197 | 0 | 131 | 153 | 284 |
 | Queue | 17 | 72 | 0 | 43 | 53 | 96 |
 | Table | 19 | 72 | 1 | 57 | 53 | 110 |
-| **Total** | **153** | **741** | **5** | **518** | **583** | **1,101** |
+| **Total** | **153** | **750** | **2** | **594** | **589** | **1,183** |
 
 This is a finite coverage target, not a claim that every possible input is covered. It tests each advertised operation/auth pair once and adds separate exchanges for meaningful branches: conditions, checksums and limits, continuations, post-mutation state, failure atomicity, expiry, feature switches, and shared Blob/DFS state. It does not multiply every branch by every credential. Add a row when an API version, profile, or new variant changes contract behavior. Keep newer-version evidence separate until that version is adopted; a client reaching the emulator through version fallback is not evidence for the newer version. SMB and NFS wire exchanges, control-plane APIs, infrastructure performance, and emulator-only fault injection are out of scope.
 
@@ -100,6 +100,9 @@ The current target supports `flat` and Queue/Table lifecycle operations. Same-ac
 
 ### DFS and Blob/DFS
 
+Rows D-11 through D-14 track the live verification still owed by
+[ADR-0030](../adr.d/0030-read-path-range-checksums-and-create-path-expiry.md).
+
 | ID | Profile | Auth | Ordered exchanges | Count | Evidence |
 | --- | --- | --- | --- | ---: | --- |
 | D-01 | hns | Bearer | `Create File System`; duplicate create; `Set File System Properties`; `Get File System Properties`; `List File Systems` filtered first page; continue; `Delete File System`; read missing | 8 | pending |
@@ -112,8 +115,21 @@ The current target supports `flat` and Queue/Table lifecycle operations. Same-ac
 | D-08 | hns | Bearer | Put Blob via Blob endpoint; DFS read same bytes and ETag; DFS append; DFS flush; Blob read identical state; DFS rename to new prefix; `blob:List Blobs` shows moved objects; reject Blob delete of populated directory; reject Blob write on directory collision; list old prefix empty | 10 | pending |
 | D-09 | hns | UserDelegationSAS | Read with directory-scoped SAS; `List Paths` within signed directory; deny outside directory on another synthetic object; deny write with read-only SAS; `Read File` signed read-back | 5 | pending |
 | D-10 | hns | Bearer | `Set Path Properties`; `Get Path Properties`; stale condition rejection; byte-range read; reject range past EOF; read unchanged | 6 | pending |
+| D-11 | hns | Bearer | Read File with ranged MD5 and verify it against the returned bytes; give conflicting Range and x-ms-range with MD5; request MD5 without a range; request MD5 on a range over 4 MiB; request a bounded range with CRC64; request both checksums; read with If-Modified-Since; read with If-Unmodified-Since | 8 | pending |
+| D-12 | hns | Bearer | Create Path on a file with RelativeToNow; append bytes; flush; read the deadline through Blob HEAD; after the deadline check that DFS cannot read the file; check that Blob cannot read it either; create a file with Absolute expiry; verify the deadline; recreate it with NeverExpire; check that the old deadline is cleared | 10 | pending |
+| D-13 | hns | Bearer | Send expiry headers on directory creation; check whether the directory exists; try RelativeToCreation on a file; check the resulting file and deadline if present; send a past Absolute time; send a nonnumeric relative time; combine NeverExpire with a time; send an unknown option; send a time without an option; send an option without a time | 10 | pending |
+| D-14 | hns | Bearer | Create a file with a future deadline; rename it; check the old name is gone; read the deadline on the new name through Blob HEAD; read the renamed file before the deadline; after the deadline check DFS visibility; check Blob visibility | 7 | pending |
 
 ### FileREST
+
+F-13 uses `2025-05-05` for hard-link creation and `2025-07-05` for symbolic-link
+create/read. F-14 through F-23 track the ten items in the
+[NFS evidence report](files-nfs-evidence.md#not-verified-against-azure), in order.
+Use approved premium NFS and disposable SMB shares with the required data-plane
+permissions. Use `2025-07-05` for the NFS comparisons unless a row explicitly
+probes another version. Keep those live recordings separate from the
+`2023-11-03` baseline; an emulator response obtained through version fallback
+is not evidence that the newer Azure version is implemented.
 
 | ID | Profile | Auth | Ordered exchanges | Count | Evidence |
 | --- | --- | --- | --- | ---: | --- |
@@ -129,7 +145,17 @@ The current target supports `flat` and Queue/Table lifecycle operations. Same-ac
 | F-10 | files + copy | Bearer | `Copy File`; check copy progress; read copied bytes; `Put Range From URL`; verify changed range; reject source condition; `Abort Copy File` while pending; verify aborted status; reject abort when copy completed | 9 | pending |
 | F-11 | files-history | Bearer | `Snapshot Share`; overwrite primary file; read snapshot contents; list snapshots; delete with snapshot option; list soft-deleted shares; `Restore Share`; read restored file; reject wrong restore generation | 9 | pending |
 | F-12 | files-handles | Bearer | `List Handles` first page; resume; `Force Close Handles` single; close recursive; verify no matching handles remain | 5 | pending |
-| F-13 | files-nfs | Bearer | !`Create Hard Link` recognized boundary; !`Create Symbolic Link` recognized boundary; !`Get Symbolic Link` recognized boundary | 3 | pending |
+| F-13 | files-nfs | Bearer | `Create Hard Link` to a regular file; `Create Symbolic Link` with synthetic link text; `Read Symbolic Link` and verify the returned text | 3 | pending |
+| F-14 | files-nfs + keys | SharedKey | Try Get Share ACL on NFS; try Rename File on NFS; try Create Hard Link on SMB; try Create Symbolic Link on SMB; try Set Share Properties with x-ms-root-squash on SMB; read the SMB share settings afterward | 6 | pending |
+| F-15 | files-nfs | Bearer | Get File Properties on NFS at 2023-11-03; read the same file at 2025-05-05; try Create Hard Link at 2023-11-03; try Create Symbolic Link at 2025-05-05; try Read Symbolic Link at 2025-05-05 on a link seeded at 2025-07-05 | 5 | pending |
+| F-16 | files-nfs | Bearer | Create a file with SMB-only attribute and permission headers on NFS; read the resulting NFS properties; create a file with POSIX mode and owner headers on SMB; read the resulting SMB properties | 4 | pending |
+| F-17 | files-nfs + copy | Bearer | Try Get File on a symbolic link; Put Range on a fresh link; Put Range From URL with a link as source; Put Range From URL with a link as destination; List Ranges on a link; Copy File from a link; Copy File over a fresh link; Create File over a fresh link; resize a fresh link with Set File Properties; try a hard link to a symbolic link; try a hard link to a directory; read back the symbolic-link target of the attempted hard link | 12 | pending |
+| F-18 | files-nfs | Bearer | Create a symbolic link without a mode; Get File Properties for default mode and file-type casing; Get Directory Properties for link-count header presence | 3 | pending |
+| F-19 | files-nfs | Bearer | Create File under a missing parent and record status/code; Create Directory under a missing parent and record status/code | 2 | pending |
+| F-20 | files-nfs + copy | Bearer | Copy a regular file with distinct POSIX properties without either copy-mode header; read destination mode, owner and group | 2 | pending |
+| F-21 | files-nfs | Bearer | List a directory containing a symbolic link and check entry type and length against the synthetic link text; read the link's file properties and compare Content-Length | 2 | pending |
+| F-22 | files-nfs | Bearer | Get Share Properties for a premium NFS share and record access-tier and quota fields; list the same share and compare the reported fields | 2 | pending |
+| F-23 | files-nfs | Bearer | Create File over one name of a nonempty hard-linked file; read the recreated name and its ID, link count and data; read the sibling name and compare its ID, link count and data | 3 | pending |
 
 ### Queue
 
