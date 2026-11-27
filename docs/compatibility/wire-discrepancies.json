@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "description": "Running ledger of verified discrepancies between Microsoft Learn docs, official Azure SDKs, and live Azure Storage wire behavior.",
+  "categories": [
+    "live_vs_docs",
+    "sdk_vs_docs",
+    "live_vs_sdk",
+    "docs_inconsistency",
+    "undocumented_live"
+  ],
+  "entries": [
+    {
+      "id": "WD-001",
+      "service": "blob",
+      "operation": "List Blobs",
+      "category": "live_vs_docs",
+      "summary": "Live Azure returns unquoted ETag values inside <Etag> XML elements while HTTP ETag response headers are quoted.",
+      "expected_by_docs_or_sdk": "Quoted ETag format matching HTTP ETag headers.",
+      "observed_behavior": "List Blobs XML emits unquoted <Etag> values (e.g. 0x8D...) whereas HTTP headers quote them.",
+      "evidence": "tests/contracts/cassettes/blob-user-delegation-sas-list.json (commit cf4ae16)",
+      "status": "aligned_in_azuifer"
+    },
+    {
+      "id": "WD-002",
+      "service": "blob",
+      "operation": "List Blobs",
+      "category": "live_vs_docs",
+      "summary": "Live Azure echoes the request continuation marker in paginated List Blobs XML responses.",
+      "expected_by_docs_or_sdk": "Marker echo behavior is easy to omit from REST prose and was omitted in initial implementation.",
+      "observed_behavior": "Paginated List Blobs XML includes the echoed <Marker> element alongside <NextMarker>.",
+      "evidence": "tests/contracts/cassettes/blob-user-delegation-sas-list.json (commit cf4ae16)",
+      "status": "aligned_in_azuifer"
+    },
+    {
+      "id": "WD-003",
+      "service": "blob",
+      "operation": "Get Blob",
+      "category": "live_vs_docs",
+      "summary": "Sending both x-ms-range-get-content-md5 and x-ms-range-get-content-crc64 returns 400 BothCrc64AndMd5RangeHeaderPresent.",
+      "expected_by_docs_or_sdk": "Generic 400 InvalidHeaderValue.",
+      "observed_behavior": "Live Azure returns 400 with error code BothCrc64AndMd5RangeHeaderPresent and a dedicated message.",
+      "evidence": "tests/contracts/cassettes/blob-range-checksums.json (commit 0682d29)",
+      "status": "aligned_in_azuifer"
+    },
+    {
+      "id": "WD-004",
+      "service": "blob",
+      "operation": "Get Blob / Get Blob Properties",
+      "category": "live_vs_docs",
+      "summary": "304 Not Modified responses include x-ms-error-code: ConditionNotMet with an empty body.",
+      "expected_by_docs_or_sdk": "Plain 304 Not Modified without x-ms-error-code header.",
+      "observed_behavior": "Live Azure sets x-ms-error-code: ConditionNotMet on empty 304 conditional read responses.",
+      "evidence": "tests/contracts/cassettes/blob-conditional-reads.json (commit 0682d29)",
+      "status": "aligned_in_azuifer"
+    },
+    {
+      "id": "WD-005",
+      "service": "blob",
+      "operation": "Get Page Ranges",
+      "category": "live_vs_docs",
+      "summary": "Unpaged Get Page Ranges omits <NextMarker> from <PageList> XML.",
+      "expected_by_docs_or_sdk": "Always emitting an empty <NextMarker /> element in <PageList>.",
+      "observed_behavior": "Live Azure omits <NextMarker> unless marker or maxresults is supplied on the request.",
+      "evidence": "tests/contracts/cassettes/blob-page-resize-sequence.json (commit db47b29)",
+      "status": "aligned_in_azuifer"
+    },
+    {
+      "id": "WD-006",
+      "service": "blob",
+      "operation": "Put Page",
+      "category": "live_vs_docs",
+      "summary": "Unaligned byte ranges on Put Page return 400 InvalidHeaderValue rather than InvalidPageRange.",
+      "expected_by_docs_or_sdk": "400 InvalidPageRange for ranges not aligned to 512-byte page boundaries.",
+      "observed_behavior": "Live Azure returns 400 InvalidHeaderValue ('The value for one of the HTTP headers is not in the correct format.').",
+      "evidence": "tests/contracts/cassettes/blob-page-resize-sequence.json (commit db47b29)",
+      "status": "aligned_in_azuifer"
+    },
+    {
+      "id": "WD-007",
+      "service": "blob",
+      "operation": "Delete Blob",
+      "category": "live_vs_docs",
+      "summary": "Blob Delete on a non-empty HNS directory answers 409 DirectoryIsNotEmpty rather than DirectoryNotEmpty.",
+      "expected_by_docs_or_sdk": "409 DirectoryNotEmpty (as used by Azure Files).",
+      "observed_behavior": "Live Azure answers 409 DirectoryIsNotEmpty ('This operation is not permitted on a non-empty directory.') on the Blob endpoint while DFS and Files keep their own codes.",
+      "evidence": "PR #7 / commit 0c54b9a and cross-protocol tests",
+      "status": "aligned_in_azuifer"
+    },
+    {
+      "id": "WD-008",
+      "service": "dfs",
+      "operation": "Rename Path",
+      "category": "sdk_vs_docs",
+      "summary": "Go Data Lake SDK sends /{account}/{filesystem}/{path} in x-ms-rename-source against path-style URLs.",
+      "expected_by_docs_or_sdk": "REST docs describe /{filesystem}/{path} without the account prefix.",
+      "observed_behavior": "Official Go Data Lake client includes the account segment in x-ms-rename-source for path-style endpoints.",
+      "evidence": "commit 30db9f4 (tests/go_sdk)",
+      "status": "aligned_in_azuifer"
+    },
+    {
+      "id": "WD-009",
+      "service": "file",
+      "operation": "Create Hard Link / Create Symbolic Link",
+      "category": "sdk_vs_docs",
+      "summary": "Microsoft Learn NFS link pages disagree on x-ms-file-file-id vs x-ms-file-id; official SDKs read x-ms-file-id.",
+      "expected_by_docs_or_sdk": "Some Learn REST pages list x-ms-file-file-id in response header tables.",
+      "observed_behavior": "Python azure-storage-file-share and other official SDKs parse x-ms-file-id.",
+      "evidence": "docs/adr.d/0029-serve-nfs-file-shares-with-posix-properties-and-links.md (unverified on live Azure NFS)",
+      "status": "awaiting_live_recording"
+    },
+    {
+      "id": "WD-010",
+      "service": "file",
+      "operation": "Read Symbolic Link",
+      "category": "docs_inconsistency",
+      "summary": "Microsoft Learn titles the operation 'Read Symbolic Link' while other references call it 'Get Symbolic Link', and link routing uses restype= rather than comp=.",
+      "expected_by_docs_or_sdk": "Consistent operation naming across REST tables and manifests.",
+      "observed_behavior": "Learn REST API uses 'Read Symbolic Link' on GET ?restype=symboliclink.",
+      "evidence": "docs/adr.d/0029-serve-nfs-file-shares-with-posix-properties-and-links.md",
+      "status": "awaiting_live_recording"
+    }
+  ]
+}
