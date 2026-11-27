@@ -22,9 +22,11 @@ The [recording plan](azure-recording-plan.md) counts the exchange target, lists 
 | [Conditional Blob reads](../../tests/contracts/cassettes/blob-conditional-reads.json) | Distinguishes empty 304 `ConditionNotMet` responses from 412 XML errors for ETag and date conditions, including mixed preconditions. A valid ETag-conditioned range read returns 206. |
 | [Conditional Blob deletion](../../tests/contracts/cassettes/blob-conditional-delete.json) | Deletion with the current ETag is permanent on the flat profile. A read and repeat delete return 404. After recreation, the old ETag cannot delete the replacement. |
 | [Blob container lifecycle](../../tests/contracts/cassettes/blob-container-lifecycle.json) | Create and reject a duplicate; replace metadata; distinguish metadata reads from properties; follow and verify a filtered continuation; delete and confirm the container is gone. |
+| [Blob container leases](../../tests/contracts/cassettes/blob-container-lease.json) | Acquire, verify locked properties and the same ETag, reject deletion without the lease ID and renewal with the wrong ID, then renew, release and delete. |
 | [Block-list selectors](../../tests/contracts/cassettes/blob-block-list-selectors.json) | List committed and uncommitted blocks independently. Commit a staged block and a committed block in that order, even when the committed ID also has a staged replacement. A mismatched block ID width is rejected without changing the committed bytes. |
 | [Page ranges, resize and sequence](../../tests/contracts/cassettes/blob-page-resize-sequence.json) | Verify allocated ranges and an intersecting window, reject an unaligned write, shrink and grow with zero-fill, and observe max, update and increment sequence actions. |
 | [Append sealing](../../tests/contracts/cassettes/blob-append-sealing.json) | Append exactly at the size limit, reject growth beyond it, seal the blob, reject a later append, and read back the unchanged bytes and one committed block. |
+| [Blob account and service reads](../../tests/contracts/cassettes/blob-account-read-only.json) | Checks an empty account-info response with SKU, account kind and HNS headers, then selected Blob service properties for a flat StorageV2 Standard_LRS account with empty CORS and disabled Blob soft delete and static website. No settings are changed. |
 
 The mutation cases use Entra bearer authentication. Their cassettes record the request method, operation, payload length and selected guards alongside the observed response. ETags, lease IDs, continuation markers and conditional dates are represented by their relationship to the scenario, never by their value.
 
@@ -53,7 +55,7 @@ cargo test --locked --test tls_auth_http \
   contracts::live::check_live_ -- --ignored --nocapture --test-threads=1
 ```
 
-All live tests check the account and tag before requesting a Storage access token. The delegation cases use short validity windows and do not create containers or blobs. The SAS and mutation cases each create a randomly named container for synthetic data and delete it afterward. The tests do not list account keys, change account settings, or access existing containers. The recorder reports cleanup failures; an interrupted run may leave an `azuifer-contract-` container.
+All live tests check the account and tag before requesting a Storage access token. The delegation cases use short validity windows; neither they nor the account and service reads create containers or blobs. The SAS and mutation cases each create randomly named containers for synthetic data and delete them afterward. The tests do not list account keys, change account settings, or access existing containers. The recorder reports cleanup failures; an interrupted run may leave an `azuifer-contract-` container.
 
 ## Capture and review a new baseline
 

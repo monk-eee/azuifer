@@ -59,6 +59,8 @@ pub(super) enum Case {
     PageResizeSequence,
     #[serde(rename = "blob-append-sealing")]
     AppendSealing,
+    #[serde(rename = "blob-container-lease")]
+    ContainerLease,
 }
 
 impl Case {
@@ -78,6 +80,7 @@ impl Case {
             Self::BlockListSelectors => "blob-block-list-selectors",
             Self::PageResizeSequence => "blob-page-resize-sequence",
             Self::AppendSealing => "blob-append-sealing",
+            Self::ContainerLease => "blob-container-lease",
         }
     }
 
@@ -211,6 +214,15 @@ impl Case {
                 RejectSealedAppend,
                 ReadSealedAppend,
             ],
+            Self::ContainerLease => &[
+                AcquireLease,
+                RejectDeleteWithoutContainerLease,
+                ReadLeasedContainer,
+                RejectRenewWithWrongContainerLease,
+                RenewContainerLease,
+                ReleaseLease,
+                DeleteContainer,
+            ],
         }
     }
 }
@@ -308,6 +320,10 @@ enum Step {
     SealAppend,
     RejectSealedAppend,
     ReadSealedAppend,
+    RejectDeleteWithoutContainerLease,
+    ReadLeasedContainer,
+    RejectRenewWithWrongContainerLease,
+    RenewContainerLease,
 }
 
 impl Step {
@@ -368,6 +384,8 @@ impl Step {
                 | Self::RejectUnalignedPage
                 | Self::RejectAppendOverMax
                 | Self::RejectSealedAppend
+                | Self::RejectDeleteWithoutContainerLease
+                | Self::RejectRenewWithWrongContainerLease
         )
     }
 
@@ -412,6 +430,8 @@ impl Step {
             | Self::ShrinkPageBlob
             | Self::GrowAndMaxSequence => (200, Some(Tag::Changed)),
             Self::ReleaseLease
+            | Self::ReadLeasedContainer
+            | Self::RenewContainerLease
             | Self::HeadProperties
             | Self::ReadMetadata
             | Self::ReadMetadataAfterRejection
@@ -787,8 +807,12 @@ impl Probe<'_> {
                             "The condition specified using HTTP conditional header(s) is not met."
                         }
                         ErrorCode::InvalidBlockList => "The specified block list is invalid.",
+                        ErrorCode::LeaseIdMissing if step == Step::RejectDeleteWithoutContainerLease => {
+                            "There is currently a lease on the container and no lease ID was specified in the request."
+                        }
                         ErrorCode::LeaseIdMissing => "There is currently a lease on the blob and no lease ID was specified in the request.",
                         ErrorCode::LeaseMismatchBlob => "The lease ID specified did not match the lease ID for the blob.",
+                        ErrorCode::LeaseMismatchLease => "The lease ID specified did not match the lease ID for the container.",
                         ErrorCode::SnapshotsPresent => "This operation is not permitted because the blob has snapshots.",
                         ErrorCode::AppendPositionConditionNotMet => "The append position condition specified was not met.",
                         ErrorCode::SequenceNumberConditionNotMet => "The sequence number condition specified was not met.",
@@ -942,6 +966,7 @@ pub(super) fn observe(
             Case::BlockListSelectors => probe.block_list_selectors()?,
             Case::PageResizeSequence => probe.page_resize_sequence()?,
             Case::AppendSealing => probe.append_sealing()?,
+            Case::ContainerLease => probe.container_lease(endpoint, companion)?,
         }
         Ok(MutationCassette {
             schema_version: SCHEMA_VERSION,
@@ -1036,6 +1061,11 @@ fn replay_blob_mutation_conditional_delete() -> Result<()> {
 #[test]
 fn replay_blob_mutation_container_lifecycle() -> Result<()> {
     replay(Case::ContainerLifecycle)
+}
+
+#[test]
+fn replay_blob_mutation_container_lease() -> Result<()> {
+    replay(Case::ContainerLease)
 }
 
 #[test]

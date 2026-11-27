@@ -731,7 +731,7 @@ fn describe(error: Error) -> (StatusCode, &'static str, &'static str) {
         Error::LeaseIdMissing => (
             S::PRECONDITION_FAILED,
             "LeaseIdMissing",
-            "There is currently a lease on the resource and no lease ID was specified in the request.",
+            "There is currently a lease on the container and no lease ID was specified in the request.",
         ),
         Error::LeaseIdMissingBlob => (
             S::PRECONDITION_FAILED,
@@ -762,6 +762,11 @@ fn describe(error: Error) -> (StatusCode, &'static str, &'static str) {
             S::CONFLICT,
             "LeaseIdMismatchWithLeaseOperation",
             "The lease ID specified did not match the lease ID for the resource.",
+        ),
+        Error::LeaseMismatchContainerLease => (
+            S::CONFLICT,
+            "LeaseIdMismatchWithLeaseOperation",
+            "The lease ID specified did not match the lease ID for the container.",
         ),
         Error::LeaseNotPresentBlob => (
             S::PRECONDITION_FAILED,
@@ -882,8 +887,10 @@ pub(crate) fn request_error_response(
             | Error::BlockIdWidthMismatch
             | Error::InvalidRange(_)
             | Error::ConflictingRangeChecksums
+            | Error::LeaseIdMissing
             | Error::LeaseIdMissingBlob
             | Error::LeaseMismatchBlob
+            | Error::LeaseMismatchContainerLease
             | Error::SnapshotsPresent
             | Error::Page(
                 PageError::AppendPositionConditionNotMet

@@ -25,6 +25,9 @@ enum Operation {
     CommitBlockList,
     GetBlockList,
     AcquireLease,
+    AcquireContainerLease,
+    RenewContainerLease,
+    ReleaseContainerLease,
     ReleaseLease,
     CreateSnapshot,
     ReadSnapshot,
@@ -173,6 +176,9 @@ impl Input {
             Some("metadata") => Operation::BlobMetadata,
             Some("properties") => Operation::SetBlobProperties,
             Some("lease") => match text("x-ms-lease-action") {
+                Some("acquire") if container => Operation::AcquireContainerLease,
+                Some("renew") if container => Operation::RenewContainerLease,
+                Some("release") if container => Operation::ReleaseContainerLease,
                 Some("acquire") => Operation::AcquireLease,
                 Some("release") => Operation::ReleaseLease,
                 _ => bail!("unexpected Blob probe lease action"),
@@ -278,7 +284,10 @@ impl Input {
                 }),
             lease_id: observe_header(header(
                 headers,
-                if operation == Operation::AcquireLease {
+                if matches!(
+                    operation,
+                    Operation::AcquireLease | Operation::AcquireContainerLease
+                ) {
                     "x-ms-proposed-lease-id"
                 } else {
                     "x-ms-lease-id"

@@ -58,6 +58,7 @@ pub(crate) enum Error {
     LeaseMismatchBlob,
     LeaseMismatchContainer,
     LeaseMismatchLease,
+    LeaseMismatchContainerLease,
     LeaseNotPresentBlob,
     LeaseNotPresentContainer,
     LeaseNotPresentLease,

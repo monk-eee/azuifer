@@ -30,10 +30,10 @@ pub(super) fn details(step: Step, headers: &HeaderMap) -> Option<Details> {
     use Step::*;
     let number = |name| header_text(headers, name).and_then(|value| value.parse().ok());
     Some(match step {
-        AcquireLease | ReleaseLease => Details::LeaseId {
+        AcquireLease | RenewContainerLease | ReleaseLease => Details::LeaseId {
             id: header(headers, "x-ms-lease-id", |id| id == LEASE_ID),
         },
-        ReadLeasedOriginal | ReadLeasedReplacement | ReadReleased => {
+        ReadLeasedOriginal | ReadLeasedReplacement | ReadReleased | ReadLeasedContainer => {
             let (status, state) = if step == ReadReleased {
                 ("unlocked", "available")
             } else {

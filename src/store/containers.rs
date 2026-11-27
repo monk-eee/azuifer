@@ -257,7 +257,10 @@ impl Store {
             let tx = db.transaction().map_err(db_error)?;
             let row = require_container(&tx, &key, now)?;
             guard.conditions.check(Some(row.info.entity), false)?;
-            let outcome = row.lease.apply(action, now)?;
+            let outcome = row.lease.apply(action, now).map_err(|error| match error {
+                Error::LeaseMismatchLease => Error::LeaseMismatchContainerLease,
+                other => other,
+            })?;
             write_lease(
                 &tx,
                 "containers",

@@ -1,3 +1,4 @@
+mod account;
 mod cassette;
 mod delegation;
 mod live;
@@ -205,16 +206,22 @@ fn with_fresh_container<T>(
     require_status(&created, 201, "create test container")?;
 
     let outcome = observe(&container, blob_url);
-    let cleanup = delete_test_container(client, container_url, bearer)
-        .and_then(|response| require_status(&response, 202, "delete test container"));
+    let cleanup = remove_test_container(client, container_url, bearer);
     finish_cleanup(outcome, cleanup)
 }
 
-fn delete_test_container(client: &Client, container_url: Url, bearer: &str) -> Result<Response> {
-    send(
+fn remove_test_container(client: &Client, container_url: Url, bearer: &str) -> Result<()> {
+    let response = send(
         request(client, Method::DELETE, container_url).bearer_auth(bearer),
         "delete test container",
-    )
+    )?;
+    // Some journeys delete their own container before cleanup.
+    if response.status().as_u16() == 404
+        && header_text(response.headers(), "x-ms-error-code") == Some("ContainerNotFound")
+    {
+        return Ok(());
+    }
+    require_status(&response, 202, "delete test container")
 }
 
 fn finish_cleanup<T>(outcome: Result<T>, cleanup: Result<()>) -> Result<T> {

@@ -1,6 +1,6 @@
 use super::{
-    Cassette, Source, delegation, mutations, observe_blob, observe_local, reviewed_sas, sas_reads,
-    with_local,
+    Cassette, Source, account, delegation, mutations, observe_blob, observe_local, reviewed_sas,
+    sas_reads, with_local,
 };
 use anyhow::{Context as _, Result, anyhow, ensure};
 use reqwest::{Url, blocking::Client, redirect::Policy};
@@ -157,6 +157,7 @@ pub(super) enum Record<'a> {
     InvalidWindows(&'a delegation::WindowCassette),
     BlobMutation(&'a mutations::MutationCassette),
     SasRead(&'a sas_reads::SasReadCassette),
+    AccountRead(&'a account::AccountCassette),
 }
 
 pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
@@ -168,6 +169,7 @@ pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
         Record::InvalidWindows(_) => "blob-delegation-key-invalid-windows",
         Record::BlobMutation(cassette) => cassette.case.file_stem(),
         Record::SasRead(cassette) => cassette.case.file_stem(),
+        Record::AccountRead(_) => account::CASE,
     };
     let name = format!("{scenario}-{}.json", Uuid::new_v4().simple());
     let target = directory.join(name);
@@ -406,6 +408,27 @@ fn check_live_blob_mutation_conditional_delete() -> Result<()> {
 #[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
 fn check_live_blob_mutation_container_lifecycle() -> Result<()> {
     live_mutation(mutations::Case::ContainerLifecycle)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_mutation_container_lease() -> Result<()> {
+    live_mutation(mutations::Case::ContainerLease)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_account_reads() -> Result<()> {
+    run_live(
+        account::reviewed,
+        |client, _, endpoint, bearer| account::observe(client, endpoint, bearer, Source::Azure),
+        account::observe_local,
+        account::AccountCassette::compare,
+        |azure| {
+            azure.validate()?;
+            save_azure(Record::AccountRead(azure))
+        },
+    )
 }
 
 #[test]

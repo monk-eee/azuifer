@@ -1,0 +1,153 @@
+{
+  "schema_version": 2,
+  "source": "azure",
+  "case": "blob-container-lease",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "acquire_lease",
+      "request": {
+        "method": "put",
+        "operation": "acquire_container_lease",
+        "body_bytes": 0,
+        "lease_id": "matches",
+        "lease_seconds": -1
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      },
+      "details": {
+        "kind": "lease_id",
+        "id": "matches"
+      }
+    },
+    {
+      "step": "reject_delete_without_container_lease",
+      "request": {
+        "method": "delete",
+        "operation": "container",
+        "body_bytes": 0
+      },
+      "status": 412,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "lease_id_missing",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "lease_id_missing",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "read_leased_container",
+      "request": {
+        "method": "head",
+        "operation": "container",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      },
+      "details": {
+        "kind": "lease_state",
+        "status": "matches",
+        "state": "matches",
+        "duration": "matches"
+      }
+    },
+    {
+      "step": "reject_renew_with_wrong_container_lease",
+      "request": {
+        "method": "put",
+        "operation": "renew_container_lease",
+        "body_bytes": 0,
+        "lease_id": "different"
+      },
+      "status": 409,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "lease_mismatch_lease",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "lease_mismatch_lease",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "renew_container_lease",
+      "request": {
+        "method": "put",
+        "operation": "renew_container_lease",
+        "body_bytes": 0,
+        "lease_id": "matches"
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      },
+      "details": {
+        "kind": "lease_id",
+        "id": "matches"
+      }
+    },
+    {
+      "step": "release_lease",
+      "request": {
+        "method": "put",
+        "operation": "release_container_lease",
+        "body_bytes": 0,
+        "lease_id": "matches"
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      },
+      "details": {
+        "kind": "lease_id",
+        "id": "missing"
+      }
+    },
+    {
+      "step": "delete_container",
+      "request": {
+        "method": "delete",
+        "operation": "container",
+        "body_bytes": 0
+      },
+      "status": 202,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    }
+  ]
+}

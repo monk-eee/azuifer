@@ -1,12 +1,15 @@
 use super::{
-    Body, Details, ErrorCode, Header, Probe, Response, Step, header, header_text, lists::Marker,
+    Body, Details, ErrorCode, Header, Probe, Response, Step, header, header_text,
+    lifecycle::{LEASE_ID, WRONG_LEASE_ID},
+    lists::Marker,
+    usable_etag,
 };
 use crate::contracts::{
     cassette::{Media, XmlEtag, echoed, media, project_xml},
-    delete_test_container, finish_cleanup, request, require_status,
+    finish_cleanup, remove_test_container, request, require_status, send,
 };
 use anyhow::{Context as _, Result};
-use reqwest::{Method, Url, header::HeaderMap};
+use reqwest::{Method, Url, blocking::RequestBuilder, header::HeaderMap};
 use serde::{Deserialize, Serialize};
 
 const PURPOSE: &str = "updated";
@@ -188,6 +191,26 @@ pub(super) fn matches_fixture(response: &Response) -> bool {
         Step::ReadMissingContainer => {
             response.status == 404 && response.error_header == ErrorCode::ContainerNotFound
         }
+        Step::RejectDeleteWithoutContainerLease => {
+            response.status == 412 && response.error_header == ErrorCode::LeaseIdMissing
+        }
+        Step::RejectRenewWithWrongContainerLease => {
+            response.status == 409 && response.error_header == ErrorCode::LeaseMismatchLease
+        }
+        Step::RenewContainerLease => matches!(
+            response.details,
+            Some(Details::LeaseId {
+                id: Header::Matches
+            })
+        ),
+        Step::ReadLeasedContainer => matches!(
+            response.details,
+            Some(Details::LeaseState {
+                status: Header::Matches,
+                state: Header::Matches,
+                duration: Header::Matches,
+            })
+        ),
         Step::ReadContainerMetadata | Step::HeadContainer => matches!(
             &response.details,
             Some(Details::Container {
@@ -205,16 +228,7 @@ impl Probe<'_> {
         let url = endpoint.join(&format!("{}?restype=container", tracked_name(companion)))?;
         self.url = url.clone();
         let outcome = self.observe_container(endpoint, companion);
-        let cleanup = delete_test_container(self.client, url, self.bearer).and_then(|response| {
-            if response.status().as_u16() == 404
-                && header_text(response.headers(), "x-ms-error-code") == Some("ContainerNotFound")
-            {
-                // The tracked container is deleted by the recorded journey.
-                Ok(())
-            } else {
-                require_status(&response, 202, "delete tracked test container")
-            }
-        });
+        let cleanup = remove_test_container(self.client, url, self.bearer);
         finish_cleanup(outcome, cleanup)
     }
 
@@ -280,6 +294,89 @@ impl Probe<'_> {
             Some(&updated),
         )?;
         self.record(Step::ReadMissingContainer, self.request(Method::GET), None)?;
+        Ok(())
+    }
+
+    pub(super) fn container_lease(&mut self, endpoint: &Url, name: &str) -> Result<()> {
+        self.url = endpoint.join(&format!("{name}?restype=container"))?;
+        let outcome = self.observe_container_lease();
+        if self.responses.last().is_some_and(|response| {
+            response.step == Step::DeleteContainer && response.status == 202
+        }) {
+            return outcome;
+        }
+        let cleanup = send(
+            self.container_lease_request("break")
+                .header("x-ms-lease-break-period", "0"),
+            "break lease on disposable container",
+        )
+        .and_then(|response| {
+            match (
+                response.status().as_u16(),
+                header_text(response.headers(), "x-ms-error-code"),
+            ) {
+                (404, Some("ContainerNotFound"))
+                | (409, Some("LeaseNotPresentWithLeaseOperation")) => Ok(()),
+                _ => require_status(&response, 202, "break lease on disposable container"),
+            }
+        });
+        finish_cleanup(outcome, cleanup)
+    }
+
+    fn container_lease_request(&self, action: &'static str) -> RequestBuilder {
+        self.request(Method::PUT)
+            .query(&[("comp", "lease")])
+            .header("content-length", "0")
+            .header("x-ms-lease-action", action)
+    }
+
+    fn observe_container_lease(&mut self) -> Result<()> {
+        let seed = self.setup(
+            self.request(Method::HEAD),
+            200,
+            "read fresh container properties",
+        )?;
+        let tag = usable_etag(seed.headers()).context("fresh container properties lack ETag")?;
+        self.record(
+            Step::AcquireLease,
+            self.container_lease_request("acquire")
+                .header("x-ms-lease-duration", "-1")
+                .header("x-ms-proposed-lease-id", LEASE_ID),
+            Some(tag),
+        )?;
+        self.record(
+            Step::RejectDeleteWithoutContainerLease,
+            self.request(Method::DELETE),
+            Some(tag),
+        )?;
+        self.record(
+            Step::ReadLeasedContainer,
+            self.request(Method::HEAD),
+            Some(tag),
+        )?;
+        self.record(
+            Step::RejectRenewWithWrongContainerLease,
+            self.container_lease_request("renew")
+                .header("x-ms-lease-id", WRONG_LEASE_ID),
+            Some(tag),
+        )?;
+        self.record(
+            Step::RenewContainerLease,
+            self.container_lease_request("renew")
+                .header("x-ms-lease-id", LEASE_ID),
+            Some(tag),
+        )?;
+        self.record(
+            Step::ReleaseLease,
+            self.container_lease_request("release")
+                .header("x-ms-lease-id", LEASE_ID),
+            Some(tag),
+        )?;
+        self.record(
+            Step::DeleteContainer,
+            self.request(Method::DELETE),
+            Some(tag),
+        )?;
         Ok(())
     }
 }
