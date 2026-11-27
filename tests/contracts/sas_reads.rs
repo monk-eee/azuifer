@@ -5,7 +5,7 @@ use super::{
         xml_error,
     },
     delegation_key_document, iso, read_bounded, request, require_status, send, sign_sas,
-    sign_sas_with_overrides, with_fresh_container, with_local,
+    sign_sas_with_options, with_fresh_container, with_local,
 };
 use anyhow::{Context as _, Result, ensure};
 use reqwest::{
@@ -322,7 +322,7 @@ fn observe_overrides(
 ) -> Result<Vec<Exchange>> {
     let (account, container) = scope;
     let resource = (account, container, Some(BLOB));
-    let signed = sign_sas_with_overrides(key, resource, "r", expiry, OVERRIDES)?;
+    let signed = sign_sas_with_options(key, resource, "r", ("", expiry), OVERRIDES)?;
     let overridden = signed_url(url.clone(), &signed);
     let plain = signed_url(url, &sign_sas(key, resource, "r", expiry)?);
     [

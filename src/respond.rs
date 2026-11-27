@@ -1,6 +1,7 @@
 //! Maps typed Blob outcomes to Azure responses: headers, XML bodies, and errors.
 
 use crate::{
+    blob_lifecycle::LifecycleError,
     blob_page::{BlobKind, PageError},
     blob_sas::Overrides,
     domain::{
@@ -524,7 +525,9 @@ impl Xml {
 fn describe(error: Error) -> (StatusCode, &'static str, &'static str) {
     use StatusCode as S;
     match error {
-        Error::AuthenticationFailed => (
+        Error::AuthenticationFailed
+        | Error::DelegationSasWindow { .. }
+        | Error::DelegationKeyExpired { .. } => (
             S::FORBIDDEN,
             "AuthenticationFailed",
             "Server failed to authenticate the request. Make sure the value of the Authorization header is formed correctly including the signature.",
@@ -558,6 +561,11 @@ fn describe(error: Error) -> (StatusCode, &'static str, &'static str) {
             S::BAD_REQUEST,
             "InvalidQueryParameterValue",
             "A query parameter is invalid.",
+        ),
+        Error::ContainerRenameUnsupported => (
+            S::BAD_REQUEST,
+            "InvalidQueryParameterValue",
+            "Value for one of the query parameters specified in the request URI is invalid.",
         ),
         Error::Unsupported => (
             S::NOT_IMPLEMENTED,
@@ -823,6 +831,11 @@ fn describe(error: Error) -> (StatusCode, &'static str, &'static str) {
             "CannotVerifyCopySource",
             "Could not verify the copy source: the source does not exist.",
         ),
+        Error::CopySourceRange => (
+            S::RANGE_NOT_SATISFIABLE,
+            "CannotVerifyCopySource",
+            "Could not verify the copy source within the specified time.",
+        ),
         Error::SnapshotsPresent => (
             S::CONFLICT,
             "SnapshotsPresent",
@@ -876,6 +889,24 @@ pub(crate) fn request_error_response(
     request_id: &str,
     now: SystemTime,
 ) -> Response {
+    match error {
+        Error::DelegationSasWindow { .. } | Error::DelegationKeyExpired { .. } => {
+            return delegation_sas_error(error, request_id, now).unwrap_or_else(error_response);
+        }
+        Error::ContainerRenameUnsupported => {
+            let (status, code, message) = describe(error);
+            return xml_error_with_details(
+                status,
+                code,
+                &correlated_error_message(message, request_id, now),
+                &[
+                    ("QueryParameterName", "comp"),
+                    ("QueryParameterValue", "rename"),
+                ],
+            );
+        }
+        _ => {}
+    }
     let rejected_header = match error {
         Error::Page(PageError::UnalignedPageRange) => Some((
             "Range",
@@ -907,6 +938,7 @@ pub(crate) fn request_error_response(
             | Error::BlobAlreadyExists
             | Error::ConditionNotMet
             | Error::SourceConditionNotMet
+            | Error::CopySourceRange
             | Error::NoPendingCopy
             | Error::BlobMissing
             | Error::ContainerExists
@@ -922,6 +954,7 @@ pub(crate) fn request_error_response(
             | Error::LeaseMismatchContainerLease
             | Error::LeaseBreakingNoAcquire
             | Error::SnapshotsPresent
+            | Error::Ext(LifecycleError::OperationNotAllowedOnIncrementalCopyBlob)
             | Error::Page(
                 PageError::AppendPositionConditionNotMet
                     | PageError::SequenceNumberConditionNotMet
@@ -931,6 +964,46 @@ pub(crate) fn request_error_response(
     )
     .then_some((request_id, now));
     render_error(error, correlation)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct OmitApiVersion;
+
+fn delegation_sas_error(error: Error, request_id: &str, now: SystemTime) -> Result<Response> {
+    let date = |time: SystemTime| {
+        http_date(
+            time.duration_since(UNIX_EPOCH)
+                .map_err(|_| {
+                    tracing::error!("SAS timestamp predates the HTTP date range");
+                    Error::Internal
+                })?
+                .as_secs(),
+        )
+    };
+    let detail = match error {
+        Error::DelegationSasWindow { start, expiry } => format!(
+            "Signature not valid in the specified time frame: Start [{}] - Expiry [{}] - Current [{}]",
+            date(start)?,
+            date(expiry)?,
+            date(now)?,
+        ),
+        Error::DelegationKeyExpired { start, expiry } => format!(
+            "Signature not valid in the specified key time frame: Key start [{}] - Key expiry [{}] - Current [{}]",
+            date(start)?,
+            date(expiry)?,
+            date(now)?,
+        ),
+        _ => return Ok(error_response(error)),
+    };
+    let (status, code, message) = describe(error);
+    let mut response = xml_error_with_details(
+        status,
+        code,
+        &correlated_error_message(message, request_id, now),
+        &[("AuthenticationErrorDetail", &detail)],
+    );
+    response.extensions_mut().insert(OmitApiVersion);
+    Ok(response)
 }
 
 fn render_error(error: Error, correlation: Option<(&str, SystemTime)>) -> Response {

@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "from_url",
+  "api_version": "2023-11-03",
+  "exchanges": [
+    {
+      "step": "put_blob",
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "missing",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty",
+        "matches": true
+      },
+      "details": null
+    },
+    {
+      "step": "read_whole",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "octet_stream",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "bytes",
+        "matches": true,
+        "length": "matches",
+        "blob_type": "matches"
+      },
+      "details": null
+    },
+    {
+      "step": "stage_block",
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "missing",
+      "etag": "missing",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty",
+        "matches": true
+      },
+      "details": null
+    },
+    {
+      "step": "commit_block",
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "missing",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty",
+        "matches": true
+      },
+      "details": null
+    },
+    {
+      "step": "read_block",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "octet_stream",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "bytes",
+        "matches": true,
+        "length": "matches",
+        "blob_type": "matches"
+      },
+      "details": null
+    },
+    {
+      "step": "append_block",
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "missing",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty",
+        "matches": true
+      },
+      "details": {
+        "kind": "append",
+        "offset": "matches",
+        "committed_blocks": "matches"
+      }
+    },
+    {
+      "step": "read_append",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "octet_stream",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "bytes",
+        "matches": true,
+        "length": "matches",
+        "blob_type": "matches"
+      },
+      "details": null
+    },
+    {
+      "step": "put_page",
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "missing",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty",
+        "matches": true
+      },
+      "details": {
+        "kind": "page",
+        "sequence": "matches"
+      }
+    },
+    {
+      "step": "read_page",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "octet_stream",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "bytes",
+        "matches": true,
+        "length": "matches",
+        "blob_type": "matches"
+      },
+      "details": null
+    },
+    {
+      "step": "reject_source_range",
+      "status": 416,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "xml",
+      "etag": "missing",
+      "error_header": "cannot_verify_copy_source",
+      "body": {
+        "kind": "error",
+        "code": "cannot_verify_copy_source",
+        "correlation": "matches",
+        "detail": "none"
+      },
+      "details": null
+    }
+  ]
+}

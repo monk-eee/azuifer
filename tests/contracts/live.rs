@@ -1,7 +1,7 @@
 use super::{
-    Cassette, Service, Source, account, batch, catalog, delegation, mutations, observe_blob,
-    observe_local, query, queue_messages, request_errors, reviewed_sas, sas_reads, service_reads,
-    table_entities, with_local,
+    Cassette, Service, Source, account, batch, catalog, delegation, flat_blob, mutations,
+    observe_blob, observe_local, query, queue_messages, request_errors, reviewed_sas, sas_reads,
+    service_reads, table_entities, with_local,
 };
 use anyhow::{Context as _, Result, anyhow, ensure};
 use reqwest::{Url, blocking::Client, redirect::Policy};
@@ -167,6 +167,7 @@ pub(super) enum Record<'a> {
     ServiceRead(&'a service_reads::ServiceReadCassette),
     QueueMessages(&'a queue_messages::MessageCassette),
     TableEntities(&'a table_entities::EntityCassette),
+    FlatBlob(&'a flat_blob::Cassette),
 }
 
 pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
@@ -186,6 +187,7 @@ pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
         Record::ServiceRead(cassette) => cassette.case.file_stem(),
         Record::QueueMessages(cassette) => cassette.case.file_stem(),
         Record::TableEntities(cassette) => cassette.case.file_stem(),
+        Record::FlatBlob(cassette) => cassette.case.file_stem(),
     };
     let name = format!("{scenario}-{}.json", Uuid::new_v4().simple());
     let target = directory.join(name);
@@ -652,6 +654,46 @@ fn check_live_deep_table_query() -> Result<()> {
 #[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
 fn check_live_deep_table_transactions() -> Result<()> {
     live_table_entities(table_entities::Case::Transactions)
+}
+
+fn live_flat_blob(case: flat_blob::Case) -> Result<()> {
+    run_live(
+        Service::Blob,
+        || flat_blob::reviewed(case),
+        |client, account, endpoint, bearer| {
+            flat_blob::observe(client, account, endpoint, bearer, Source::Azure, case)
+        },
+        || flat_blob::local(case),
+        flat_blob::Cassette::compare,
+        |azure| {
+            azure.validate()?;
+            save_azure(Record::FlatBlob(azure))
+        },
+    )
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_flat_blob_from_url() -> Result<()> {
+    live_flat_blob(flat_blob::Case::FromUrl)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_flat_blob_incremental_copy() -> Result<()> {
+    live_flat_blob(flat_blob::Case::IncrementalCopy)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_flat_blob_sas_windows() -> Result<()> {
+    live_flat_blob(flat_blob::Case::SasWindows)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_flat_blob_rename_boundary() -> Result<()> {
+    live_flat_blob(flat_blob::Case::RenameBoundary)
 }
 
 fn live_service_reads(case: service_reads::Case) -> Result<()> {

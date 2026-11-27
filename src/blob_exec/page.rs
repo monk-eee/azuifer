@@ -42,7 +42,13 @@ pub(super) async fn execute(
             if write.range.end - write.range.start > MAX_WRITE_BYTES {
                 return Err(Error::TooLarge);
             }
-            let (source, _) = read_source(app, ctx, request).await?;
+            let (source, _) =
+                read_source(app, ctx, request)
+                    .await
+                    .map_err(|error| match error {
+                        Error::InvalidRange(_) => Error::CopySourceRange,
+                        other => other,
+                    })?;
             let checksum = ("content-md5", source.upload.checksums.md5_text());
             let written = store.put_page(key, write, Some(source.upload)).await?;
             page_written(written, Some(checksum))

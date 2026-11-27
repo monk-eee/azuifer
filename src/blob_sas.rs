@@ -271,8 +271,21 @@ impl Token {
             }
             (None, _) => (self.sas.start(), self.sas.expiry(), self.sas.field("sp")),
         };
-        sas::check_window(start, expiry, connection.now)?;
+        if let Err(error) = sas::check_window(start, expiry, connection.now) {
+            return Err(match (self.key_window, start, expiry) {
+                (Some(_), Some(start), Some(expiry)) => {
+                    Error::DelegationSasWindow { start, expiry }
+                }
+                _ => error,
+            });
+        }
         if let Some((key_start, key_expiry)) = self.key_window {
+            if connection.now >= key_expiry {
+                return Err(Error::DelegationKeyExpired {
+                    start: key_start,
+                    expiry: key_expiry,
+                });
+            }
             sas::check_window(Some(key_start), Some(key_expiry), connection.now)?;
         }
         let grants =

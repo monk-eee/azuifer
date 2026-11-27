@@ -2,7 +2,7 @@ use crate::{
     address,
     auth::{Query, header},
     blob_auth::{self, Credentials, Presented, Target},
-    blob_copy::CopySource,
+    blob_copy::{CopySource, SourceBearer},
     blob_sas::{self, Need, Public},
     blob_snapshot::{Removal, Selector},
     blob_tags::TagFilter,
@@ -72,6 +72,7 @@ const SOURCE: &[&str] = &[
     "x-ms-source-if-unmodified-since",
     "x-ms-source-lease-id",
 ];
+const SOURCE_BEARER: &[&str] = &["x-ms-copy-source-authorization"];
 const LEASE_HEADERS: &[&str] = &[
     "x-ms-lease-action",
     "x-ms-lease-id",
@@ -119,6 +120,7 @@ pub(crate) enum ContainerView {
 
 pub(crate) struct SourceRequest {
     pub(crate) url: CopySource,
+    pub(crate) bearer: Option<SourceBearer>,
     pub(crate) guard: Guard,
     pub(crate) range: Option<ByteRange>,
     /// Put Blob From URL: take content properties from the source (the default).

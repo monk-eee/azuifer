@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "sas_windows",
+  "api_version": "2023-11-03",
+  "exchanges": [
+    {
+      "step": "in_window",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "text_plain",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "bytes",
+        "matches": true,
+        "length": "matches",
+        "blob_type": "matches"
+      },
+      "details": null
+    },
+    {
+      "step": "expired",
+      "status": 403,
+      "api_version": "missing",
+      "request_id": "matches",
+      "media": "xml",
+      "etag": "missing",
+      "error_header": "authentication_failed",
+      "body": {
+        "kind": "error",
+        "code": "authentication_failed",
+        "correlation": "matches",
+        "detail": "sas_time"
+      },
+      "details": null
+    },
+    {
+      "step": "future_start",
+      "status": 403,
+      "api_version": "missing",
+      "request_id": "matches",
+      "media": "xml",
+      "etag": "missing",
+      "error_header": "authentication_failed",
+      "body": {
+        "kind": "error",
+        "code": "authentication_failed",
+        "correlation": "matches",
+        "detail": "sas_time"
+      },
+      "details": null
+    },
+    {
+      "step": "signed_start",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "media": "text_plain",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "bytes",
+        "matches": true,
+        "length": "matches",
+        "blob_type": "matches"
+      },
+      "details": null
+    },
+    {
+      "step": "expired_key",
+      "status": 403,
+      "api_version": "missing",
+      "request_id": "matches",
+      "media": "xml",
+      "etag": "missing",
+      "error_header": "authentication_failed",
+      "body": {
+        "kind": "error",
+        "code": "authentication_failed",
+        "correlation": "matches",
+        "detail": "key_expired"
+      },
+      "details": null
+    }
+  ]
+}

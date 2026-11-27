@@ -204,6 +204,9 @@ impl Request<'_> {
                 self.check(&["restype", "comp"], &[], false)?;
                 Operation::SubmitBatch(Some(key), self.batch()?)
             }
+            (Some("container"), Some("rename")) if *self.method == Method::PUT => {
+                return Err(Error::ContainerRenameUnsupported);
+            }
             (Some("account"), Some("properties")) if reading => {
                 self.check(&["restype", "comp"], &[], false)?;
                 Operation::AccountInfo

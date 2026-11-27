@@ -206,14 +206,22 @@ pub(crate) async fn execute(
         Operation::GetBlockList(key, kind, guard) => {
             block_list_response(store.blocks(key, kind, guard).await?)
         }
-        Operation::ReadBlob(key, options) => match store.read_path(key, options).await? {
-            PathRead::File(download) => {
-                respond::download_response(*download, ctx.credentials.overrides())
+        Operation::ReadBlob(key, options) => {
+            let with_body = options.with_body;
+            match store.read_path(key, options).await? {
+                PathRead::File(download)
+                    if with_body && download.info.lifecycle.incremental.is_some() =>
+                {
+                    Err(Error::Ext(crate::blob_lifecycle::LifecycleError::OperationNotAllowedOnIncrementalCopyBlob))
+                }
+                PathRead::File(download) => {
+                    respond::download_response(*download, ctx.credentials.overrides())
+                }
+                PathRead::Directory(entity, metadata) => {
+                    wire::blob_directory_response(StatusCode::OK, entity, metadata)
+                }
             }
-            PathRead::Directory(entity, metadata) => {
-                wire::blob_directory_response(StatusCode::OK, entity, metadata)
-            }
-        },
+        }
         Operation::BlobMetadata(key, guard) => {
             let download = store
                 .read_path(
@@ -331,7 +339,10 @@ fn is_external(app: &App, ctx: &Context<'_>, request: &SourceRequest) -> bool {
 /// Reads a source on an allowed host (`--allow-external-copy-sources`). Source
 /// conditions and leases belong to Azure sources, so they are refused here.
 async fn read_external(app: &App, request: SourceRequest) -> Result<(SourceBytes, String)> {
-    if request.guard.lease.is_some() || request.guard.conditions != Conditions::default() {
+    if request.bearer.is_some()
+        || request.guard.lease.is_some()
+        || request.guard.conditions != Conditions::default()
+    {
         return Err(Error::Unsupported);
     }
     let target = blob_external::Target::new(&request.url);
@@ -363,6 +374,7 @@ async fn resolve_source(
         ctx.account,
         &resolved,
         ctx.connection,
+        request.bearer.as_ref(),
     )
     .await?;
     Ok(resolved)

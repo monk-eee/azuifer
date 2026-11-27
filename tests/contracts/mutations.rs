@@ -21,7 +21,7 @@ mod expanded;
 mod input;
 mod lease_tier;
 mod lifecycle;
-mod lists;
+pub(super) mod lists;
 
 const SCHEMA_VERSION: u8 = 2;
 const INITIAL: &[u8] = b"original synthetic bytes\n";

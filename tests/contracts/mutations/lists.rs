@@ -91,12 +91,23 @@ impl WireSection {
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct PageRanges {
+pub(in crate::contracts) struct PageRanges {
     media: Media,
     blob_length: Option<u64>,
     ranges: Vec<[u64; 2]>,
     cleared: Vec<[u64; 2]>,
     next_marker: Marker,
+}
+
+impl PageRanges {
+    pub(in crate::contracts) fn has_layout(
+        &self,
+        length: u64,
+        ranges: &[[u64; 2]],
+        cleared: &[[u64; 2]],
+    ) -> bool {
+        self.blob_length == Some(length) && self.ranges == ranges && self.cleared == cleared
+    }
 }
 
 #[derive(Deserialize)]
@@ -116,6 +127,24 @@ struct WireRange {
     end: u64,
 }
 
+pub(in crate::contracts) fn page_ranges(headers: &HeaderMap, bytes: &[u8]) -> Result<PageRanges> {
+    let wire: WirePages = project_xml(bytes, "PageList")?;
+    let ranges = |entries: Vec<WireRange>| {
+        entries
+            .into_iter()
+            .map(|range| [range.start, range.end])
+            .collect()
+    };
+    Ok(PageRanges {
+        media: media(headers),
+        blob_length: header_text(headers, "x-ms-blob-content-length")
+            .and_then(|value| value.parse().ok()),
+        ranges: ranges(wire.ranges),
+        cleared: ranges(wire.cleared),
+        next_marker: Marker::observe(wire.next_marker.as_deref()),
+    })
+}
+
 pub(super) fn project(step: Step, headers: &HeaderMap, bytes: &[u8]) -> Result<Body> {
     let blob_length =
         header_text(headers, "x-ms-blob-content-length").and_then(|value| value.parse().ok());
@@ -131,20 +160,7 @@ pub(super) fn project(step: Step, headers: &HeaderMap, bytes: &[u8]) -> Result<B
             }))
         }
         Step::ListPageRanges | Step::ListBoundedPageRanges => {
-            let wire: WirePages = project_xml(bytes, "PageList")?;
-            let ranges = |entries: Vec<WireRange>| {
-                entries
-                    .into_iter()
-                    .map(|range| [range.start, range.end])
-                    .collect()
-            };
-            Ok(Body::PageList(PageRanges {
-                media,
-                blob_length,
-                ranges: ranges(wire.ranges),
-                cleared: ranges(wire.cleared),
-                next_marker: Marker::observe(wire.next_marker.as_deref()),
-            }))
+            Ok(Body::PageList(page_ranges(headers, bytes)?))
         }
         _ => bail!("unexpected listing step"),
     }

@@ -3,8 +3,8 @@
 //! so the block blob operations parse them unchanged.
 
 use super::{
-    BLOB_PROPERTIES, CHECKSUMS, CONDITIONS, LEASE, PLAIN_PROPERTIES, Request, SOURCE, TAGS,
-    UploadOptions, blob_write, upload_options,
+    BLOB_PROPERTIES, CHECKSUMS, CONDITIONS, LEASE, PLAIN_PROPERTIES, Request, SOURCE,
+    SOURCE_BEARER, TAGS, UploadOptions, blob_write, upload_options,
 };
 use crate::{
     auth::header,
@@ -152,6 +152,7 @@ impl Request<'_> {
             &["comp"],
             &[
                 SOURCE,
+                SOURCE_BEARER,
                 CONDITIONS,
                 LEASE,
                 SEQUENCE_CONDITIONS,
@@ -244,6 +245,7 @@ impl Request<'_> {
             &["comp"],
             &[
                 SOURCE,
+                SOURCE_BEARER,
                 CONDITIONS,
                 LEASE,
                 APPEND_CONDITIONS,

@@ -3,6 +3,7 @@ mod batch;
 mod cassette;
 mod catalog;
 mod delegation;
+mod flat_blob;
 mod live;
 mod mutations;
 mod query;
@@ -58,20 +59,20 @@ pub(super) fn sign_sas(
     permissions: &str,
     expiry: &str,
 ) -> Result<String> {
-    sign_sas_with_overrides(
+    sign_sas_with_options(
         key_document,
         (account, container, blob),
         permissions,
-        expiry,
+        ("", expiry),
         [""; 5],
     )
 }
 
-fn sign_sas_with_overrides(
+fn sign_sas_with_options(
     key_document: &str,
     (account, container, blob): (&str, &str, Option<&str>),
     permissions: &str,
-    expiry: &str,
+    (signed_start, expiry): (&str, &str),
     overrides: [&str; 5],
 ) -> Result<String> {
     let fields = flat_xml(key_document, "UserDelegationKey")
@@ -92,7 +93,7 @@ fn sign_sas_with_overrides(
         None => (format!("/blob/{account}/{container}"), "c"),
     };
     let string_to_sign = format!(
-        "{permissions}\n\n{expiry}\n{path}\n{oid}\n{tid}\n{start}\n{end}\n{service}\n{version}\n\n\n\n\nhttps\n{VERSION}\n{resource}\n\n\n{}",
+        "{permissions}\n{signed_start}\n{expiry}\n{path}\n{oid}\n{tid}\n{start}\n{end}\n{service}\n{version}\n\n\n\n\nhttps\n{VERSION}\n{resource}\n\n\n{}",
         overrides.join("\n"),
     );
     let value = STANDARD
@@ -120,6 +121,9 @@ fn sign_sas_with_overrides(
         ("skv", version),
         ("sig", &signature),
     ];
+    if !signed_start.is_empty() {
+        fields.push(("st", signed_start));
+    }
     fields.extend(
         SAS_RESPONSE_FIELDS
             .into_iter()
