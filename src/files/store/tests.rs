@@ -389,6 +389,47 @@ async fn startup_recovery_drops_orphans_and_keeps_referenced_extents() {
 }
 
 #[tokio::test]
+async fn reopening_pre_nfs_metadata_keeps_smb_files_and_allows_new_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let backing = directory.path();
+    {
+        let store = Store::open(Some(backing), 0, Clock::new()).unwrap();
+        create_share(&store, "legacy").await;
+        new_file(&store, "legacy", "original.txt", 4).await;
+        write(&store, "legacy", "original.txt", 0, b"old!")
+            .await
+            .unwrap();
+    }
+    let db = Connection::open(backing.join("file").join("metadata.sqlite3")).unwrap();
+    db.execute_batch(
+        "ALTER TABLE shares DROP COLUMN protocol;
+         ALTER TABLE shares DROP COLUMN root_squash;
+         ALTER TABLE shares DROP COLUMN snapshot_vda;
+         ALTER TABLE nodes DROP COLUMN mode;
+         ALTER TABLE nodes DROP COLUMN owner;
+         ALTER TABLE nodes DROP COLUMN grp;
+         ALTER TABLE nodes DROP COLUMN file_type;
+         ALTER TABLE nodes DROP COLUMN link_text;",
+    )
+    .unwrap();
+    drop(db);
+
+    {
+        let store = Store::open(Some(backing), 0, Clock::new()).unwrap();
+        assert_eq!(
+            store.share(share_ref("legacy")).await.unwrap().protocol,
+            Protocol::Smb
+        );
+        assert_eq!(read(&store, "legacy", "original.txt").await, b"old!");
+        write(&store, "legacy", "original.txt", 0, b"new!")
+            .await
+            .unwrap();
+    }
+    let store = Store::open(Some(backing), 0, Clock::new()).unwrap();
+    assert_eq!(read(&store, "legacy", "original.txt").await, b"new!");
+}
+
+#[tokio::test]
 async fn a_hard_linked_file_keeps_its_extents_until_the_last_name_is_deleted() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(Some(directory.path()), 0, Clock::new()).unwrap();
@@ -522,6 +563,138 @@ async fn share_quota_limits_allocated_bytes_not_logical_size() {
         .await
         .unwrap();
     assert_eq!(store.share_usage(share_ref("small")).await.unwrap(), 4);
+}
+
+async fn copy(
+    store: &Store,
+    source_share: &str,
+    source: &str,
+    dest_share: &str,
+    dest: &str,
+) -> Result<(NodeInfo, String)> {
+    store
+        .copy_file(
+            CopySource {
+                target: share_ref(source_share),
+                path: path(source),
+                url: format!("http://testaccount.file.localhost/{source_share}/{source}"),
+            },
+            share_ref(dest_share),
+            path(dest),
+            CopyRequest {
+                dest_lease: None,
+                ignore_readonly: false,
+                metadata: None,
+                smb: None,
+                nfs: NfsCopy::default(),
+            },
+        )
+        .await
+}
+
+#[tokio::test]
+async fn copy_replacement_over_quota_keeps_the_old_file_and_allocation() {
+    const GIB: u64 = 1 << 30;
+    const CHUNK: usize = 1 << 22;
+    let store = Store::open(None, 4 * CHUNK as u64, Clock::new()).unwrap();
+    store
+        .create_share(
+            share_ref("capped"),
+            Some(1),
+            None,
+            Metadata::new(),
+            ShareOptions::default(),
+        )
+        .await
+        .unwrap();
+    create_share(&store, "source").await;
+    new_file(&store, "capped", "existing.bin", CHUNK as u64).await;
+    let old = vec![b'a'; CHUNK];
+    write(&store, "capped", "existing.bin", 0, &old)
+        .await
+        .unwrap();
+    // Copies add logical share usage while sharing the same small backing extent.
+    for i in 1..GIB / CHUNK as u64 {
+        copy(
+            &store,
+            "capped",
+            "existing.bin",
+            "capped",
+            &format!("fill-{i}"),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(store.share_usage(share_ref("capped")).await.unwrap(), GIB);
+    copy(&store, "capped", "fill-1", "capped", "existing.bin")
+        .await
+        .unwrap();
+    assert_eq!(store.share_usage(share_ref("capped")).await.unwrap(), GIB);
+    new_file(&store, "source", "larger.bin", 2 * CHUNK as u64).await;
+    let replacement = vec![b'b'; CHUNK];
+    for offset in [0, CHUNK as u64] {
+        write(&store, "source", "larger.bin", offset, &replacement)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        copy(&store, "source", "larger.bin", "capped", "existing.bin")
+            .await
+            .err(),
+        Some(Error::ShareSizeLimitReached)
+    );
+    assert_eq!(store.share_usage(share_ref("capped")).await.unwrap(), GIB);
+    assert_eq!(read(&store, "capped", "existing.bin").await, old);
+}
+
+#[tokio::test]
+async fn copy_between_smb_shares_preserves_a_resolvable_permission_after_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let backing = directory.path();
+    let sddl = "O:SYG:SYD:(A;;FR;;;SY)";
+    let copied_key = {
+        let store = Store::open(Some(backing), 0, Clock::new()).unwrap();
+        create_share(&store, "source").await;
+        create_share(&store, "dest").await;
+        let key = store
+            .create_permission(share_ref("source"), sddl.to_owned())
+            .await
+            .unwrap();
+        let mut smb = SmbProperties::for_create();
+        smb.permission = crate::files::model::PermissionSpec::Key(key);
+        store
+            .create_file(
+                share_ref("source"),
+                path("original.txt"),
+                NewFile {
+                    length: 4,
+                    http: HttpProperties::default(),
+                    smb,
+                    metadata: Metadata::new(),
+                    posix: Posix::default(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        write(&store, "source", "original.txt", 0, b"copy")
+            .await
+            .unwrap();
+        let (node, _) = copy(&store, "source", "original.txt", "dest", "copied.txt")
+            .await
+            .unwrap();
+        store
+            .delete_share(share_ref("source"), None, SnapshotPolicy::Include)
+            .await
+            .unwrap();
+        node.permission_key
+    };
+    let store = Store::open(Some(backing), 0, Clock::new()).unwrap();
+    assert_eq!(read(&store, "dest", "copied.txt").await, b"copy");
+    assert_eq!(
+        store.permission(share_ref("dest"), copied_key).await,
+        Ok(sddl.to_owned())
+    );
 }
 
 #[tokio::test]

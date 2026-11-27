@@ -8,12 +8,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/data/aztables"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
@@ -256,7 +258,45 @@ func main() {
 		if err := check(len(got.Messages) == 1 && *got.Messages[0].MessageText == "one", "dequeue"); err != nil {
 			return err
 		}
-		if _, err := q.DeleteMessage(ctx, *got.Messages[0].MessageID, *got.Messages[0].PopReceipt, nil); err != nil {
+		id, initial := *got.Messages[0].MessageID, *got.Messages[0].PopReceipt
+		updated, err := q.UpdateMessage(ctx, id, initial, "uno", &azqueue.UpdateMessageOptions{VisibilityTimeout: to.Ptr(int32(60))})
+		if err != nil {
+			return err
+		}
+		if err := check(updated.PopReceipt != nil && *updated.PopReceipt != initial, "update rotates the receipt"); err != nil {
+			return err
+		}
+		if _, err := q.DeleteMessage(ctx, id, initial, nil); err == nil {
+			return fmt.Errorf("stale receipt deleted a message")
+		} else {
+			var response *azcore.ResponseError
+			if !errors.As(err, &response) || response.StatusCode != 404 || response.ErrorCode != "MessageNotFound" {
+				return fmt.Errorf("stale receipt: %w", err)
+			}
+		}
+		hidden, err := q.PeekMessages(ctx, &azqueue.PeekMessagesOptions{NumberOfMessages: to.Ptr(int32(2))})
+		if err != nil {
+			return err
+		}
+		if err := check(len(hidden.Messages) == 1 && *hidden.Messages[0].MessageText == "two", "updated message is hidden"); err != nil {
+			return err
+		}
+		visible, err := q.UpdateMessage(ctx, id, *updated.PopReceipt, "uno", &azqueue.UpdateMessageOptions{VisibilityTimeout: to.Ptr(int32(0))})
+		if err != nil {
+			return err
+		}
+		peek, err = q.PeekMessages(ctx, &azqueue.PeekMessagesOptions{NumberOfMessages: to.Ptr(int32(2))})
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, message := range peek.Messages {
+			found = found || (*message.MessageID == id && *message.MessageText == "uno")
+		}
+		if err := check(found && visible.PopReceipt != nil, "updated message becomes visible"); err != nil {
+			return err
+		}
+		if _, err := q.DeleteMessage(ctx, id, *visible.PopReceipt, nil); err != nil {
 			return err
 		}
 		_, err = q.Delete(ctx, nil)

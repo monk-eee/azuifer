@@ -6,9 +6,10 @@
 const { BlobServiceClient, StorageSharedKeyCredential, generateBlobSASQueryParameters, BlobSASPermissions } = require("@azure/storage-blob");
 const { QueueServiceClient, StorageSharedKeyCredential: QKey } = require("@azure/storage-queue");
 const { TableServiceClient, TableClient, AzureNamedKeyCredential, odata } = require("@azure/data-tables");
-const { ShareServiceClient, StorageSharedKeyCredential: FKey } = require("@azure/storage-file-share");
+const { FileSASPermissions, ShareServiceClient, StorageSharedKeyCredential: FKey } = require("@azure/storage-file-share");
 const { DataLakeServiceClient, StorageSharedKeyCredential: DKey } = require("@azure/storage-file-datalake");
 const crypto = require("crypto");
+const assert = require("node:assert/strict");
 
 const account = "devstoreaccount1";
 const key = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
@@ -138,6 +139,37 @@ async function toBuf(stream) { const c = []; for await (const x of stream) c.pus
     check(names.includes("f.bin"), "list");
     await f.setMetadata({ a: "b" }); check((await f.getProperties()).metadata.a === "b", "meta");
     await sh.delete();
+  });
+
+  await step("files: copy with source SAS and a share-scoped permission", async () => {
+    const sourceShare = fsvc.getShareClient("jssrc" + sfx);
+    const targetShare = fsvc.getShareClient("jsdst" + sfx);
+    await sourceShare.create();
+    await targetShare.create();
+    try {
+      const source = sourceShare.rootDirectoryClient.getFileClient("source.txt");
+      const target = targetShare.rootDirectoryClient.getFileClient("copy.txt");
+      const sddl = "O:SYG:SYD:(A;;FR;;;SY)";
+      const permission = await sourceShare.createPermission(sddl);
+      const bytes = Buffer.from("source bytes");
+      await source.create(bytes.length, { filePermissionKey: permission.filePermissionKey });
+      await source.uploadRange(bytes, 0, bytes.length);
+      const sasUrl = (access) => source.generateSasUrl({
+        permissions: FileSASPermissions.parse(access), expiresOn: new Date(Date.now() + 300e3)
+      });
+      await assert.rejects(
+        () => target.startCopyFromURL(sasUrl("w")),
+        (e) => e.statusCode === 403 && (e.details?.errorCode || e.code) === "CannotVerifyCopySource"
+      );
+      check(!(await target.exists()), "a refused copy did not publish a file");
+      check((await target.startCopyFromURL(sasUrl("r"))).copyStatus === "success", "accepted copy");
+      check((await target.downloadToBuffer()).equals(bytes), "copied bytes");
+      const props = await target.getProperties();
+      check((await targetShare.getPermission(props.filePermissionKey)).permission === sddl, "copied permission resolves in the target share");
+    } finally {
+      await targetShare.delete();
+      await sourceShare.delete();
+    }
   });
 
   await step("files nfs: share, posix properties, hard and symbolic links", async () => {

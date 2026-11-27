@@ -34,7 +34,9 @@ import com.azure.storage.file.datalake.DataLakeFileSystemClient;
 import com.azure.storage.file.datalake.DataLakeServiceClient;
 import com.azure.storage.file.datalake.DataLakeServiceClientBuilder;
 import com.azure.storage.file.datalake.models.ListPathsOptions;
+import com.azure.storage.file.datalake.models.PathAccessControlEntry;
 import com.azure.storage.file.datalake.models.PathItem;
+import com.azure.storage.file.datalake.options.PathSetAccessControlRecursiveOptions;
 import com.azure.storage.file.share.ShareClient;
 import com.azure.storage.file.share.ShareDirectoryClient;
 import com.azure.storage.file.share.ShareFileClient;
@@ -279,6 +281,26 @@ public class Probe {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             f.read(out);
             check(Arrays.equals(out.toByteArray(), data), "bytes");
+        });
+        step("dfs: resume a bounded recursive ACL update", () -> {
+            var dir = fs.getDirectoryClient("dir1");
+            var acl = PathAccessControlEntry.parseList("user::rwx,group::r-x,other::r--");
+            var first = dir.setAccessControlRecursiveWithResponse(
+                new PathSetAccessControlRecursiveOptions(acl).setBatchSize(1).setMaxBatches(1),
+                null, null).getValue();
+            var continuation = first.getContinuationToken();
+            check(continuation != null && !continuation.isEmpty(), "first batch has continuation");
+            check(first.getCounters().getChangedDirectoriesCount() == 1
+                && first.getCounters().getChangedFilesCount() == 0, "first batch changes only the directory");
+            var remaining = dir.setAccessControlRecursiveWithResponse(
+                new PathSetAccessControlRecursiveOptions(acl).setBatchSize(1).setContinuationToken(continuation),
+                null, null).getValue();
+            check(remaining.getContinuationToken() == null && remaining.getCounters().getChangedFilesCount() == 2
+                && remaining.getCounters().getFailedChangesCount() == 0, "both children changed after resume");
+            for (String file : List.of("hello.txt", "big.bin")) {
+                check("0754".equals(dir.getFileClient(file).getAccessControl().getPermissions().toString()),
+                    "child ACL read-back");
+            }
         });
         step("dfs: properties, list, ACL, rename", () -> {
             check(fs.getFileClient("dir1/hello.txt").getProperties().getFileSize() == 9, "len");

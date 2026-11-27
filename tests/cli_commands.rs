@@ -79,6 +79,35 @@ fn path(path: &Path) -> &str {
 }
 
 #[test]
+fn conformance_exports_embedded_evidence_outside_the_checkout() {
+    let cwd = tempfile::tempdir().unwrap();
+    let output = azuifer()
+        .current_dir(cwd.path())
+        .env("AZUIFER_LOCATION", cwd.path().join("not-created"))
+        .args(["conformance", "export"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["azure_differential_verified"], false);
+    let matched = json["live_azure_evidence"]["matched_exchanges"]
+        .as_u64()
+        .unwrap();
+    let planned = json["live_azure_evidence"]["target_exchanges"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        matched > 0 && matched < planned,
+        "scoped Azure evidence, not full parity"
+    );
+    assert_eq!(
+        std::fs::read_dir(cwd.path()).unwrap().count(),
+        0,
+        "export leaves no runtime state"
+    );
+}
+
+#[test]
 fn status_reports_a_running_instance() {
     let server = Server::start(&["--in-memory", "--services", "queue,table", "--prometheus"]);
     let output = run(&["status", "--admin-url", &server.admin]);

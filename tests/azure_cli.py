@@ -12,7 +12,7 @@ import time
 import uuid
 from pathlib import Path
 from urllib.error import URLError
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 from urllib.request import ProxyHandler, build_opener
 
 ACCOUNT = "devstoreaccount1"
@@ -59,7 +59,7 @@ def connection_string(endpoint, key):
     )
 
 
-def exercise(az, env, root, key, dfs_url):
+def exercise(az, env, root, key, dfs_url, blob_url):
     def run(*args, expected_error=None, timeout=45, endpoint=None):
         command = [az, "storage", *args, "--auth-mode", "key", "--output", "json", "--only-show-errors"]
         command_env = env if endpoint is None else dict(
@@ -109,6 +109,19 @@ def exercise(az, env, root, key, dfs_url):
     require([(entry["name"], entry["metadata"]) for entry in listed] == [(blob, {"purpose": "contract"})],
             "listing flags did not return the stored name and metadata")
 
+    copy_name = "folder/guarded-copy.txt"
+    copy_args = ("blob", "copy", "start", "--destination-container", container,
+                 "--destination-blob", copy_name,
+                 "--source-uri", f"{blob_url}/{ACCOUNT}/{container}/{quote(blob)}")
+    copy_scope = ["--container-name", container, "--name", copy_name]
+    run(*copy_args, "--source-if-match", '"synthetic-stale-etag"',
+        expected_error="ErrorCode:SourceConditionNotMet")
+    require(not run("blob", "exists", *copy_scope)["exists"], "stale source made a destination")
+    run(*copy_args, "--source-if-match", tag)
+    copied = root / "copy.txt"
+    run("blob", "download", *copy_scope, "--file", str(copied))
+    require(copied.read_bytes() == contents, "guarded copy returned the wrong bytes")
+
     run("blob", "delete", *scope, "--if-match", tag)
     require(not run("blob", "exists", *scope)["exists"], "blob remained visible after delete")
 
@@ -142,6 +155,7 @@ def exercise(az, env, root, key, dfs_url):
             "ETag-conditioned read and delete",
             "exact byte-range download",
             "prefixed listing with metadata",
+            "source-ETag-conditioned copy and rejected stale source",
             "multipart upload and download",
         ],
         "multipart": {
@@ -281,7 +295,7 @@ def main():
         require(args.expected_version is None or version == args.expected_version,
                 f"expected Azure CLI {args.expected_version}, found {version}")
         wait_ready(args.admin_url)
-        evidence = exercise(az, env, root, key, args.dfs_url)
+        evidence = exercise(az, env, root, key, args.dfs_url, args.blob_url)
     if args.json:
         print(json.dumps({"cli_version": version, **evidence}))
     else:

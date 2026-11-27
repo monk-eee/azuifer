@@ -179,6 +179,17 @@ pub(super) fn permission_exists(db: &Connection, target: &ShareRef, key: &str) -
     .map_err(db_error)
 }
 
+pub(super) fn permission_sddl(db: &Connection, target: &ShareRef, key: &str) -> Result<String> {
+    db.query_row(
+        "SELECT sddl FROM permissions WHERE account=?1 AND share=?2 AND key=?3",
+        params![target.account.as_str(), target.share.as_str(), key],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(db_error)?
+    .ok_or(Error::FileInvalidPermissionKey)
+}
+
 pub(crate) fn valid_sddl(sddl: &str) -> bool {
     !sddl.is_empty() && sddl.len() <= 8 * 1024 && sddl.starts_with("O:") && sddl.contains("D:")
 }
@@ -645,14 +656,7 @@ impl Store {
     pub(crate) async fn permission(&self, target: ShareRef, key: String) -> Result<String> {
         self.run(move |db, _| {
             load_share(db, &target.live())?;
-            db.query_row(
-                "SELECT sddl FROM permissions WHERE account=?1 AND share=?2 AND key=?3",
-                params![target.account.as_str(), target.share.as_str(), key],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(db_error)?
-            .ok_or(Error::FileInvalidPermissionKey)
+            permission_sddl(db, &target, &key)
         })
         .await
     }
