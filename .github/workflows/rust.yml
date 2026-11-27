@@ -58,6 +58,48 @@ jobs:
           name: azure-cli-compatibility
           path: dist/azure-cli-compatibility.json
           if-no-files-found: error
+  python-sdk:
+    name: Python Azure SDK compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: cargo build --locked
+      - run: >
+          python3 -m pip install azure-storage-blob azure-storage-queue
+          azure-storage-file-share azure-storage-file-datalake azure-data-tables requests
+      - name: Run the Python SDK scripts
+        run: |
+          echo "127.0.0.1 testaccount.blob.localhost testaccount.dfs.localhost testaccount.queue.localhost testaccount.table.localhost testaccount.file.localhost" | sudo tee -a /etc/hosts
+          binary=./target/debug/azuifer
+          serve() {
+            "$binary" serve --in-memory --skip-api-version-check "$@" > azuifer.log 2>&1 &
+            server=$!
+            for _ in $(seq 1 60); do
+              curl -fs http://127.0.0.1:10005/readyz > /dev/null && return
+              sleep 1
+            done
+            echo "server did not become ready"; cat azuifer.log; exit 1
+          }
+          stop() { kill "$server"; wait "$server" 2>/dev/null || true; }
+          serve --test-clock --allow-external-copy-sources 127.0.0.1
+          python3 tests/blob_sdk.py
+          python3 tests/blob_page_append_sdk.py
+          python3 tests/blob3_sdk.py --external
+          stop
+          serve --versioning-accounts devstoreaccount1
+          python3 tests/blob_snapshots_sdk.py
+          stop
+          serve --services queue --queue-port 10001
+          python3 tests/queue_sdk.py --queue-url http://127.0.0.1:10001
+          stop
+          python3 tests/table_sdk.py --skip-az --binary "$binary"
+          python3 tests/files_sdk.py --skip-cli --binary "$binary"
+          python3 tests/dfs_sdk.py --skip-az --binary "$binary"
+          python3 tests/addressing_sdk.py --binary "$binary"
+          python3 tests/tls_auth_sdk.py --binary "$binary"
+      - name: Show the server log on failure
+        if: failure()
+        run: tail -n 100 azuifer.log
   dotnet-sdk:
     name: .NET Azure SDK compatibility
     runs-on: ubuntu-latest
