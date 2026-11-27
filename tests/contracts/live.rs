@@ -1,5 +1,6 @@
 use super::{
-    Cassette, Source, delegation, mutations, observe_blob, observe_local, reviewed_sas, with_local,
+    Cassette, Source, delegation, mutations, observe_blob, observe_local, reviewed_sas, sas_reads,
+    with_local,
 };
 use anyhow::{Context as _, Result, anyhow, ensure};
 use reqwest::{Url, blocking::Client, redirect::Policy};
@@ -155,6 +156,7 @@ pub(super) enum Record<'a> {
     Delegation(&'a delegation::KeyCassette),
     InvalidWindows(&'a delegation::WindowCassette),
     BlobMutation(&'a mutations::MutationCassette),
+    SasRead(&'a sas_reads::SasReadCassette),
 }
 
 pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
@@ -165,6 +167,7 @@ pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
         Record::Delegation(_) => "blob-get-user-delegation-key",
         Record::InvalidWindows(_) => "blob-delegation-key-invalid-windows",
         Record::BlobMutation(cassette) => cassette.case.file_stem(),
+        Record::SasRead(cassette) => cassette.case.file_stem(),
     };
     let name = format!("{scenario}-{}.json", Uuid::new_v4().simple());
     let target = directory.join(name);
@@ -261,6 +264,33 @@ fn check_live_blob_sas_contract() -> Result<()> {
             save_azure(Record::Sas(azure))
         },
     )
+}
+
+fn live_sas_read(case: sas_reads::Case) -> Result<()> {
+    run_live(
+        || sas_reads::reviewed(case),
+        |client, account, endpoint, bearer| {
+            sas_reads::observe(client, account, endpoint, bearer, Source::Azure, case)
+        },
+        || sas_reads::observe_local(case),
+        sas_reads::SasReadCassette::compare,
+        |azure| {
+            azure.validate()?;
+            save_azure(Record::SasRead(azure))
+        },
+    )
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_sas_container_listing() -> Result<()> {
+    live_sas_read(sas_reads::Case::ContainerList)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_sas_response_overrides() -> Result<()> {
+    live_sas_read(sas_reads::Case::ResponseOverrides)
 }
 
 #[test]

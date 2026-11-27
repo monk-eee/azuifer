@@ -115,13 +115,26 @@ enum Body {
     Empty {},
     FixtureRange {},
     FixtureFull {},
-    XmlError {
-        code: ErrorCode,
-        permission_message: bool,
-        correlation: Header,
-        extra_elements: bool,
-    },
+    XmlError(XmlError),
     Other {},
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct XmlError {
+    code: ErrorCode,
+    permission_message: bool,
+    correlation: Header,
+    extra_elements: bool,
+}
+
+impl XmlError {
+    pub(super) fn permission_denial(&self) -> bool {
+        self.code == ErrorCode::PermissionMismatch
+            && self.permission_message
+            && self.correlation == Header::Matches
+            && !self.extra_elements
+    }
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -258,15 +271,7 @@ impl Exchange {
             return self.status == 403
                 && self.media == Media::Xml
                 && self.error_header == ErrorCode::PermissionMismatch
-                && matches!(
-                    self.body,
-                    Body::XmlError {
-                        code: ErrorCode::PermissionMismatch,
-                        permission_message: true,
-                        correlation: Header::Matches,
-                        extra_elements: false,
-                    }
-                );
+                && matches!(&self.body, Body::XmlError(error) if error.permission_denial());
         }
         if self.etag != Header::Matches
             || self.media != Media::TextPlain
@@ -312,7 +317,7 @@ impl Exchange {
         } else if step == Step::ReadBack && bytes == BLOB_BYTES {
             Body::FixtureFull {}
         } else {
-            xml_error(bytes, get("x-ms-request-id")).unwrap_or(Body::Other {})
+            xml_error(bytes, get("x-ms-request-id")).map_or(Body::Other {}, Body::XmlError)
         };
         Self {
             step,
@@ -343,11 +348,11 @@ impl Exchange {
     }
 }
 
-fn xml_error(bytes: &[u8], request_id: Option<&str>) -> Option<Body> {
+pub(super) fn xml_error(bytes: &[u8], request_id: Option<&str>) -> Option<XmlError> {
     let fields = flat_xml(std::str::from_utf8(bytes).ok()?, "Error")?;
     let code = ErrorCode::from_value(fields.get("Code").map(String::as_str));
     let (message, correlation) = error_message(fields.get("Message")?, request_id);
-    Some(Body::XmlError {
+    Some(XmlError {
         code,
         permission_message: message == PERMISSION_MESSAGE,
         correlation,
@@ -497,13 +502,7 @@ fn azure_error_correlation_normalizes_values_but_detects_a_missing_request_id() 
         "2026-01-02T03:04:07.002Z",
     );
     assert_eq!(original, later);
-    assert!(matches!(
-        original,
-        Body::XmlError {
-            correlation: Header::Matches,
-            ..
-        }
-    ));
+    assert_eq!(original.correlation, Header::Matches);
     let without_correlation = format!(
         "<Error><Code>AuthorizationPermissionMismatch</Code><Message>{PERMISSION_MESSAGE}</Message></Error>"
     );

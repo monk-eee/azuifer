@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "blob-user-delegation-sas-overrides",
+  "api_version": "2023-11-03",
+  "exchanges": [
+    {
+      "step": "overridden_head",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "read",
+        "bytes_match": true,
+        "length": 35,
+        "etag": "matches",
+        "range": "missing",
+        "metadata": "matches",
+        "blob_type": "matches",
+        "cache_control": "override",
+        "disposition": "override",
+        "encoding": "override",
+        "language": "override",
+        "content_type": "override"
+      }
+    },
+    {
+      "step": "overridden_range",
+      "status": 206,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "read",
+        "bytes_match": true,
+        "length": 7,
+        "etag": "matches",
+        "range": "matches",
+        "metadata": "matches",
+        "blob_type": "matches",
+        "cache_control": "override",
+        "disposition": "override",
+        "encoding": "override",
+        "language": "override",
+        "content_type": "override"
+      }
+    },
+    {
+      "step": "plain_read",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "read",
+        "bytes_match": true,
+        "length": 35,
+        "etag": "matches",
+        "range": "missing",
+        "metadata": "matches",
+        "blob_type": "matches",
+        "cache_control": "stored",
+        "disposition": "stored",
+        "encoding": "missing",
+        "language": "stored",
+        "content_type": "stored"
+      }
+    }
+  ]
+}

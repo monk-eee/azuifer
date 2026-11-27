@@ -105,42 +105,13 @@ pub(crate) async fn list(
         return Err(Error::Unsupported);
     }
     let endpoint = blob_exec::storage_endpoint(app, key.account.as_str());
-    let name = key.name.as_str().to_owned();
-    let (prefix, delimiter, limit) = (
-        request.page.prefix.clone(),
-        request.delimiter.clone(),
-        request.page.limit,
-    );
+    let xml = respond::blob_list_xml(&endpoint, key.name.as_str(), &request);
     let include = request.include.clone();
     let listing = app.store.list_extended(key, request, lease).await?;
-    list_response(
-        &endpoint,
-        &name,
-        (&prefix, delimiter.as_deref(), limit),
-        listing,
-        &include,
-    )
+    list_response(xml, listing, &include)
 }
 
-fn list_response(
-    endpoint: &str,
-    container: &str,
-    (prefix, delimiter, limit): (&str, Option<&str>, u32),
-    listing: ExtendedListing,
-    include: &[Include],
-) -> Result<Response> {
-    let mut xml = Xml::root(
-        "EnumerationResults",
-        &[("ServiceEndpoint", endpoint), ("ContainerName", container)],
-    );
-    if !prefix.is_empty() {
-        xml.element("Prefix", prefix);
-    }
-    xml.element("MaxResults", &limit.to_string());
-    if let Some(delimiter) = delimiter {
-        xml.element("Delimiter", delimiter);
-    }
-    xml.open("Blobs");
+fn list_response(mut xml: Xml, listing: ExtendedListing, include: &[Include]) -> Result<Response> {
     for entry in listing.entries {
         match entry {
             Listed::Prefix(name) => {

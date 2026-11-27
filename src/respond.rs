@@ -4,8 +4,8 @@ use crate::{
     blob_page::{BlobKind, PageError},
     blob_sas::Overrides,
     domain::{
-        BlobInfo, BlobListing, ContainerInfo, Entity, Error, Include, ListEntry, Metadata, Page,
-        PublicAccess, Result, SignedIdentifier,
+        BlobInfo, BlobListing, ContainerInfo, Entity, Error, Include, ListEntry, ListRequest,
+        Metadata, Page, PublicAccess, Result, SignedIdentifier,
     },
     lease::LeaseView,
     store::{Download, Payload},
@@ -364,26 +364,31 @@ pub(crate) fn list_containers(
     Ok(xml.finish("EnumerationResults", StatusCode::OK))
 }
 
-pub(crate) fn list_blobs(
-    endpoint: &str,
-    container: &str,
-    (prefix, delimiter, limit): (&str, Option<&str>, u32),
-    listing: BlobListing,
-    include: &[Include],
-    hierarchical: bool,
-) -> Result<Response> {
+pub(crate) fn blob_list_xml(endpoint: &str, container: &str, request: &ListRequest) -> Xml {
     let mut xml = Xml::root(
         "EnumerationResults",
         &[("ServiceEndpoint", endpoint), ("ContainerName", container)],
     );
-    if !prefix.is_empty() {
-        xml.element("Prefix", prefix);
+    if !request.page.prefix.is_empty() {
+        xml.element("Prefix", &request.page.prefix);
     }
-    xml.element("MaxResults", &limit.to_string());
-    if let Some(delimiter) = delimiter {
+    if let Some(marker) = request.page.marker() {
+        xml.element("Marker", &marker);
+    }
+    xml.element("MaxResults", &request.page.limit.to_string());
+    if let Some(delimiter) = &request.delimiter {
         xml.element("Delimiter", delimiter);
     }
     xml.open("Blobs");
+    xml
+}
+
+pub(crate) fn list_blobs(
+    mut xml: Xml,
+    listing: BlobListing,
+    include: &[Include],
+    hierarchical: bool,
+) -> Result<Response> {
     for entry in listing.entries {
         match entry {
             ListEntry::Prefix(name) => {
@@ -443,7 +448,11 @@ pub(crate) fn blob_properties(
         return Ok(());
     }
     xml.element("Creation-Time", &http_date(info.created)?);
-    xml.entity(info.entity)?;
+    // The XML uses the opaque value without the HTTP ETag's quotes.
+    xml.entity_properties(
+        info.entity.modified,
+        info.entity.etag().as_str().trim_matches('"'),
+    )?;
     xml.element("Content-Length", &info.length.0.to_string());
     xml.element("Content-Type", &info.headers.content_type);
     xml.element("Content-Encoding", &info.headers.encoding);
@@ -490,8 +499,12 @@ pub(crate) fn blob_properties(
 
 impl Xml {
     pub(crate) fn entity(&mut self, entity: Entity) -> Result<()> {
-        self.element("Last-Modified", &http_date(entity.modified)?);
-        self.element("Etag", entity.etag().as_str());
+        self.entity_properties(entity.modified, entity.etag().as_str())
+    }
+
+    fn entity_properties(&mut self, modified: u64, etag: &str) -> Result<()> {
+        self.element("Last-Modified", &http_date(modified)?);
+        self.element("Etag", etag);
         Ok(())
     }
 

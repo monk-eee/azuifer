@@ -2,6 +2,7 @@ mod cassette;
 mod delegation;
 mod live;
 mod mutations;
+mod sas_reads;
 
 use super::{ACCOUNT, Server, VERSION, basic_token, client, iso, sas_query};
 use anyhow::{Context as _, Result, anyhow, ensure};
@@ -23,12 +24,29 @@ const BLOB_BYTES: &[u8] = b"azuifer synthetic contract fixture\n";
 const RANGE_START: usize = 2;
 const RANGE_END: usize = 8;
 const SAS_CASSETTE: &[u8] = include_bytes!("cassettes/blob-user-delegation-sas-read-only.json");
+const SAS_RESPONSE_FIELDS: [&str; 5] = ["rscc", "rscd", "rsce", "rscl", "rsct"];
 
 pub(super) fn sign_sas(
     key_document: &str,
     (account, container, blob): (&str, &str, Option<&str>),
     permissions: &str,
     expiry: &str,
+) -> Result<String> {
+    sign_sas_with_overrides(
+        key_document,
+        (account, container, blob),
+        permissions,
+        expiry,
+        [""; 5],
+    )
+}
+
+fn sign_sas_with_overrides(
+    key_document: &str,
+    (account, container, blob): (&str, &str, Option<&str>),
+    permissions: &str,
+    expiry: &str,
+    overrides: [&str; 5],
 ) -> Result<String> {
     let fields = flat_xml(key_document, "UserDelegationKey")
         .context("invalid user delegation key envelope")?;
@@ -48,7 +66,8 @@ pub(super) fn sign_sas(
         None => (format!("/blob/{account}/{container}"), "c"),
     };
     let string_to_sign = format!(
-        "{permissions}\n\n{expiry}\n{path}\n{oid}\n{tid}\n{start}\n{end}\n{service}\n{version}\n\n\n\n\nhttps\n{VERSION}\n{resource}\n\n\n\n\n\n\n"
+        "{permissions}\n\n{expiry}\n{path}\n{oid}\n{tid}\n{start}\n{end}\n{service}\n{version}\n\n\n\n\nhttps\n{VERSION}\n{resource}\n\n\n{}",
+        overrides.join("\n"),
     );
     let value = STANDARD
         .decode(get("Value")?)
@@ -61,7 +80,7 @@ pub(super) fn sign_sas(
         Hmac::<Sha256>::new_from_slice(&value).map_err(|_| anyhow!("invalid HMAC key"))?;
     mac.update(string_to_sign.as_bytes());
     let signature = STANDARD.encode(mac.finalize().into_bytes());
-    Ok(sas_query(&[
+    let mut fields = vec![
         ("sv", VERSION),
         ("sr", resource),
         ("sp", permissions),
@@ -74,7 +93,14 @@ pub(super) fn sign_sas(
         ("sks", service),
         ("skv", version),
         ("sig", &signature),
-    ]))
+    ];
+    fields.extend(
+        SAS_RESPONSE_FIELDS
+            .into_iter()
+            .zip(overrides)
+            .filter(|(_, value)| !value.is_empty()),
+    );
+    Ok(sas_query(&fields))
 }
 
 fn request(client: &Client, method: Method, url: Url) -> RequestBuilder {
@@ -148,6 +174,18 @@ fn get_delegation_key(
     )
 }
 
+fn delegation_key_document(
+    client: &Client,
+    endpoint: &Url,
+    bearer: &str,
+    expiry: &str,
+) -> Result<String> {
+    let key = get_delegation_key(client, endpoint, bearer, Some(&iso(-120)), Some(expiry))?;
+    require_status(&key, 200, "get user delegation key")?;
+    String::from_utf8(read_bounded(key)?)
+        .map_err(|_| anyhow!("invalid user delegation key encoding"))
+}
+
 fn with_fresh_container<T>(
     client: &Client,
     endpoint: &Url,
@@ -204,14 +242,10 @@ fn observe_blob(
             .context("seed test blob: missing or malformed ETag")?;
 
         let expiry = iso(900);
-        let key = get_delegation_key(client, endpoint, bearer, Some(&iso(-120)), Some(&expiry))?;
-        require_status(&key, 200, "get user delegation key")?;
-        let key = read_bounded(key)?;
-        let key = std::str::from_utf8(&key)
-            .map_err(|_| anyhow!("invalid user delegation key encoding"))?;
+        let key = delegation_key_document(client, endpoint, bearer, &expiry)?;
         let mut signed_url = blob_url;
         signed_url.set_query(Some(&sign_sas(
-            key,
+            &key,
             (account, container, Some(BLOB)),
             "r",
             &expiry,

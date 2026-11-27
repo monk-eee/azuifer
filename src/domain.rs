@@ -374,6 +374,10 @@ impl PageRequest {
             limit: limit.min(5000),
         })
     }
+
+    pub(crate) fn marker(&self) -> Option<String> {
+        (!self.after.is_empty()).then(|| URL_SAFE_NO_PAD.encode(&self.after))
+    }
 }
 
 pub(crate) struct Page<T> {
