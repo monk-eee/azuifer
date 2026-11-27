@@ -542,10 +542,10 @@ mod tests {
     fn smb_headers_default_per_operation() {
         let map = HeaderMap::new();
         let headers = Headers(&map);
-        let create = headers.smb(true).unwrap();
+        let create = headers.smb(true, "2023-11-03").unwrap();
         assert_eq!(create.permission, PermissionSpec::Inherit);
         assert_eq!(create.creation, TimeSpec::Now);
-        let update = headers.smb(false).unwrap();
+        let update = headers.smb(false, "2023-11-03").unwrap();
         assert_eq!(update.permission, PermissionSpec::Preserve);
         assert_eq!(update.last_write, TimeSpec::Preserve);
     }
@@ -559,7 +559,7 @@ mod tests {
         );
         map.insert("x-ms-file-permission-key", HeaderValue::from_static("1*1"));
         assert_eq!(
-            Headers(&map).smb(true).err(),
+            Headers(&map).smb(true, "2023-11-03").err(),
             Some(Error::InvalidHeaderValue)
         );
     }

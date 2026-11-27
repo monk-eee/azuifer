@@ -233,6 +233,51 @@ def sdk_flows(server):
         check("share deleted", True)
 
 
+def permission_format_flows(server):
+    """Binary security descriptors and a source-URL SAS, at the versions that introduce them."""
+    service = ShareServiceClient.from_connection_string(server.connection_string,
+                                                        api_version="2025-01-05")
+    share = service.create_share("binshare")
+    sddl = "O:SYG:SYD:(A;;FA;;;SY)"
+    sid = bytes([1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0])
+    descriptor = (bytes([1, 0, 0x04, 0x80]) + (48).to_bytes(4, "little") + (60).to_bytes(4, "little")
+                  + bytes(4) + (20).to_bytes(4, "little") + bytes([2, 0, 28, 0, 1, 0, 0, 0, 0, 0, 20, 0])
+                  + (0x001F01FF).to_bytes(4, "little") + sid * 3)
+    binary = base64.b64encode(descriptor).decode()
+    # The share-level permission calls ignore or mishandle file_permission_format in this
+    # SDK release, so the binary form is driven through the directory and file calls, and
+    # the share-level read-back confirms what was stored.
+    key = share.create_permission_for_share(sddl)
+    created = share.get_directory_client("").create_subdirectory(
+        "secured", file_permission=binary, file_permission_format="binary")
+    check("directory created from a binary descriptor",
+          created.get_directory_properties().permission_key == key)
+    check("binary descriptor stored as sddl", share.get_permission_for_share(key) == sddl)
+    try:
+        share.get_directory_client("").create_subdirectory(
+            "broken", file_permission="AAAA", file_permission_format="binary")
+        check("invalid binary descriptor rejected", False)
+    except HttpResponseError as error:
+        check("invalid binary descriptor rejected", error.error_code == "FileInvalidPermission")
+
+    source = share.get_file_client("source.txt")
+    source.upload_file(b"copy me")
+    expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
+    read = generate_file_sas(ACCOUNT, "binshare", ["source.txt"], KEY,
+                             permission=FileSasPermissions(read=True), expiry=expiry)
+    write = generate_file_sas(ACCOUNT, "binshare", ["source.txt"], KEY,
+                              permission=FileSasPermissions(write=True), expiry=expiry)
+    copy = share.get_file_client("copy.txt")
+    copy.start_copy_from_url(f"{source.url}?{read}")
+    check("copy with a read SAS", copy.download_file().readall() == b"copy me")
+    try:
+        share.get_file_client("refused.txt").start_copy_from_url(f"{source.url}?{write}")
+        check("copy with a write-only SAS refused", False)
+    except HttpResponseError as error:
+        check("copy with a write-only SAS refused",
+              error.status_code == 403 and error.error_code == "CannotVerifyCopySource")
+    service.delete_share("binshare")
+
 def cli_flows(server, workdir):
     az = shutil.which("az") or shutil.which("az.cmd")
     if not az:
@@ -300,6 +345,7 @@ def main():
         server = Server(args.binary)
         try:
             sdk_flows(server)
+            permission_format_flows(server)
             if not args.skip_cli:
                 cli_flows(server, workdir)
         finally:

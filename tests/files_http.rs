@@ -2258,3 +2258,216 @@ fn every_handled_operation_is_in_the_conformance_manifest() {
         }
     }
 }
+
+/// Binary descriptor of `O:SYG:SYD:(A;;FA;;;SY)`, the vector `src/files/sd.rs` also tests.
+fn simple_binary_descriptor() -> String {
+    let sid = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+    let mut bytes = vec![1, 0, 0x04, 0x80];
+    for offset in [48u32, 60, 0, 20] {
+        bytes.extend(offset.to_le_bytes());
+    }
+    bytes.extend([2, 0, 28, 0, 1, 0, 0, 0, 0, 0, 20, 0]);
+    bytes.extend(0x001f_01ffu32.to_le_bytes());
+    for _ in 0..3 {
+        bytes.extend(sid);
+    }
+    STANDARD.encode(bytes)
+}
+
+#[test]
+fn binary_security_descriptors_convert_to_the_stored_sddl_by_version() {
+    let emulator = Emulator::start(None, &["--skip-api-version-check"]);
+    share(&emulator, "bin");
+    let binary = simple_binary_descriptor();
+    let path = format!("/{ACCOUNT}/bin?restype=share&comp=filepermission");
+    let at = |version: &'static str| [("x-ms-version", version)];
+    let json = |format: &str, permission: &str| {
+        format!("{{\"format\":\"{format}\",\"permission\":\"{permission}\"}}")
+    };
+
+    let created = expect(
+        emulator.send(
+            "PUT",
+            &path,
+            &at("2024-11-04"),
+            json("binary", &binary).as_bytes(),
+        ),
+        201,
+    );
+    let key = created.header("x-ms-file-permission-key").to_owned();
+    let same = expect(
+        emulator.send(
+            "PUT",
+            &path,
+            &at("2024-11-04"),
+            json("sddl", "O:SYG:SYD:(A;;FA;;;SY)").as_bytes(),
+        ),
+        201,
+    );
+    assert_eq!(
+        same.header("x-ms-file-permission-key"),
+        key,
+        "binary and SDDL forms of one descriptor share a key"
+    );
+
+    let get = |version: &'static str, format: Option<&'static str>| {
+        let mut headers = vec![
+            ("x-ms-version", version),
+            ("x-ms-file-permission-key", key.as_str()),
+        ];
+        headers.extend(format.map(|format| ("x-ms-file-permission-format", format)));
+        emulator.send("GET", &path, &headers, b"")
+    };
+    let as_json = |reply: Reply| -> serde_json::Value {
+        serde_json::from_slice(&expect(reply, 200).body).unwrap()
+    };
+    assert_eq!(
+        as_json(get("2024-11-04", None)),
+        serde_json::json!({"format": "sddl", "permission": "O:SYG:SYD:(A;;FA;;;SY)"})
+    );
+    assert_eq!(
+        as_json(get("2024-11-04", Some("binary"))),
+        serde_json::json!({"format": "binary", "permission": binary})
+    );
+    assert_eq!(
+        as_json(get(VERSION, Some("binary"))),
+        serde_json::json!({"permission": "O:SYG:SYD:(A;;FA;;;SY)"}),
+        "before 2024-11-04 the answer is SDDL only, with no format"
+    );
+    expect_error(get("2024-11-04", Some("xml")), 400, "InvalidHeaderValue");
+
+    for bad in [
+        json("binary", "not base64!"),
+        json("binary", &binary[..20]),
+        json("binary", &STANDARD.encode([0u8; 4])),
+    ] {
+        expect_error(
+            emulator.send("PUT", &path, &at("2024-11-04"), bad.as_bytes()),
+            400,
+            "FileInvalidPermission",
+        );
+    }
+    expect_error(
+        emulator.send("PUT", &path, &at("2024-11-04"), json("xml", "x").as_bytes()),
+        400,
+        "InvalidInput",
+    );
+    expect_error(
+        emulator.send(
+            "PUT",
+            &path,
+            &at(VERSION),
+            json("binary", &binary).as_bytes(),
+        ),
+        400,
+        "FileInvalidPermission",
+    );
+
+    let create_with = |name: &str, version: &'static str, format: &'static str, text: &str| {
+        emulator.send(
+            "PUT",
+            &format!("/{ACCOUNT}/bin/{name}"),
+            &[
+                ("x-ms-version", version),
+                ("x-ms-type", "file"),
+                ("x-ms-content-length", "1"),
+                ("x-ms-file-permission", text),
+                ("x-ms-file-permission-format", format),
+            ],
+            b"",
+        )
+    };
+    let from_header = expect(create_with("a.txt", "2025-01-05", "binary", &binary), 201);
+    assert_eq!(from_header.header("x-ms-file-permission-key"), key);
+    expect_error(
+        create_with("b.txt", "2025-01-05", "binary", "O:SYG:SYD:(A;;FA;;;SY)"),
+        400,
+        "FileInvalidPermission",
+    );
+    expect_error(
+        create_with("c.txt", "2025-01-05", "xml", &binary),
+        400,
+        "InvalidHeaderValue",
+    );
+    let sddl_header = expect(
+        create_with("d.txt", "2025-01-05", "sddl", "O:SYG:SYD:(A;;FA;;;SY)"),
+        201,
+    );
+    assert_eq!(sddl_header.header("x-ms-file-permission-key"), key);
+}
+
+#[test]
+fn a_source_url_sas_must_allow_reading_the_source() {
+    let emulator = Emulator::start(None, &[]);
+    share(&emulator, "from");
+    file(&emulator, "from", "a.txt", 5);
+    put(&emulator, "from", "a.txt", 0, b"hello");
+    file(&emulator, "from", "range.txt", 5);
+    let far = "2099-01-01T00:00:00Z";
+    let url = |sas: &str| format!("{}/{ACCOUNT}/from/a.txt?{sas}", emulator.base);
+    let copy = |name: &str, source: &str| {
+        emulator.send(
+            "PUT",
+            &format!("/{ACCOUNT}/from/{name}"),
+            &[("x-ms-copy-source", source)],
+            b"",
+        )
+    };
+    let range = |source: &str| {
+        emulator.send(
+            "PUT",
+            &format!("/{ACCOUNT}/from/range.txt?comp=range"),
+            &[
+                ("x-ms-copy-source", source),
+                ("x-ms-source-range", "bytes=0-4"),
+                ("x-ms-range", "bytes=0-4"),
+                ("x-ms-write", "update"),
+            ],
+            b"",
+        )
+    };
+    let plain = format!("{}/{ACCOUNT}/from/a.txt", emulator.base);
+    let valid = service_sas("r", far, "from", "a.txt");
+    let no_read = service_sas("w", far, "from", "a.txt");
+    let expired = service_sas("r", "2001-01-01T00:00:00Z", "from", "a.txt");
+    let tampered = format!("{valid}x");
+    let other_file = service_sas("r", far, "from", "b.txt");
+    let account_wide = account_sas("r", "o", far);
+    let account_no_read = account_sas("w", "o", far);
+
+    expect(copy("plain.txt", &plain), 202);
+    expect(copy("valid.txt", &url(&valid)), 202);
+    expect(copy("account.txt", &url(&account_wide)), 202);
+    assert_eq!(get(&emulator, "from", "valid.txt", None).body, b"hello");
+    for (label, sas) in [
+        ("without read permission", &no_read),
+        ("expired", &expired),
+        ("tampered", &tampered),
+        ("for another file", &other_file),
+        ("account SAS without read", &account_no_read),
+    ] {
+        let reply = copy("denied.txt", &url(sas));
+        assert_eq!(reply.status, 403, "{label}: {}", reply.text());
+        assert_eq!(
+            reply.header("x-ms-error-code"),
+            "CannotVerifyCopySource",
+            "{label}"
+        );
+        let reply = range(&url(sas));
+        assert_eq!(reply.status, 403, "{label}: {}", reply.text());
+        assert_eq!(
+            reply.header("x-ms-error-code"),
+            "CannotVerifyCopySource",
+            "{label}"
+        );
+    }
+    expect_error(
+        emulator.send("HEAD", &format!("/{ACCOUNT}/from/denied.txt"), &[], b""),
+        404,
+        "ResourceNotFound",
+    );
+
+    expect(range(&plain), 201);
+    expect(range(&url(&valid)), 201);
+    assert_eq!(get(&emulator, "from", "range.txt", None).body, b"hello");
+}
