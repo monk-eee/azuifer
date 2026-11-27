@@ -582,11 +582,6 @@ fn create_path_stores_properties_owner_permissions_and_conflicts() {
             400,
             "InvalidHeaderValue",
         ),
-        (
-            vec![("x-ms-expiry-option", "NeverExpire")],
-            501,
-            "NotImplemented",
-        ),
     ] {
         dfs_error(
             server.dfs("PUT", &format!("{LAKE}/bad?resource=file"), &headers, b""),
@@ -654,6 +649,224 @@ fn create_path_stores_properties_owner_permissions_and_conflicts() {
         "owner1",
         "overwrite keeps ownership"
     );
+}
+
+#[test]
+fn read_path_checks_range_checksum_headers_and_date_conditions() {
+    let server = Emulator::start(&[]);
+    server.filesystem();
+    server.file("data.bin", b"0123456789");
+    let file = format!("{LAKE}/data.bin");
+
+    let ranged = server.dfs(
+        "GET",
+        &file,
+        &[
+            ("range", "bytes=0-3"),
+            ("x-ms-range-get-content-md5", "true"),
+        ],
+        b"",
+    );
+    assert_eq!(ranged.status(), 206);
+    assert_eq!(
+        header(&ranged, "content-md5"),
+        STANDARD.encode(md5(b"0123")),
+        "the MD5 covers the returned range, not the file"
+    );
+    // `x-ms-range` wins over `Range` and the checksum follows it.
+    let both = server.dfs(
+        "GET",
+        &file,
+        &[
+            ("range", "bytes=0-3"),
+            ("x-ms-range", "bytes=4-7"),
+            ("x-ms-range-get-content-md5", "true"),
+        ],
+        b"",
+    );
+    assert_eq!(header(&both, "content-md5"), STANDARD.encode(md5(b"4567")));
+    assert_eq!(both.bytes().unwrap().as_ref(), b"4567");
+
+    let unasked = server.dfs(
+        "GET",
+        &file,
+        &[
+            ("range", "bytes=0-3"),
+            ("x-ms-range-get-content-md5", "false"),
+        ],
+        b"",
+    );
+    assert_eq!(unasked.status(), 206);
+    assert!(!unasked.headers().contains_key("content-md5"));
+    let whole = server.dfs("GET", &file, &[], b"");
+    assert_eq!(header(&whole, "content-length"), "10");
+
+    dfs_error(
+        server.dfs("GET", &file, &[("x-ms-range-get-content-md5", "true")], b""),
+        400,
+        "InvalidHeaderValue",
+    );
+    // Learn documents no CRC64 header for Read Path, so it stays an unsupported header.
+    let crc = server.dfs(
+        "GET",
+        &file,
+        &[
+            ("range", "bytes=0-3"),
+            ("x-ms-range-get-content-crc64", "true"),
+        ],
+        b"",
+    );
+    assert_eq!(crc.status(), 501);
+
+    let modified = header(&whole, "last-modified");
+    let before = "Mon, 01 Jan 2001 00:00:00 GMT";
+    for (headers, status) in [
+        (vec![("if-modified-since", modified.as_str())], 304),
+        (vec![("if-modified-since", before)], 200),
+        (vec![("if-unmodified-since", before)], 412),
+        (vec![("if-unmodified-since", modified.as_str())], 200),
+        (
+            vec![
+                ("if-unmodified-since", before),
+                ("if-match", header(&whole, "etag").as_str()),
+            ],
+            412,
+        ),
+    ] {
+        assert_eq!(
+            server.dfs("GET", &file, &headers, b"").status().as_u16(),
+            status,
+            "{headers:?}"
+        );
+    }
+}
+
+#[test]
+fn create_path_expiry_applies_to_files_with_documented_options() {
+    let server = Emulator::start(&[]);
+    server.filesystem();
+    let create = |path: &str, kind: &str, headers: &[(&str, &str)]| {
+        server.dfs(
+            "PUT",
+            &format!("{LAKE}/{path}?resource={kind}"),
+            headers,
+            b"",
+        )
+    };
+    let expiry_of = |path: &str| {
+        let head = server.blob("HEAD", &format!("{LAKE}/{path}"), &[], b"");
+        assert_eq!(head.status(), 200, "{path}");
+        head.headers()
+            .get("x-ms-expiry-time")
+            .map(|value| value.to_str().unwrap().to_owned())
+    };
+    let later = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(3600));
+
+    assert_eq!(
+        create(
+            "ttl.txt",
+            "file",
+            &[
+                ("x-ms-expiry-option", "RelativeToNow"),
+                ("x-ms-expiry-time", "3600000")
+            ]
+        )
+        .status(),
+        201
+    );
+    assert!(expiry_of("ttl.txt").is_some());
+    assert_eq!(
+        create(
+            "at.txt",
+            "file",
+            &[
+                ("x-ms-expiry-option", "Absolute"),
+                ("x-ms-expiry-time", &later)
+            ]
+        )
+        .status(),
+        201
+    );
+    assert_eq!(expiry_of("at.txt"), Some(later.clone()));
+    assert_eq!(
+        create(
+            "forever.txt",
+            "file",
+            &[("x-ms-expiry-option", "NeverExpire")]
+        )
+        .status(),
+        201
+    );
+    assert_eq!(expiry_of("forever.txt"), None);
+
+    // Creating the path again without an expiry replaces the file and its deadline.
+    assert_eq!(create("ttl.txt", "file", &[]).status(), 201);
+    assert_eq!(expiry_of("ttl.txt"), None);
+
+    // Azure documents expiry for files only, and lists no RelativeToCreation for Create Path.
+    // The error for the rest is not documented: Azuifer answers 400 InvalidHeaderValue.
+    let past = httpdate::fmt_http_date(SystemTime::now() - Duration::from_secs(3600));
+    for (path, kind, headers) in [
+        (
+            "dir",
+            "directory",
+            vec![
+                ("x-ms-expiry-option", "RelativeToNow"),
+                ("x-ms-expiry-time", "60000"),
+            ],
+        ),
+        (
+            "creation.txt",
+            "file",
+            vec![
+                ("x-ms-expiry-option", "RelativeToCreation"),
+                ("x-ms-expiry-time", "60000"),
+            ],
+        ),
+        (
+            "past.txt",
+            "file",
+            vec![
+                ("x-ms-expiry-option", "Absolute"),
+                ("x-ms-expiry-time", &past),
+            ],
+        ),
+        (
+            "nan.txt",
+            "file",
+            vec![
+                ("x-ms-expiry-option", "RelativeToNow"),
+                ("x-ms-expiry-time", "soon"),
+            ],
+        ),
+        (
+            "never-time.txt",
+            "file",
+            vec![
+                ("x-ms-expiry-option", "NeverExpire"),
+                ("x-ms-expiry-time", "60000"),
+            ],
+        ),
+        (
+            "unknown.txt",
+            "file",
+            vec![("x-ms-expiry-option", "Tomorrow")],
+        ),
+    ] {
+        dfs_error(create(path, kind, &headers), 400, "InvalidHeaderValue");
+        let head = server.dfs("HEAD", &format!("{LAKE}/{path}"), &[], b"");
+        assert_eq!(head.status(), 404, "{path} was not created");
+    }
+    for headers in [
+        vec![("x-ms-expiry-time", "60000")],
+        vec![("x-ms-expiry-option", "RelativeToNow")],
+    ] {
+        dfs_error(
+            create("missing.txt", "file", &headers),
+            400,
+            "MissingRequiredHeader",
+        );
+    }
 }
 
 fn append_flush_flow(server: &Emulator) {
