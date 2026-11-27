@@ -6,6 +6,7 @@
 
 mod auth;
 mod error;
+mod headers;
 mod request;
 mod respond;
 mod token;

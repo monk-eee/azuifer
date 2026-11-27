@@ -13,8 +13,8 @@ use super::{
     blobs::touch,
     check_memory_quota, container, db_error,
     dfs_paths::{CreatePath, PathError, PathResult, create_file},
-    extent, internal, io_error, namespace, open_extent, read_memory_slice, reclaim, require_blob,
-    row_uint, save_row, snapshots, sqlite_int, staging_file, write_lease,
+    expiry, extent, internal, io_error, namespace, open_extent, read_memory_slice, reclaim,
+    require_blob, row_uint, save_row, snapshots, sqlite_int, staging_file, write_lease,
 };
 use crate::{
     conditions::Guard,
@@ -320,6 +320,7 @@ impl Store {
                         creation: Creation::default(),
                         default_owner: owner.clone(),
                         lease: None,
+                        expiry: None,
                     };
                     create_file(&tx, mode, create, now, true)?;
                     data_target(&tx, &key, now)?
@@ -506,6 +507,10 @@ fn flush(db: &mut Connection, mode: &Mode, now: i64, request: Flush) -> PathResu
             params![sqlite_int(old.info.created)?, account, container_name, name],
         )
         .map_err(db_error)?;
+        // Flushing completes the same file, so a deadline set at creation stays with it.
+        if old.info.lifecycle.expires.is_some() {
+            expiry::write(&tx, &key, &old.info.lifecycle)?;
+        }
         match assembled {
             Assembled::Adopt(staged_id) => link_extent(mode, staged_id, entity.id)?,
             Assembled::Built(data) => data.persist(mode, entity.id)?,

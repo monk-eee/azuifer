@@ -23,7 +23,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-
+import urllib.request
+from datetime import datetime, timedelta, timezone
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from azure.storage.blob import BlobServiceClient
 from azure.storage.filedatalake import DataLakeServiceClient
@@ -49,7 +50,7 @@ class Server:
         env["AZUIFER_ACCOUNT_KEY"] = KEY
         command = [binary, "serve", "--port", "0", "--admin-port", "0", "--in-memory",
                    "--services", "blob,dfs", "--hns-accounts", ACCOUNT,
-                   "--skip-api-version-check", "--shutdown-on-stdin-eof"]
+                   "--skip-api-version-check", "--test-clock", "--shutdown-on-stdin-eof"]
         self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.DEVNULL, env=env, text=True)
         self.ports = {}
@@ -64,6 +65,13 @@ class Server:
 
     def url(self, service):
         return f"http://{ACCOUNT}.{service}.localhost:{self.ports[service]}"
+
+    def advance(self, seconds):
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.ports['admin']}/_azuifer/clock/advance?seconds={seconds}",
+            method="POST")
+        with urllib.request.urlopen(request) as response:
+            assert response.status == 200
 
     def stop(self):
         self.process.stdin.close()
@@ -184,6 +192,41 @@ def acl_flow(fs):
           and "default:group::r-x" in inherited_acl, inherited_acl)
 
 
+def expiry_flow(server, service, fs):
+    """`create_file(expires_on=...)` sends RelativeToNow for an int and Absolute for a
+    datetime. A file with a deadline disappears for the DFS and Blob SDK clients alike once
+    the shared test clock passes it, and a flush after the create keeps the deadline."""
+    blobs = BlobServiceClient(server.url("blob"), credential=CREDENTIAL)
+    files = {
+        "ttl/relative.txt": {"expires_on": 60_000},
+        "ttl/absolute.txt": {"expires_on": datetime.now(timezone.utc) + timedelta(minutes=10)},
+        "ttl/plain.txt": {},
+    }
+    for path, options in files.items():
+        client = fs.get_file_client(path)
+        client.create_file(**options)
+        client.append_data(b"payload", 0)
+        client.flush_data(len(b"payload"))
+    relative_properties = fs.get_file_client("ttl/relative.txt").get_file_properties()
+    check("the SDK reads the relative deadline", relative_properties.expiry_time is not None)
+    check("blob reads the deadline file",
+          blobs.get_blob_client("lake", "ttl/relative.txt").get_blob_properties().size
+          == relative_properties.size)
+    check("plain file has no deadline",
+          fs.get_file_client("ttl/plain.txt").get_file_properties().expiry_time is None)
+    check("deadline file keeps its bytes", fs.get_file_client("ttl/relative.txt").download_file().readall() == b"payload")
+    fs.get_file_client("ttl/relative.txt").rename_file("lake/ttl/renamed.txt")
+    check("rename keeps the deadline",
+          fs.get_file_client("ttl/renamed.txt").get_file_properties().expiry_time is not None)
+
+    server.advance(90)
+    check("expired file is gone for DFS", not fs.get_file_client("ttl/renamed.txt").exists())
+    check("expired file is gone for Blob", not blobs.get_blob_client("lake", "ttl/renamed.txt").exists())
+    check("later deadline still holds", fs.get_file_client("ttl/absolute.txt").exists())
+    check("plain file never expires", fs.get_file_client("ttl/plain.txt").exists())
+    fs.delete_directory("ttl")
+
+
 def delete_flow(service, fs):
     fs.delete_directory("archive")
     check("recursive delete", names(fs.get_paths(recursive=True)) == ["viablob", "viablob/one.txt"])
@@ -257,6 +300,7 @@ def main():
     try:
         service, fs = lifecycle_flow(server)
         acl_flow(fs)
+        expiry_flow(server, service, fs)
         delete_flow(service, fs)
         if not arguments.skip_az:
             az_flow(server, arguments.az)

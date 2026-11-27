@@ -1,7 +1,15 @@
 //! Parses an authenticated DFS request into a typed operation, the SAS permission it
 //! needs, and the POSIX rights it needs on the paths it touches.
 
-use super::{auth::Authenticated, error::DfsError, token::Continuation};
+use super::{
+    auth::Authenticated,
+    error::DfsError,
+    headers::{
+        acl_entries, boolean, content_update, creation, expiry, lease_use, posix_mode,
+        principal_name, properties, read_range,
+    },
+    token::Continuation,
+};
 use crate::{
     auth::{Query, header},
     blob_auth::Target,
@@ -9,11 +17,11 @@ use crate::{
     conditions::{self, Conditions, Guard, STANDARD as CONDITION_HEADERS},
     config::Config,
     domain::{
-        AccountName, BlobKey, BlobPath, BlobRead, ByteRange, ContainerKey, ContentHeaders, Error,
-        Metadata, PageRequest, Result, xml_safe,
+        AccountName, BlobKey, BlobPath, BlobRead, ContainerKey, ContentHeaders, Error, Metadata,
+        PageRequest, Result,
     },
     lease::{LeaseAction, LeaseDuration, LeaseId},
-    posix::{Creation, Entry, Form, Mode, PathKind, Perms, parse_entries},
+    posix::{Form, PathKind, Perms},
     protocol::{self, UploadOptions},
     store::{
         AccessUpdate, AclMode, Caller, CreatePath, Flush, LeaseUse, Need, PropertyUpdate,
@@ -180,157 +188,6 @@ pub(super) fn parse(
     }
 }
 
-fn boolean(value: Option<&str>) -> Result<Option<bool>> {
-    value
-        .map(|value| match value {
-            "true" => Ok(true),
-            "false" => Ok(false),
-            _ => Err(Error::InvalidQuery),
-        })
-        .transpose()
-}
-
-/// `x-ms-properties`: `name=base64(value)` pairs, replacing all properties.
-fn properties(headers: &HeaderMap) -> Result<Option<Metadata>> {
-    let Some(text) = header(headers, "x-ms-properties")? else {
-        return Ok(None);
-    };
-    let mut metadata = Metadata::new();
-    for pair in text
-        .split(',')
-        .map(str::trim)
-        .filter(|pair| !pair.is_empty())
-    {
-        let (name, value) = pair.split_once('=').ok_or(Error::InvalidHeader)?;
-        let mut chars = name.bytes();
-        if !chars
-            .next()
-            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
-            || !chars.all(|b| b.is_ascii_alphanumeric() || b == b'_')
-        {
-            return Err(Error::InvalidHeader);
-        }
-        let value = STANDARD.decode(value).map_err(|_| Error::InvalidHeader)?;
-        let value = String::from_utf8(value).map_err(|_| Error::InvalidHeader)?;
-        if !xml_safe(&value) || metadata.insert(name.to_owned(), value).is_some() {
-            return Err(Error::InvalidHeader);
-        }
-    }
-    if metadata
-        .iter()
-        .map(|(name, value)| name.len() + value.len())
-        .sum::<usize>()
-        > 8192
-    {
-        return Err(Error::InvalidHeader);
-    }
-    Ok(Some(metadata))
-}
-
-fn content_header(headers: &HeaderMap, blob: &str, plain: Option<&str>) -> Result<Option<String>> {
-    let value = match header(headers, blob)? {
-        Some(value) => Some(value),
-        None => plain
-            .map(|name| header(headers, name))
-            .transpose()?
-            .flatten(),
-    };
-    match value {
-        Some(value) if value.len() > 1024 || !xml_safe(value) => Err(Error::InvalidHeader),
-        other => Ok(other.map(str::to_owned)),
-    }
-}
-
-/// The content headers a request sets, `None` for those it leaves alone.
-fn content_update(headers: &HeaderMap) -> Result<PropertyUpdate> {
-    Ok(PropertyUpdate {
-        content_type: content_header(headers, "x-ms-content-type", None)?,
-        encoding: content_header(headers, "x-ms-content-encoding", Some("content-encoding"))?,
-        language: content_header(headers, "x-ms-content-language", Some("content-language"))?,
-        disposition: content_header(
-            headers,
-            "x-ms-content-disposition",
-            Some("content-disposition"),
-        )?,
-        cache_control: content_header(headers, "x-ms-cache-control", Some("cache-control"))?,
-        properties: properties(headers)?,
-    })
-}
-
-fn principal_name(headers: &HeaderMap, name: &str) -> Result<Option<String>> {
-    match header(headers, name)? {
-        Some(value)
-            if value.is_empty()
-                || value.len() > 256
-                || !xml_safe(value)
-                || value.contains([':', ',']) =>
-        {
-            Err(Error::InvalidHeader)
-        }
-        other => Ok(other.map(str::to_owned)),
-    }
-}
-
-fn posix_mode(headers: &HeaderMap, name: &str) -> Result<Option<Mode>> {
-    header(headers, name)?.map(Mode::parse).transpose()
-}
-
-fn umask(headers: &HeaderMap) -> Result<Option<Mode>> {
-    header(headers, "x-ms-umask")?
-        .map(|text| {
-            if text.len() == 4 {
-                Mode::parse(text)
-            } else {
-                Err(Error::InvalidHeader)
-            }
-        })
-        .transpose()
-}
-
-fn acl_entries(headers: &HeaderMap, form: Form) -> Result<Option<Vec<Entry>>> {
-    header(headers, "x-ms-acl")?
-        .map(|text| parse_entries(text, form))
-        .transpose()
-}
-
-/// Reads the owner, group, permissions, umask and ACL headers of a create or an ACL change.
-fn creation(headers: &HeaderMap) -> Result<Creation> {
-    let permissions = posix_mode(headers, "x-ms-permissions")?;
-    let acl = acl_entries(headers, Form::Full)?;
-    if permissions.is_some() && acl.is_some() {
-        return Err(Error::InvalidHeader);
-    }
-    Ok(Creation {
-        permissions,
-        umask: umask(headers)?,
-        acl,
-        owner: principal_name(headers, "x-ms-owner")?,
-        group: principal_name(headers, "x-ms-group")?,
-    })
-}
-
-/// `x-ms-lease-action` of Append Data and Flush Data.
-fn lease_use(headers: &HeaderMap) -> Result<LeaseUse> {
-    let duration = || {
-        LeaseDuration::parse(header(headers, "x-ms-lease-duration")?.ok_or(Error::MissingHeader)?)
-    };
-    let proposed = || conditions::lease_id(headers, "x-ms-proposed-lease-id");
-    Ok(match header(headers, "x-ms-lease-action")? {
-        None => LeaseUse::Hold,
-        Some("acquire") => LeaseUse::Acquire {
-            duration: duration()?,
-            proposed: proposed()?,
-        },
-        Some("auto-renew") => LeaseUse::AutoRenew,
-        Some("release") => LeaseUse::Release,
-        Some("acquire-release") => LeaseUse::AcquireRelease {
-            duration: duration()?,
-            proposed: proposed()?,
-        },
-        Some(_) => return Err(Error::InvalidHeader),
-    })
-}
-
 fn position(query: &Query) -> std::result::Result<u64, DfsError> {
     query
         .get("position")
@@ -379,13 +236,6 @@ fn rename_source(headers: &HeaderMap, target: &ContainerKey) -> Result<BlobKey> 
         container: target.clone(),
         path,
     })
-}
-
-fn unsupported_expiry(headers: &HeaderMap) -> Result<()> {
-    if headers.contains_key("x-ms-expiry-option") || headers.contains_key("x-ms-expiry-time") {
-        return Err(Error::Unsupported);
-    }
-    Ok(())
 }
 
 impl Input<'_> {
@@ -796,10 +646,7 @@ impl Input<'_> {
                         &["range", "x-ms-range", "x-ms-range-get-content-md5"],
                     ],
                 )?;
-                let range = header(self.headers, "x-ms-range")?
-                    .or(header(self.headers, "range")?)
-                    .map(ByteRange::parse)
-                    .transpose()?;
+                let (range, range_checksum) = read_range(self.headers)?;
                 Ok(parsed(
                     Operation::ReadPath(
                         key,
@@ -807,7 +654,7 @@ impl Input<'_> {
                             guard: Guard::parse(self.headers)?,
                             range,
                             with_body: true,
-                            range_checksum: None,
+                            range_checksum,
                         },
                     ),
                     sas(Some("r"), ('o', "r")),
@@ -872,7 +719,7 @@ impl Input<'_> {
                 &["x-ms-expiry-option", "x-ms-expiry-time"],
             ],
         )?;
-        unsupported_expiry(self.headers)?;
+        let expiry = expiry(self.headers, kind)?;
         let update = content_update(self.headers)?;
         let headers = ContentHeaders {
             content_type: update
@@ -906,6 +753,7 @@ impl Input<'_> {
                 creation: creation(self.headers)?,
                 default_owner: self.caller.oid().map(str::to_owned),
                 lease,
+                expiry,
                 key,
             })),
             sas: sas(Some("wc"), ('o', "wc")),

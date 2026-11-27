@@ -89,7 +89,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Creates files and directories with implicit parent directories, conditions, x-ms-properties, ACL, permissions, umask, owner and group headers, and a lease at creation. If-None-Match: * on an existing path answers 409 PathAlreadyExists, which is unverified against Azure. Encryption and expiry headers are unsupported."
+      "notes": "Creates files and directories with implicit parent directories, conditions, x-ms-properties, ACL, permissions, umask, owner and group headers, and a lease at creation. If-None-Match: * on an existing path answers 409 PathAlreadyExists, which is unverified against Azure. A file takes x-ms-expiry-option RelativeToNow, Absolute or NeverExpire (ADR-0030) through the Blob lifecycle table, so Blob shows x-ms-expiry-time and both protocols drop the file at the deadline; a flush keeps it. RelativeToCreation, expiry on a directory and malformed combinations answer 400 InvalidHeaderValue, a choice Learn does not document. Encryption headers are unsupported."
     },
     {
       "name": "Rename Path",
@@ -141,7 +141,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Reads the same committed Blob bytes, with ETag conditions, lease checks, and single byte ranges. No range checksums or date conditions."
+      "notes": "Reads the same committed Blob bytes, with ETag and date conditions, lease checks, and single byte ranges. x-ms-range-get-content-md5 returns Content-MD5 of the range (400 without a range or over 4 MiB, per Learn). Learn documents no CRC64 header for Read, so x-ms-range-get-content-crc64 stays unsupported. None of this is verified against Azure."
     },
     {
       "name": "Get Path Properties",
