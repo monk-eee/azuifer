@@ -833,7 +833,7 @@ fn describe(error: Error) -> (StatusCode, &'static str, &'static str) {
             "TagsTooLarge",
             "The tags specified exceed the permitted number or length.",
         ),
-        Error::InvalidInput => (
+        Error::InvalidInput | Error::InvalidBatchEnvelope => (
             S::BAD_REQUEST,
             "InvalidInput",
             "One of the request inputs is not valid.",
@@ -850,6 +850,14 @@ fn describe(error: Error) -> (StatusCode, &'static str, &'static str) {
 
 pub(crate) fn error_response(error: Error) -> Response {
     render_error(error, None)
+}
+
+pub(crate) fn correlated_error_response(
+    error: Error,
+    request_id: &str,
+    now: SystemTime,
+) -> Response {
+    render_error(error, Some((request_id, now)))
 }
 
 pub(crate) fn request_error_response(

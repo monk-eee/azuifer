@@ -13,7 +13,7 @@ use crate::{
     respond,
     server::App,
     store::PathRead,
-    wire::xml_error,
+    wire::{correlated_error_message, xml_error},
     xml_tree,
 };
 use axum::{
@@ -33,8 +33,7 @@ struct Request {
     output: Format,
 }
 
-fn parse_request(body: &[u8]) -> Result<std::result::Result<Request, SqlError>> {
-    let root = xml_tree::parse(body)?;
+fn parse_request(root: &xml_tree::Node) -> Result<std::result::Result<Request, SqlError>> {
     if root.name != "QueryRequest" || root.text_of("QueryType").is_some_and(|t| t != "SQL") {
         return Err(Error::InvalidXml);
     }
@@ -161,7 +160,23 @@ pub(crate) async fn execute(
         return Err(Error::Unsupported);
     };
     let (bytes, _) = blob_exec::read_bounded(app, body, &options).await?;
-    let request = match parse_request(&bytes)? {
+    let root = match xml_tree::parse(&bytes) {
+        Ok(root) => root,
+        Err(Error::InvalidXml) => {
+            let message = correlated_error_message(
+                "XML specified is not syntactically valid.",
+                ctx.request_id,
+                app.clock.now(),
+            );
+            return Ok(xml_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidXmlDocument",
+                &message,
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    let request = match parse_request(&root)? {
         Ok(request) => request,
         Err(error) => {
             return Ok(xml_error(

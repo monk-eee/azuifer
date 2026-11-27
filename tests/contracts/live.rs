@@ -1,6 +1,6 @@
 use super::{
-    Cassette, Source, account, delegation, mutations, observe_blob, observe_local, reviewed_sas,
-    sas_reads, with_local,
+    Cassette, Source, account, delegation, mutations, observe_blob, observe_local, request_errors,
+    reviewed_sas, sas_reads, with_local,
 };
 use anyhow::{Context as _, Result, anyhow, ensure};
 use reqwest::{Url, blocking::Client, redirect::Policy};
@@ -158,6 +158,7 @@ pub(super) enum Record<'a> {
     BlobMutation(&'a mutations::MutationCassette),
     SasRead(&'a sas_reads::SasReadCassette),
     AccountRead(&'a account::AccountCassette),
+    RequestRejection(&'a request_errors::Rejection),
 }
 
 pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
@@ -170,6 +171,7 @@ pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
         Record::BlobMutation(cassette) => cassette.case.file_stem(),
         Record::SasRead(cassette) => cassette.case.file_stem(),
         Record::AccountRead(_) => account::CASE,
+        Record::RequestRejection(cassette) => cassette.case.file_stem(),
     };
     let name = format!("{scenario}-{}.json", Uuid::new_v4().simple());
     let target = directory.join(name);
@@ -429,6 +431,39 @@ fn check_live_blob_account_reads() -> Result<()> {
             save_azure(Record::AccountRead(azure))
         },
     )
+}
+
+fn check_live_rejection(case: request_errors::Case) -> Result<()> {
+    run_live(
+        || request_errors::reviewed(case),
+        |client, _, endpoint, bearer| {
+            request_errors::observe(client, endpoint, bearer, Source::Azure, case)
+        },
+        || request_errors::observe_local(case),
+        request_errors::Rejection::compare,
+        |azure| {
+            azure.validate()?;
+            save_azure(Record::RequestRejection(azure))
+        },
+    )
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_batch_empty_envelope() -> Result<()> {
+    check_live_rejection(request_errors::Case::EmptyBatch)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_batch_truncated_part() -> Result<()> {
+    check_live_rejection(request_errors::Case::TruncatedBatch)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_query_malformed_xml() -> Result<()> {
+    check_live_rejection(request_errors::Case::MalformedQueryXml)
 }
 
 #[test]

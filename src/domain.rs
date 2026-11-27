@@ -76,6 +76,7 @@ pub(crate) enum Error {
     SnapshotsPresent,
     InvalidTag,
     TagsTooLarge,
+    InvalidBatchEnvelope,
     InvalidInput,
 }
 

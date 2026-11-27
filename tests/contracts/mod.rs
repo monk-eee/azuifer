@@ -3,6 +3,7 @@ mod cassette;
 mod delegation;
 mod live;
 mod mutations;
+mod request_errors;
 mod sas_reads;
 
 use super::{ACCOUNT, Server, VERSION, basic_token, client, iso, sas_query};

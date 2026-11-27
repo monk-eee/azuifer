@@ -6,12 +6,12 @@ The target is the five Azure Storage REST services at **`2023-11-03`**, using th
 
 | Service | Operations | Advertised operation/auth pairs | Unsupported operations | Journey exchanges | Extra grid exchanges | Target |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Blob | 55 | 303 | 1 | 247 | 244 | 491 |
+| Blob | 55 | 303 | 1 | 249 | 244 | 493 |
 | DFS | 18 | 106 | 0 | 73 | 86 | 159 |
 | FileREST | 44 | 188 | 3 | 90 | 147 | 237 |
 | Queue | 17 | 72 | 0 | 43 | 53 | 96 |
 | Table | 19 | 72 | 1 | 56 | 53 | 109 |
-| **Total** | **153** | **741** | **5** | **509** | **583** | **1,092** |
+| **Total** | **153** | **741** | **5** | **511** | **583** | **1,094** |
 
 This is a finite coverage target, not a claim that every possible input is covered. It tests each advertised operation/auth pair once and adds separate exchanges for meaningful branches: conditions, checksums and limits, continuations, post-mutation state, failure atomicity, expiry, feature switches, and shared Blob/DFS state. It does not multiply every branch by every credential. Add a row when an API version, profile, or new variant changes contract behavior. Keep newer-version evidence separate until that version is adopted; a client reaching the emulator through version fallback is not evidence for the newer version. SMB and NFS wire exchanges, control-plane APIs, infrastructure performance, and emulator-only fault injection are out of scope.
 
@@ -22,7 +22,7 @@ This is a finite coverage target, not a claim that every possible input is cover
 - **Grid:** for every pair in the manifests not credited by a journey, record one safe reference exchange using that operation and credential. Use the same synthetic setup as its primary row. The [audit command](../../scripts/audit-azure-recording-plan.py) lists the exact grid remainder with `--grid`. An approved additional grid recording becomes a one-step row and takes that cell out of the remainder without increasing the target. Where Azure declines an advertised pair, preserve the measured result and classify the difference instead of substituting a different credential.
 - **Evidence:** `pending` means no approved recording. A fixture link means the row has real Azure evidence and clean offline replay. Azure-only fixtures with a known emulator difference must be marked `gap` with the fixture and the missing behavior; they count as recorded, not matched. A target/RBAC failure is not a service contract. It blocks a live run; it does not replace existing evidence or count toward a pending row.
 
-**Target = journey exchanges + uncovered grid cells.** Cross-service journey exchanges count under the journey's service; auth credits belong to the operation's service. From the repository root, run `python scripts/audit-azure-recording-plan.py` with Python 3.10 or later to see current progress. The checker verifies counts, credits, fixture provenance and links. The library now holds **21 matched Blob cassettes / 125 exchanges**, up from 60 exchanges at audit start. **967** remain.
+**Target = journey exchanges + uncovered grid cells.** Cross-service journey exchanges count under the journey's service; auth credits belong to the operation's service. From the repository root, run `python scripts/audit-azure-recording-plan.py` with Python 3.10 or later to see current progress. The checker verifies counts, credits, fixture provenance and links. The library now holds **24 matched Blob cassettes / 128 exchanges**, leaving **966** to record. The target grew by two: an empty Batch envelope and malformed Query XML are separate from the truncated multipart and invalid SQL cases.
 
 ```text
 manifest pairs + journeys -> select safe target -> record Azure candidate
@@ -83,8 +83,8 @@ The current target covers only `flat` and same-account Blob `copy` when its sour
 | B-29 | flat | Bearer | `Set Blob Tier` on a disposable supported tier; read tier headers; reject incompatible tier/blob kind; read unchanged | 4 | pending |
 | B-30 | config | Bearer | `Set Blob Immutability Policy` unlocked; reject prohibited mutation; `Delete Blob Immutability Policy`; `Set Blob Legal Hold` on; reject delete while held; unset hold; delete disposable blob | 7 | pending |
 | B-31 | hns | Bearer | `Set Blob Expiry` in approved mode; read expiry header; set malformed expiry; verify old expiry; remove expiry; verify cleared | 6 | pending |
-| B-32 | flat | Bearer | `Submit Batch` with successes and independent failure; verify deleted object; verify unaffected object; reject malformed multipart | 4 | pending |
-| B-33 | flat | Bearer | `Query Blob Contents` CSV with projection and predicate; JSON projection; Avro progress/end; empty result; malformed query; read original unchanged | 6 | pending |
+| B-32 | flat | Bearer | `Submit Batch` with successes and independent failure; verify deleted object; verify unaffected object | 3 | pending |
+| B-33 | flat | Bearer | `Query Blob Contents` CSV with projection and predicate; JSON projection; Avro progress/end; empty result; reject invalid SQL; read original unchanged | 6 | pending |
 | B-34 | config | Mixed | `Set Blob Service Properties@Bearer` isolated CORS rule; `Preflight Blob Request@Anonymous` allowed; denied origin; denied method; restore original properties; verify restored | 6 | pending |
 | B-35 | config | Mixed | `Set Container ACL@Bearer` Blob-level public; `Get Container ACL@Bearer`; `Get Blob@Anonymous`; deny anonymous listing; set container-level public; `List Blobs@Anonymous`; revert to private; deny anonymous read | 8 | pending |
 | B-36 | config | Bearer | Create test-only root container; put a singleton-path root blob; read via explicit root path; list root; list dedicated logs container by explicit name; reject invalid system container name | 6 | pending |
@@ -93,6 +93,9 @@ The current target covers only `flat` and same-account Blob `copy` when its sour
 | B-39 | flat | UserDelegationSAS | Read in-window; deny expired token; deny future start; read with in-window signed start; read after key expiry under controlled short validity | 5 | pending |
 | B-40 | flat | Bearer | !`Rename Container` recognized boundary with a synthetic container (not DFS Rename Path) | 1 | pending |
 | B-41 | flat | Bearer | `Get Account Information` on StorageV2 Standard_LRS with HNS off; `Get Blob Service Properties` with empty CORS and Blob soft delete and website disabled | 2 | [fixture](../../tests/contracts/cassettes/blob-account-read-only.json) |
+| B-42 | flat | Bearer | Reject a container-scoped Submit Batch envelope with zero parts, checking the embedded 400 and its request correlation | 1 | [fixture](../../tests/contracts/cassettes/blob-batch-empty-envelope.json) |
+| B-43 | flat | Bearer | Reject malformed Query Blob Contents XML before reading blob data, checking status, code, message and request correlation | 1 | [fixture](../../tests/contracts/cassettes/blob-query-malformed-xml.json) |
+| B-44 | flat | Bearer | Reject a truncated container-scoped Submit Batch part before executing subrequests, checking status and request correlation | 1 | [fixture](../../tests/contracts/cassettes/blob-batch-truncated-part.json) |
 
 ### DFS and Blob/DFS
 

@@ -456,7 +456,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "A SQL subset (SELECT, WHERE, LIMIT, comparisons, LIKE, IN, BETWEEN, CAST, a few string functions, and COUNT/SUM/AVG/MIN/MAX without GROUP BY) over delimited text and JSON lines, answered as an Avro stream of result, progress, end, and error records. Arrow and Parquet answer NotImplemented. The whole blob is read into memory. The wire format follows the Python SDK decoder, not a recording of Azure: the ParseError status and code, runtime error names, progress cadence, and SQL dialect details are unverified."
+      "notes": "A SQL subset (SELECT, WHERE, LIMIT, comparisons, LIKE, IN, BETWEEN, CAST, a few string functions, and COUNT/SUM/AVG/MIN/MAX without GROUP BY) over delimited text and JSON lines, answered as an Avro stream of result, progress, end, and error records. Arrow and Parquet answer NotImplemented. The whole blob is read into memory. Malformed XML returns 400 InvalidXmlDocument with request correlation. The successful wire format follows the Python SDK decoder: the ParseError status and code, runtime error names, progress cadence, and SQL dialect details remain unverified against Azure."
     },
     {
       "name": "Rename Container",
@@ -661,7 +661,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Delete Blob or Set Blob Tier sub-requests, one kind per batch, at most 256, account or container scope; each sub-request is authenticated and authorized separately and reported with its own status."
+      "notes": "Delete Blob or Set Blob Tier sub-requests, one kind per batch, at most 256, account or container scope; each sub-request is authenticated and authorized separately and reported with its own status. A container-scoped empty multipart envelope or truncated part header yields a single embedded 400 InvalidInput in an outer 202, before any subrequest executes."
     },
     {
       "name": "Undelete Blob",
