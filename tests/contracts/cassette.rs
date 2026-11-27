@@ -126,6 +126,7 @@ pub(super) enum ErrorCode {
     InvalidInput,
     InvalidHeaderValue,
     InvalidRange,
+    InvalidResourceName,
     InvalidQueryParameterValue,
     CannotVerifyCopySource,
     OperationNotAllowedOnIncrementalCopyBlob,
@@ -181,6 +182,7 @@ impl ErrorCode {
             Some("InvalidInput") => Self::InvalidInput,
             Some("InvalidHeaderValue") => Self::InvalidHeaderValue,
             Some("InvalidRange") => Self::InvalidRange,
+            Some("InvalidResourceName") => Self::InvalidResourceName,
             Some("InvalidQueryParameterValue") => Self::InvalidQueryParameterValue,
             Some("CannotVerifyCopySource") => Self::CannotVerifyCopySource,
             Some("OperationNotAllowedOnIncrementalCopyBlob") => {

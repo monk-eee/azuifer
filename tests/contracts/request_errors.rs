@@ -34,6 +34,7 @@ pub(super) enum Case {
     EmptyBatch,
     TruncatedBatch,
     MalformedQueryXml,
+    InvalidSystemContainerName,
     QueueVisibility,
     QueueMessageTooLarge,
     TableAtomAccept,
@@ -45,7 +46,10 @@ pub(super) enum Case {
 impl Case {
     pub(super) fn service(self) -> Service {
         match self {
-            Self::EmptyBatch | Self::TruncatedBatch | Self::MalformedQueryXml => Service::Blob,
+            Self::EmptyBatch
+            | Self::TruncatedBatch
+            | Self::MalformedQueryXml
+            | Self::InvalidSystemContainerName => Service::Blob,
             Self::QueueVisibility | Self::QueueMessageTooLarge => Service::Queue,
             _ => Service::Table,
         }
@@ -56,6 +60,7 @@ impl Case {
             Self::EmptyBatch => "blob-batch-empty-envelope",
             Self::TruncatedBatch => "blob-batch-truncated-part",
             Self::MalformedQueryXml => "blob-query-malformed-xml",
+            Self::InvalidSystemContainerName => "blob-invalid-system-container-name",
             Self::QueueVisibility => "queue-put-visibility-limit",
             Self::QueueMessageTooLarge => "queue-put-message-size-limit",
             Self::TableAtomAccept => "table-atom-accept",
@@ -124,6 +129,7 @@ struct Part {
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Body {
+    Empty {},
     Multipart(Part),
     Xml(XmlError),
     QueueXml {
@@ -261,6 +267,9 @@ impl Rejection {
                     && response.header_code == ErrorCode::InvalidXmlDocument
                     && error.code == ErrorCode::InvalidXmlDocument
             }
+            (Body::Empty {}, Case::InvalidSystemContainerName) => {
+                response.status == 400 && response.header_code == ErrorCode::InvalidResourceName
+            }
             (
                 Body::QueueXml {
                     error,
@@ -338,6 +347,18 @@ pub(super) fn observe(
     case: Case,
 ) -> Result<Rejection> {
     let response = match case.service() {
+        Service::Blob if case == Case::InvalidSystemContainerName => exchange(
+            case,
+            request(
+                client,
+                Method::HEAD,
+                endpoint.join(&format!(
+                    "$azuifer-contract-{}?restype=container",
+                    Uuid::new_v4().simple()
+                ))?,
+            )
+            .bearer_auth(bearer),
+        ),
         Service::Blob => with_fresh_container(client, endpoint, bearer, |container, blob| {
             let wire = if case == Case::MalformedQueryXml {
                 request(client, Method::POST, blob.join("?comp=query")?)
@@ -442,6 +463,9 @@ fn exchange(case: Case, wire: RequestBuilder) -> Result<Exchange> {
     let id = header_text(&headers, "x-ms-request-id");
     let text = std::str::from_utf8(&bytes).context("invalid rejection response encoding")?;
     let body = match case.service() {
+        Service::Blob if case == Case::InvalidSystemContainerName => {
+            bytes.is_empty().then_some(Body::Empty {})
+        }
         Service::Blob => {
             if media(&headers) == Media::Xml {
                 let expected = if case == Case::MalformedQueryXml {
@@ -562,6 +586,11 @@ fn replay_blob_query_malformed_xml() -> Result<()> {
 
 fn replay(case: Case) -> Result<()> {
     reviewed(case)?.compare(&observe_local(case)?)
+}
+
+#[test]
+fn replay_blob_invalid_system_container_name() -> Result<()> {
+    replay(Case::InvalidSystemContainerName)
 }
 
 #[test]
