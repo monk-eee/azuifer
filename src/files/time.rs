@@ -114,4 +114,21 @@ mod tests {
             "Fri, 03 Nov 2023 12:30:15 GMT"
         );
     }
+
+    #[test]
+    fn hostile_timestamps_are_refused_or_survive_a_round_trip() {
+        crate::hostile::sweep(
+            &[
+                "2026-11-25T09:42:48.4240173Z",
+                "9999-12-31T23:59:59.9999999Z",
+            ],
+            ("0", "Z"),
+            |text| {
+                if let Some(ticks) = parse_iso_ticks(text) {
+                    assert_eq!(parse_iso_ticks(&iso_ticks(ticks)), Some(ticks), "{text:?}");
+                    let _ = http_date(ticks / TICKS_PER_MILLI);
+                }
+            },
+        );
+    }
 }

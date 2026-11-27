@@ -479,4 +479,27 @@ mod tests {
         // The Java SDK treats any text after the blank line as an error body.
         assert!(ok.ends_with("\r\n\r\n") && !ok.ends_with("\r\n\r\n\r\n"));
     }
+
+    #[test]
+    fn hostile_batches_are_answered_without_panic() {
+        let seed = "--b\r\nContent-Type: application/http\r\nContent-Transfer-Encoding: binary\r\nContent-ID: 0\r\n\r\n\
+                    DELETE /acct/c/blob1?snapshot=x HTTP/1.1\r\nx-ms-date: Mon, 01 Jan 2024 00:00:00 GMT\r\n\
+                    Authorization: SharedKey a:b\r\nContent-Length: 0\r\n\r\n\r\n--b--\r\n";
+        assert_eq!(parse_body(seed.as_bytes(), "b").unwrap().len(), 1);
+        crate::hostile::sweep(&[seed], ("--b\r\n", "--b--"), |text| {
+            let _ = parse_body(text.as_bytes(), "b");
+        });
+        crate::hostile::sweep(
+            &["multipart/mixed; boundary=\"batch_1\"; charset=x"],
+            (";", "="),
+            |text| {
+                let _ = boundary(text);
+            },
+        );
+        let many = seed.replace("--b--\r\n", "").repeat(1000) + "--b--";
+        assert_eq!(
+            parse_body(many.as_bytes(), "b").err(),
+            Some(Error::InvalidInput)
+        );
+    }
 }

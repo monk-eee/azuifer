@@ -335,4 +335,20 @@ mod tests {
             assert!(parse_properties(bad.as_bytes()).is_err(), "{bad}");
         }
     }
+
+    #[test]
+    fn hostile_documents_are_answered_without_panic() {
+        let acl = "<SignedIdentifiers><SignedIdentifier><Id>a</Id><AccessPolicy><Start>2020-01-01T00:00:00Z</Start><Expiry>2099-01-01T00:00:00Z</Expiry><Permission>raud</Permission></AccessPolicy></SignedIdentifier></SignedIdentifiers>";
+        crate::hostile::sweep(
+            &[acl],
+            ("<SignedIdentifier>", "</SignedIdentifier>"),
+            |text| {
+                let _ = parse_acl(text.as_bytes());
+            },
+        );
+        let properties = "<StorageServiceProperties><Logging><Version>1.0</Version><Read>true</Read><RetentionPolicy><Enabled>true</Enabled><Days>7</Days></RetentionPolicy></Logging><Cors><CorsRule><AllowedOrigins>*</AllowedOrigins><AllowedMethods>GET</AllowedMethods><MaxAgeInSeconds>10</MaxAgeInSeconds></CorsRule></Cors></StorageServiceProperties>";
+        crate::hostile::sweep(&[properties], ("<A>", "</A>"), |text| {
+            let _ = parse_properties(text.as_bytes());
+        });
+    }
 }

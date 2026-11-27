@@ -550,4 +550,22 @@ mod tests {
         assert!(parse_table_name(br#"{"TableName":"1bad"}"#).is_err());
         assert!(parse_table_name(b"{}").is_err());
     }
+
+    #[test]
+    fn hostile_entity_bodies_are_answered_without_panic() {
+        let seed = r#"{"PartitionKey":"p","RowKey":"r","A":1,"A@odata.type":"Edm.Int64","B":"x","C":"00000000-0000-0000-0000-000000000000","C@odata.type":"Edm.Guid","D":"AAEC","D@odata.type":"Edm.Binary","E":"2008-07-10T12:00:00Z","E@odata.type":"Edm.DateTime","F":"NaN","F@odata.type":"Edm.Double","G":null,"H":[1]}"#;
+        crate::hostile::sweep(&[seed], (r#"{"a":"#, "}"), |text| {
+            let _ = parse_entity(text.as_bytes());
+            let _ = parse_table_name(text.as_bytes());
+            let _ = parse_double(text);
+        });
+        let wide = format!(
+            "{{{}}}",
+            (0..200_000)
+                .map(|n| format!("\"p{n}\":1"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert!(parse_entity(wide.as_bytes()).is_err());
+    }
 }

@@ -261,3 +261,22 @@ fn stored_attributes_round_trip_through_their_columns() {
     let untouched = Attributes::stored(PathKind::File, "", "", "", false).unwrap();
     assert_eq!(untouched, Attributes::initial(PathKind::File));
 }
+
+#[test]
+fn hostile_permission_text_is_answered_without_panic() {
+    crate::hostile::sweep(
+        &["rwxr-x--T", "0750", "1777", "rwxrwxrwx+"],
+        ("r", "w"),
+        |text| {
+            let _ = Mode::parse(text);
+        },
+    );
+    let seed =
+        "user::rwx,group:11111111-2222-3333-4444-555555555555:r-x,default:other::---,mask::rwx";
+    crate::hostile::sweep(&[seed], ("user::rwx,", ""), |text| {
+        let _ = parse_entries(text, Form::Full);
+        let _ = parse_entries(text, Form::Removal);
+    });
+    let many = "user:a:rwx,".repeat(200_000) + "user:a:rwx";
+    assert!(parse_entries(&many, Form::Full).is_err());
+}

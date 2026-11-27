@@ -344,4 +344,29 @@ pub(crate) mod tests {
         assert!(KeySet::parse(b"{}").is_err());
         assert!(KeySet::parse(br#"{"keys":[{"kty":"RSA","n":"AQAB"}]}"#).is_err());
     }
+
+    #[test]
+    fn hostile_tokens_and_key_sets_are_answered_without_panic() {
+        let keys = KeySet::parse(jwks("k").as_bytes()).unwrap();
+        let token = sign(
+            r#"{"alg":"RS256","kid":"k"}"#,
+            r#"{"aud":["a"],"exp":1e30,"roles":["r"]}"#,
+        );
+        crate::hostile::sweep(&[token.as_str()], (".", "="), move |text| {
+            if let Ok(jwt) = Jwt::parse(text) {
+                let _ = jwt.verify(&keys);
+                let _ = jwt.claims.aud.values();
+            }
+        });
+        let document = jwks("k");
+        crate::hostile::sweep(&[document.as_str()], ("[", "]"), |text| {
+            let _ = KeySet::parse(text.as_bytes());
+        });
+        let nested = format!("{}1{}", "[".repeat(100_000), "]".repeat(100_000));
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(format!(r#"{{"aud":{nested}}}"#));
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256"}"#);
+        assert!(Jwt::parse(&format!("{header}.{claims}.AAAA")).is_err());
+        assert!(KeySet::parse(format!(r#"{{"keys":{nested}}}"#).as_bytes()).is_err());
+    }
 }

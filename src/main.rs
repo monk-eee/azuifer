@@ -27,6 +27,8 @@ mod delegation;
 mod dfs;
 mod domain;
 mod files;
+#[cfg(test)]
+mod hostile;
 mod jwt;
 mod lease;
 mod metrics;

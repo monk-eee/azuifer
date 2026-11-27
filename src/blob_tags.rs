@@ -437,4 +437,33 @@ mod tests {
             Err(Error::InvalidXml)
         );
     }
+
+    #[test]
+    fn hostile_tag_text_is_answered_without_panic() {
+        crate::hostile::sweep(
+            &["\"Status\" = 'Final' AND \"Year\" >= '2018' AND @container = 'a''b'"],
+            ("(", ")"),
+            |text| {
+                let _ = TagFilter::parse(text, true);
+                let _ = TagFilter::parse(text, false);
+            },
+        );
+        crate::hostile::sweep(&["a=b&c%20d=e%2Ff&g="], ("&", "="), |text| {
+            let _ = from_header(text);
+        });
+        let seed = "<Tags><TagSet><Tag><Key>k</Key><Value>v</Value></Tag></TagSet></Tags>";
+        crate::hostile::sweep(&[seed], ("<Tag>", "</Tag>"), |text| {
+            let _ = from_xml(text.as_bytes());
+        });
+        let long = format!("\"k\" = '{}'", "x".repeat(2_000_000));
+        assert_eq!(
+            TagFilter::parse(&long, true).err(),
+            Some(Error::InvalidQuery)
+        );
+        let many = format!("\"k\" = 'v'{}", " AND \"k\" = 'v'".repeat(100));
+        assert_eq!(
+            TagFilter::parse(&many, true).err(),
+            Some(Error::InvalidQuery)
+        );
+    }
 }

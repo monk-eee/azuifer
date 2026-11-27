@@ -187,4 +187,23 @@ mod tests {
         );
         assert_eq!(parse_permission(b"nope"), Err(Error::InvalidInput));
     }
+
+    #[test]
+    fn hostile_documents_are_answered_without_panic() {
+        let acl = "<SignedIdentifiers><SignedIdentifier><Id>a</Id><AccessPolicy><Start>2020-01-01T00:00:00Z</Start><Expiry>2099-01-01T00:00:00Z</Expiry><Permission>rcwdl</Permission></AccessPolicy></SignedIdentifier></SignedIdentifiers>";
+        crate::hostile::sweep(
+            &[acl],
+            ("<SignedIdentifier>", "</SignedIdentifier>"),
+            |text| {
+                let _ = parse_access_policies(text.as_bytes());
+            },
+        );
+        crate::hostile::sweep(
+            &[r#"{"permission":"O:SYG:SYD:","format":"binary"}"#],
+            ("{", "}"),
+            |text| {
+                let _ = parse_permission(text.as_bytes());
+            },
+        );
+    }
 }
