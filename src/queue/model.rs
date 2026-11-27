@@ -55,8 +55,16 @@ impl MessageId {
 pub(super) struct PopReceipt(String);
 
 impl PopReceipt {
-    pub(super) fn parse(value: &str) -> Self {
-        Self(value.to_owned())
+    pub(super) fn parse(value: &str) -> Result<Self> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        if value.is_empty() || STANDARD.decode(value).is_err() {
+            return Err(QueueError::InvalidQuery(
+                "popreceipt",
+                value.to_owned(),
+                "Invalid pop receipt format",
+            ));
+        }
+        Ok(Self(value.to_owned()))
     }
 
     pub(super) fn as_str(&self) -> &str {

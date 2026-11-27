@@ -1,6 +1,7 @@
 use super::{
     Cassette, Service, Source, account, batch, catalog, delegation, mutations, observe_blob,
-    observe_local, query, request_errors, reviewed_sas, sas_reads, service_reads, with_local,
+    observe_local, query, queue_messages, request_errors, reviewed_sas, sas_reads, service_reads,
+    table_entities, with_local,
 };
 use anyhow::{Context as _, Result, anyhow, ensure};
 use reqwest::{Url, blocking::Client, redirect::Policy};
@@ -164,6 +165,8 @@ pub(super) enum Record<'a> {
     Query(&'a query::QueryCassette),
     Catalog(&'a catalog::CatalogCassette),
     ServiceRead(&'a service_reads::ServiceReadCassette),
+    QueueMessages(&'a queue_messages::MessageCassette),
+    TableEntities(&'a table_entities::EntityCassette),
 }
 
 pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
@@ -181,6 +184,8 @@ pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
         Record::Query(_) => query::CASE,
         Record::Catalog(cassette) => cassette.case.file_stem(),
         Record::ServiceRead(cassette) => cassette.case.file_stem(),
+        Record::QueueMessages(cassette) => cassette.case.file_stem(),
+        Record::TableEntities(cassette) => cassette.case.file_stem(),
     };
     let name = format!("{scenario}-{}.json", Uuid::new_v4().simple());
     let target = directory.join(name);
@@ -573,6 +578,80 @@ fn check_live_blob_mutation_page_resize_sequence() -> Result<()> {
 #[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
 fn check_live_blob_mutation_append_sealing() -> Result<()> {
     live_mutation(mutations::Case::AppendSealing)
+}
+
+fn live_queue_messages(case: queue_messages::Case) -> Result<()> {
+    run_live(
+        Service::Queue,
+        || queue_messages::reviewed(case),
+        |client, _, endpoint, bearer| {
+            queue_messages::observe(client, endpoint, bearer, Source::Azure, case)
+        },
+        || queue_messages::local(case),
+        queue_messages::MessageCassette::compare,
+        |azure| {
+            azure.validate()?;
+            save_azure(Record::QueueMessages(azure))
+        },
+    )
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_deep_queue_receipts() -> Result<()> {
+    live_queue_messages(queue_messages::Case::Receipts)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_deep_queue_visibility() -> Result<()> {
+    live_queue_messages(queue_messages::Case::Visibility)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_deep_queue_expiration() -> Result<()> {
+    live_queue_messages(queue_messages::Case::Expiration)
+}
+
+fn live_table_entities(case: table_entities::Case) -> Result<()> {
+    run_live(
+        Service::Table,
+        || table_entities::reviewed(case),
+        |client, _, endpoint, bearer| {
+            table_entities::observe(client, endpoint, bearer, Source::Azure, case)
+        },
+        || table_entities::local(case),
+        table_entities::EntityCassette::compare,
+        |azure| {
+            azure.validate()?;
+            save_azure(Record::TableEntities(azure))
+        },
+    )
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_deep_table_lifecycle() -> Result<()> {
+    live_table_entities(table_entities::Case::Lifecycle)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_deep_table_upsert() -> Result<()> {
+    live_table_entities(table_entities::Case::Upsert)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_deep_table_query() -> Result<()> {
+    live_table_entities(table_entities::Case::Query)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_deep_table_transactions() -> Result<()> {
+    live_table_entities(table_entities::Case::Transactions)
 }
 
 fn live_service_reads(case: service_reads::Case) -> Result<()> {

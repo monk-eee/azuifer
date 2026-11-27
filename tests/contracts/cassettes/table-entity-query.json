@@ -1,0 +1,171 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "query",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "typed",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "json_no_metadata",
+      "etag": "missing",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "rows",
+        "matches": true,
+        "rows": 1
+      }
+    },
+    {
+      "step": "selected",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "json_no_metadata",
+      "etag": "missing",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "rows",
+        "matches": true,
+        "rows": 1
+      }
+    },
+    {
+      "step": "key_filter",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "json_no_metadata",
+      "etag": "missing",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "rows",
+        "matches": true,
+        "rows": 1
+      }
+    },
+    {
+      "step": "escaped",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "json_no_metadata",
+      "etag": "missing",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "rows",
+        "matches": true,
+        "rows": 1
+      }
+    },
+    {
+      "step": "first_page",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "json_no_metadata",
+      "etag": "missing",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "matches",
+      "next_row": "matches",
+      "body": {
+        "kind": "rows",
+        "matches": true,
+        "rows": 1
+      }
+    },
+    {
+      "step": "next_page",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "json_no_metadata",
+      "etag": "missing",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "rows",
+        "matches": true,
+        "rows": 1
+      }
+    },
+    {
+      "step": "empty_page",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "json_no_metadata",
+      "etag": "missing",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "rows",
+        "matches": true,
+        "rows": 0
+      }
+    },
+    {
+      "step": "unsupported",
+      "status": 501,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "json_no_metadata",
+      "etag": "missing",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "error",
+        "code": "not_implemented",
+        "english": true,
+        "message_matches": true,
+        "correlation": "matches",
+        "extra_properties": false
+      }
+    }
+  ]
+}

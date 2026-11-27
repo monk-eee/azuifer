@@ -524,8 +524,7 @@ fn matching_message(
     match found {
         Some((_, _, Some(expires))) if expires <= now => Err(QueueError::MessageNotFound),
         Some((seq, current, _)) if current == receipt.as_str() => Ok(seq),
-        Some(_) => Err(QueueError::PopReceiptMismatch),
-        None => Err(QueueError::MessageNotFound),
+        _ => Err(QueueError::MessageNotFound),
     }
 }
 
@@ -611,25 +610,25 @@ mod tests {
             .await
             .unwrap()
             .remove(0);
-        let stale = PopReceipt::parse(&first.pop_receipt);
+        let stale = PopReceipt::parse(&first.pop_receipt).unwrap();
         assert_eq!(
             store
                 .delete_message(account(), "q".into(), put.id.clone(), stale.clone())
                 .await,
-            Err(QueueError::PopReceiptMismatch)
+            Err(QueueError::MessageNotFound)
         );
         assert_eq!(
             store
                 .update_message(account(), "q".into(), put.id.clone(), stale, 0, None)
                 .await,
-            Err(QueueError::PopReceiptMismatch)
+            Err(QueueError::MessageNotFound)
         );
         let (updated, _) = store
             .update_message(
                 account(),
                 "q".into(),
                 put.id.clone(),
-                PopReceipt::parse(&second.pop_receipt),
+                PopReceipt::parse(&second.pop_receipt).unwrap(),
                 0,
                 Some("new".into()),
             )
@@ -644,13 +643,18 @@ mod tests {
                 account(),
                 "q".into(),
                 put.id.clone(),
-                PopReceipt::parse(&updated),
+                PopReceipt::parse(&updated).unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(
             store
-                .delete_message(account(), "q".into(), put.id, PopReceipt::parse(&updated))
+                .delete_message(
+                    account(),
+                    "q".into(),
+                    put.id,
+                    PopReceipt::parse(&updated).unwrap()
+                )
                 .await,
             Err(QueueError::MessageNotFound)
         );

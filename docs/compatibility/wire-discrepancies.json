@@ -612,9 +612,204 @@
         }
       ],
       "status": "observed"
+    },
+    {
+      "id": "WD-030",
+      "service": "table",
+      "operation": "Insert Entity / Update Entity / Query Entities",
+      "category": "live_vs_docs",
+      "summary": "Recorded Table entity errors carry the code in OData JSON, not in x-ms-error-code.",
+      "expected_by_docs_or_sdk": "The general Learn storage error page says failed operations from version 2017-07-29 onward also return the code in x-ms-error-code.",
+      "observed_behavior": "At 2023-11-03 with Bearer authentication and odata=nometadata, duplicate insert returns 409 EntityAlreadyExists, stale replacement returns 412 UpdateConditionNotSatisfied, and the unsupported startswith query returns 501 NotImplemented. All three omit x-ms-error-code. This does not describe authorization failures.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/32af9f943b160c3276331209dad4fd0d80cdf078/docs-ref-conceptual/storageservices/Status-and-Error-Codes2.md",
+          "detail": "The general error section specifies x-ms-error-code on failed operations starting in 2017-07-29."
+        },
+        {
+          "kind": "live",
+          "reference": "b6ff8687285c8c4fd034ef16f39405a6b8250e5c:tests/contracts/cassettes/table-entity-lifecycle.json#duplicate",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=409, error_header=missing, body.code=entity_already_exists."
+        },
+        {
+          "kind": "live",
+          "reference": "b6ff8687285c8c4fd034ef16f39405a6b8250e5c:tests/contracts/cassettes/table-entity-lifecycle.json#stale_replace",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=412, error_header=missing, body.code=update_condition_not_satisfied."
+        },
+        {
+          "kind": "live",
+          "reference": "b6ff8687285c8c4fd034ef16f39405a6b8250e5c:tests/contracts/cassettes/table-entity-query.json#unsupported",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=501, error_header=missing, body.code=not_implemented."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-031",
+      "service": "table",
+      "operation": "Merge Entity / Update Entity",
+      "category": "undocumented_live",
+      "summary": "Azure echoes an explicit return-no-content preference on the recorded merge and replace, including a stale replacement failure.",
+      "expected_by_docs_or_sdk": "Learn documents Preference-Applied for insert response echo; the Merge Entity and Update Entity response sections do not describe the header.",
+      "observed_behavior": "With Prefer: return-no-content, the recorded 204 merge and replacement and the 412 stale replacement carry Preference-Applied: return-no-content.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/ede20618bc9a933eedfaa72d22c76ef581326087/docs-ref-conceptual/storageservices/Merge-Entity.md#response-headers",
+          "detail": "Merge response headers do not describe Preference-Applied."
+        },
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/ede20618bc9a933eedfaa72d22c76ef581326087/docs-ref-conceptual/storageservices/Update-Entity2.md#response-headers",
+          "detail": "Update response headers do not describe Preference-Applied."
+        },
+        {
+          "kind": "live",
+          "reference": "b6ff8687285c8c4fd034ef16f39405a6b8250e5c:tests/contracts/cassettes/table-entity-lifecycle.json#merge",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=204 and preference=matches on the merge; replace records the same markers."
+        },
+        {
+          "kind": "live",
+          "reference": "b6ff8687285c8c4fd034ef16f39405a6b8250e5c:tests/contracts/cassettes/table-entity-lifecycle.json#stale_replace",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=412 and preference=matches."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-032",
+      "service": "table",
+      "operation": "Entity Group Transactions",
+      "category": "undocumented_live",
+      "summary": "Table changesets do not echo Content-ID supplied only on the MIME part.",
+      "expected_by_docs_or_sdk": "Learn's batch example sends Content-ID in the embedded HTTP request and shows it in the embedded response. It does not show the response when Content-ID is sent only in the MIME wrapper.",
+      "observed_behavior": "With MIME-only IDs, neither the two embedded 204 responses nor the single failed 412 response echoes the IDs. The 412 still has an index-1 prefix in the OData message. The outer HTTP status is 202.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/ede20618bc9a933eedfaa72d22c76ef581326087/docs-ref-conceptual/storageservices/Performing-Entity-Group-Transactions.md",
+          "detail": "Examples use the embedded HTTP header, not a MIME-only ID."
+        },
+        {
+          "kind": "live",
+          "reference": "b6ff8687285c8c4fd034ef16f39405a6b8250e5c:tests/contracts/cassettes/table-entity-transactions.json#commit",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "Both 204 parts have mime_content_id=null and http_content_id=null."
+        },
+        {
+          "kind": "live",
+          "reference": "b6ff8687285c8c4fd034ef16f39405a6b8250e5c:tests/contracts/cassettes/table-entity-transactions.json#rollback",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "The one 412 part has no Content-ID and its error message names the second operation with the zero-based prefix '1:'."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-033",
+      "service": "table",
+      "operation": "Update Entity",
+      "category": "undocumented_live",
+      "summary": "The recorded 2023-11-03 replacement omits DataServiceVersion even when the request sets it to 3.0.",
+      "expected_by_docs_or_sdk": "The older Learn sample response includes DataServiceVersion. The response header table does not say whether newer JSON responses return it.",
+      "observed_behavior": "A Bearer replacement using DataServiceVersion: 3.0 and odata=nometadata returned 204 without DataServiceVersion. The corresponding 412 stale replacement also omitted it.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/ede20618bc9a933eedfaa72d22c76ef581326087/docs-ref-conceptual/storageservices/Update-Entity2.md#sample-response",
+          "detail": "The sample includes the legacy response header; the response header table does not list it."
+        },
+        {
+          "kind": "live",
+          "reference": "b6ff8687285c8c4fd034ef16f39405a6b8250e5c:tests/contracts/cassettes/table-entity-lifecycle.json#replace",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=204 and dataserviceversion=missing; stale_replace records the same absence at 412."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-034",
+      "service": "table",
+      "operation": "Query Entities",
+      "category": "undocumented_live",
+      "summary": "A startswith filter returns 501 NotImplemented rather than a filter syntax error.",
+      "expected_by_docs_or_sdk": "Learn lists supported comparison operators and demonstrates prefix matching via comparisons, but it does not specify the response for an unsupported startswith filter.",
+      "observed_behavior": "For $filter=startswith(RowKey, 'a'), Azure returns 501 NotImplemented in negotiated OData JSON.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/ede20618bc9a933eedfaa72d22c76ef581326087/docs-ref-conceptual/storageservices/Querying-Tables-and-Entities.md#supported-comparison-operators",
+          "detail": "Lists the supported comparisons but not the unsupported-function response."
+        },
+        {
+          "kind": "live",
+          "reference": "b6ff8687285c8c4fd034ef16f39405a6b8250e5c:tests/contracts/cassettes/table-entity-query.json#unsupported",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=501, media=json_no_metadata, body.code=not_implemented."
+        }
+      ],
+      "status": "observed"
     }
   ],
   "observations": [
+    {
+      "id": "WD-035",
+      "service": "queue",
+      "operation": "Delete Message",
+      "category": "documented_match",
+      "summary": "Stale issued pop receipts return 404 on deletion, as documented.",
+      "expected_by_docs_or_sdk": "The Delete Message operation specifies 404 when an issued pop receipt no longer matches.",
+      "observed_behavior": "Deleting with an issued receipt invalidated by an update or by a later dequeue returns 404 MessageNotFound. This does not describe malformed receipts.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/2461c63e2a14e5af9d36a3b420a5482dc20343a1/docs-ref-conceptual/storageservices/Delete-Message2.md#remarks",
+          "detail": "The operation's remarks describe receipt invalidation and the resulting 404."
+        },
+        {
+          "kind": "live",
+          "reference": "b6ff8687285c8c4fd034ef16f39405a6b8250e5c:tests/contracts/cassettes/queue-message-receipts.json#stale",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=404 and error_header=message_not_found after the update rotates the receipt."
+        },
+        {
+          "kind": "live",
+          "reference": "b6ff8687285c8c4fd034ef16f39405a6b8250e5c:tests/contracts/cassettes/queue-message-visibility.json#stale",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=404 and error_header=message_not_found for the receipt from the preceding dequeue."
+        }
+      ],
+      "status": "documented_match"
+    },
     {
       "id": "WD-002",
       "service": "blob",

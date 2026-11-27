@@ -1,0 +1,213 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "lifecycle",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "insert",
+      "status": 204,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "missing",
+      "etag": "valid",
+      "preference": "matches",
+      "location": "matches",
+      "dataserviceid": "matches",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "empty",
+        "empty": true
+      }
+    },
+    {
+      "step": "duplicate",
+      "status": 409,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "json_no_metadata",
+      "etag": "missing",
+      "preference": "matches",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "error",
+        "code": "entity_already_exists",
+        "english": true,
+        "message_matches": true,
+        "correlation": "matches",
+        "extra_properties": false
+      }
+    },
+    {
+      "step": "read_initial",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "json_no_metadata",
+      "etag": "matches",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "rows",
+        "matches": true,
+        "rows": 1
+      }
+    },
+    {
+      "step": "merge",
+      "status": 204,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "missing",
+      "etag": "changed",
+      "preference": "matches",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "empty",
+        "empty": true
+      }
+    },
+    {
+      "step": "read_merged",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "json_no_metadata",
+      "etag": "matches",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "rows",
+        "matches": true,
+        "rows": 1
+      }
+    },
+    {
+      "step": "stale_replace",
+      "status": 412,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "json_no_metadata",
+      "etag": "missing",
+      "preference": "matches",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "error",
+        "code": "update_condition_not_satisfied",
+        "english": true,
+        "message_matches": true,
+        "correlation": "matches",
+        "extra_properties": false
+      }
+    },
+    {
+      "step": "replace",
+      "status": 204,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "missing",
+      "etag": "changed",
+      "preference": "matches",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "empty",
+        "empty": true
+      }
+    },
+    {
+      "step": "read_replaced",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "json_no_metadata",
+      "etag": "matches",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "rows",
+        "matches": true,
+        "rows": 1
+      }
+    },
+    {
+      "step": "delete",
+      "status": 204,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "missing",
+      "etag": "missing",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "empty",
+        "empty": true
+      }
+    },
+    {
+      "step": "read_missing",
+      "status": 404,
+      "api_version": "matches",
+      "request_id": "matches",
+      "dataserviceversion": "missing",
+      "error_header": "missing",
+      "media": "json_no_metadata",
+      "etag": "missing",
+      "preference": "missing",
+      "location": "missing",
+      "dataserviceid": "missing",
+      "next_partition": "missing",
+      "next_row": "missing",
+      "body": {
+        "kind": "error",
+        "code": "resource_not_found",
+        "english": true,
+        "message_matches": true,
+        "correlation": "matches",
+        "extra_properties": false
+      }
+    }
+  ]
+}

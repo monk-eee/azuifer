@@ -60,7 +60,7 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "POST /$batch with multipart/mixed: one change set of at most 100 insert, update, merge, upsert and delete operations on one table and partition, applied in a single SQLite transaction (all or nothing), or one lone query. A failing operation returns 202 with one failed part (actual status and an 'N:' message prefix naming the zero-based index; Content-ID echoed). Cross-partition and duplicate-row violations are reported the same way. Differences: all operations are parsed and validated before any executes, so a structural error at a later index can be reported ahead of an execution error at an earlier one; the 4 MiB payload bound is a 5 MiB request body bound; multiple change sets are rejected."
+      "notes": "POST /$batch with multipart/mixed: one change set of at most 100 writes on one table and partition, applied atomically, or one lone query. The 2023-11-03 Bearer recording verifies two committed inserts, rollback of the first write when the second ETag is stale, and mixed-partition rejection. A 202 failure has one part with actual status and an 'N:' message prefix naming the zero-based failed operation. Content-ID is echoed if supplied in the embedded HTTP request, not from its MIME wrapper. Differences: eager structural validation can change error precedence; the 4 MiB payload bound is a 5 MiB request body bound; multiple change sets are rejected."
     },
     {
       "name": "Get Table ACL",
@@ -160,7 +160,7 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "GET /{table}() and GET /{table}(PartitionKey='p',RowKey='r') with $filter (eq ne gt ge lt le and or not, parentheses, at most 15 comparisons, string/Int32/Int64/Double/Boolean/DateTime/Guid/Binary literals), $select (absent properties are null), $top (maximum 1000) and NextPartitionKey/NextRowKey continuation. The incomplete-filter Azure recording checks 400 InvalidInput in negotiated OData JSON with the missing operand's position. Successful entity queries and filter functions are not recorded. Differences: comparisons require identical Edm types (an Int64 property never equals an Int32 literal), keys sort by UTF-8 bytes rather than UTF-16, a missing property matches only ne, there is no 5 second query timeout or partition-boundary short page, and $orderby, $skip, $expand, $count and filter functions return 501 or 400. A service SAS with spk/epk limits results to its range."
+      "notes": "GET /{table}() and GET /{table}(PartitionKey='p',RowKey='r') with $filter (eq ne gt ge lt le and or not, parentheses, at most 15 comparisons, string/Int32/Int64/Double/Boolean/DateTime/Guid/Binary literals), $select (absent properties are null), $top (maximum 1000) and NextPartitionKey/NextRowKey continuation. Bearer recordings verify nometadata typed results, projections, escaping, continuation, 400 InvalidInput for an incomplete filter and 501 NotImplemented for startswith. Differences: comparisons require identical Edm types, keys sort by UTF-8 bytes rather than UTF-16, a missing property matches only ne, and there is no 5 second query timeout or partition-boundary short page. Other unsupported query operators return 501 or 400. A service SAS with spk/epk limits results to its range."
     },
     {
       "name": "Query Tables",

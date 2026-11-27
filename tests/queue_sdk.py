@@ -105,7 +105,7 @@ def main():
     check(not list(queue.receive_messages(max_messages=1)), "invisible while leased")
     updated = queue.update_message(received[0], content="changed", visibility_timeout=0)
     check(updated.pop_receipt != received[0].pop_receipt, "new receipt on update")
-    expect(HttpResponseError, "PopReceiptMismatch",
+    expect(ResourceNotFoundError, "MessageNotFound",
            lambda: queue.delete_message(received[0].id, received[0].pop_receipt))
     again = list(queue.receive_messages(visibility_timeout=30, max_messages=1))
     check(again[0].content == "changed" and again[0].dequeue_count == 2, "updated message")

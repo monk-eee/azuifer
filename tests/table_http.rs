@@ -949,7 +949,6 @@ fn queries_filter_select_and_continue_across_partitions() {
     for bad in [
         "N eq",
         "N eq 1 foo",
-        "startswith(Name,'n') eq true",
         "N eq M",
         "(N eq 1",
         &vec!["N eq 1"; 16].join(" or "),
@@ -961,6 +960,11 @@ fn queries_filter_select_and_continue_across_partitions() {
             "{bad}"
         );
     }
+    let unsupported = query(&format!("$filter={}", encode("startswith(Name,'n')")));
+    assert_eq!(
+        (unsupported.status, unsupported.error_code().as_str()),
+        (501, "NotImplemented")
+    );
     assert_eq!(query("$top=0").status, 400);
     assert_eq!(query("$top=abc").status, 400);
     assert_eq!(query("NextPartitionKey=garbage").status, 400);
@@ -1118,7 +1122,7 @@ fn batches_are_atomic_and_report_the_failing_index() {
     );
     assert!(ok.text.contains("boundary=changesetresponse_"));
     assert_eq!(status_lines(&ok), ["HTTP/1.1 204 No Content"; 4]);
-    assert!(ok.text.contains("Content-ID: 1") && ok.text.contains("Content-ID: 4"));
+    assert!(!ok.text.contains("Content-ID:"));
     assert!(ok.text.contains("ETag: W/\"datetime'"));
     assert!(ok.text.contains("Preference-Applied: return-no-content"));
     assert_eq!(
@@ -1133,12 +1137,15 @@ fn batches_are_atomic_and_report_the_failing_index() {
         &[(
             "POST",
             "/batch".into(),
-            "",
+            "Content-ID: 7\r\n",
             r#"{"PartitionKey":"p","RowKey":"echo","V":5}"#,
         )],
     );
     assert!(
-        content.text.contains("HTTP/1.1 201 Created") && content.text.contains(r#""V":5"#),
+        content
+            .text
+            .contains("HTTP/1.1 201 Created\r\nContent-ID: 7\r\n")
+            && content.text.contains(r#""V":5"#),
         "{}",
         content.text
     );
@@ -1174,7 +1181,7 @@ fn batches_are_atomic_and_report_the_failing_index() {
             .unwrap()
             .starts_with("2:The specified entity already exists.")
     );
-    assert!(failed.text.contains("Content-ID: 3"));
+    assert!(!failed.text.contains("Content-ID:"));
     assert_eq!(
         server.get("/batch()").json()["value"]
             .as_array()

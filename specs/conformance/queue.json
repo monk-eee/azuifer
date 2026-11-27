@@ -34,7 +34,7 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "DELETE /{account}/{queue}/messages/{messageid}?popreceipt= returns 204. 404 MessageNotFound when the message is gone or expired, 400 PopReceiptMismatch when the receipt is not the current one, 400 MissingRequiredQueryParameter when popreceipt is absent. A service SAS needs the p permission."
+      "notes": "DELETE /{account}/{queue}/messages/{messageid}?popreceipt= returns 204. A missing or expired message or stale issued pop receipt returns 404 MessageNotFound, verified for stale receipts at 2023-11-03. Malformed Base64 is 400 InvalidQueryParameterValue; missing popreceipt is 400 MissingRequiredQueryParameter. A service SAS needs the p permission."
     },
     {
       "name": "Delete Queue",
@@ -146,7 +146,7 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "POST /{account}/{queue}/messages returns 201 with MessageId, InsertionTime, ExpirationTime, PopReceipt and TimeNextVisible. visibilitytimeout 0-604800 and messagettl >= 1 or -1 (never expires, reported as 9999-12-31); visibilitytimeout must be below messagettl. Azure recordings at 2023-11-03 verify 413 RequestBodyTooLarge with MaxLimit=65536 for 65537 bytes of ASCII MessageText and 400 OutOfRangeQueryParameterValue with echoed bounds for visibilitytimeout=604801. Successful message writes are not recorded. Base64 encoding is a client concern. A service SAS needs the a permission."
+      "notes": "POST /{account}/{queue}/messages returns 201 with MessageId, InsertionTime, ExpirationTime, PopReceipt and TimeNextVisible. visibilitytimeout 0-604800 and messagettl >= 1 or -1 (never expires, reported as 9999-12-31); visibilitytimeout must be below messagettl. Bearer recordings at 2023-11-03 verify successful writes with ordinary, delayed and short-TTL messages, 413 RequestBodyTooLarge for 65537 bytes of ASCII MessageText and 400 OutOfRangeQueryParameterValue for visibilitytimeout=604801. Base64 encoding is a client concern. A service SAS needs the a permission."
     },
     {
       "name": "Set Queue ACL",
@@ -191,7 +191,7 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "PUT /{account}/{queue}/messages/{messageid}?popreceipt=&visibilitytimeout= (0-604800, required) with an optional QueueMessage body returns 204 with new x-ms-popreceipt and x-ms-time-next-visible. An empty body keeps the text. The new visibility time is not capped at the message expiry. A service SAS needs the u permission."
+      "notes": "PUT /{account}/{queue}/messages/{messageid}?popreceipt=&visibilitytimeout= (0-604800, required) with an optional QueueMessage body returns 204 with new x-ms-popreceipt and x-ms-time-next-visible. Empty body keeps the text. Stale issued receipts return 404 MessageNotFound. The new visibility time is not capped at the message expiry. A service SAS needs the u permission."
     }
   ]
 }

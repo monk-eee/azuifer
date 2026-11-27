@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "visibility",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "put",
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "media": "xml",
+      "body": {
+        "kind": "messages",
+        "count": 1,
+        "identity": "matches",
+        "receipt": "matches",
+        "ttl_seconds": 60,
+        "visibility": "matches",
+        "dequeue_count": null,
+        "text": "missing"
+      }
+    },
+    {
+      "step": "hidden",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "media": "xml",
+      "body": {
+        "kind": "messages",
+        "count": 0,
+        "identity": "missing",
+        "receipt": "missing",
+        "ttl_seconds": null,
+        "visibility": "missing",
+        "dequeue_count": null,
+        "text": "missing"
+      }
+    },
+    {
+      "step": "receive",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "media": "xml",
+      "body": {
+        "kind": "messages",
+        "count": 1,
+        "identity": "matches",
+        "receipt": "matches",
+        "ttl_seconds": 60,
+        "visibility": "matches",
+        "dequeue_count": 1,
+        "text": "matches"
+      }
+    },
+    {
+      "step": "redeliver",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "media": "xml",
+      "body": {
+        "kind": "messages",
+        "count": 1,
+        "identity": "matches",
+        "receipt": "matches",
+        "ttl_seconds": 60,
+        "visibility": "matches",
+        "dequeue_count": 2,
+        "text": "matches"
+      }
+    },
+    {
+      "step": "peek_redelivered",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "media": "xml",
+      "body": {
+        "kind": "messages",
+        "count": 1,
+        "identity": "matches",
+        "receipt": "missing",
+        "ttl_seconds": 60,
+        "visibility": "missing",
+        "dequeue_count": 2,
+        "text": "matches"
+      }
+    },
+    {
+      "step": "stale",
+      "status": 404,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "message_not_found",
+      "media": "xml",
+      "body": {
+        "kind": "error",
+        "code": "message_not_found",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    }
+  ]
+}

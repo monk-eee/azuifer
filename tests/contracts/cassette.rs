@@ -140,6 +140,12 @@ pub(super) enum ErrorCode {
     RequestBodyTooLarge,
     AtomFormatNotSupported,
     CorsPreflightFailure,
+    MessageNotFound,
+    PopReceiptMismatch,
+    EntityAlreadyExists,
+    UpdateConditionNotSatisfied,
+    NotImplemented,
+    CommandsInBatchActOnDifferentPartitions,
     Other,
 }
 
@@ -186,6 +192,14 @@ impl ErrorCode {
             Some("RequestBodyTooLarge") => Self::RequestBodyTooLarge,
             Some("AtomFormatNotSupported") => Self::AtomFormatNotSupported,
             Some("CorsPreflightFailure") => Self::CorsPreflightFailure,
+            Some("MessageNotFound") => Self::MessageNotFound,
+            Some("PopReceiptMismatch") => Self::PopReceiptMismatch,
+            Some("EntityAlreadyExists") => Self::EntityAlreadyExists,
+            Some("UpdateConditionNotSatisfied") => Self::UpdateConditionNotSatisfied,
+            Some("NotImplemented") => Self::NotImplemented,
+            Some("CommandsInBatchActOnDifferentPartitions") => {
+                Self::CommandsInBatchActOnDifferentPartitions
+            }
             Some(_) => Self::Other,
         }
     }

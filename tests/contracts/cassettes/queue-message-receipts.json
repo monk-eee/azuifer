@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "receipts",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "put",
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "media": "xml",
+      "body": {
+        "kind": "messages",
+        "count": 1,
+        "identity": "matches",
+        "receipt": "matches",
+        "ttl_seconds": 604800,
+        "visibility": "matches",
+        "dequeue_count": null,
+        "text": "missing"
+      }
+    },
+    {
+      "step": "peek",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "media": "xml",
+      "body": {
+        "kind": "messages",
+        "count": 1,
+        "identity": "matches",
+        "receipt": "missing",
+        "ttl_seconds": 604800,
+        "visibility": "missing",
+        "dequeue_count": 0,
+        "text": "matches"
+      }
+    },
+    {
+      "step": "receive",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "media": "xml",
+      "body": {
+        "kind": "messages",
+        "count": 1,
+        "identity": "matches",
+        "receipt": "matches",
+        "ttl_seconds": 604800,
+        "visibility": "matches",
+        "dequeue_count": 1,
+        "text": "matches"
+      }
+    },
+    {
+      "step": "hidden",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "media": "xml",
+      "body": {
+        "kind": "messages",
+        "count": 0,
+        "identity": "missing",
+        "receipt": "missing",
+        "ttl_seconds": null,
+        "visibility": "missing",
+        "dequeue_count": null,
+        "text": "missing"
+      }
+    },
+    {
+      "step": "update",
+      "status": 204,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "media": "missing",
+      "body": {
+        "kind": "update",
+        "empty": true,
+        "receipt_rotated": "matches",
+        "visibility": "matches"
+      }
+    },
+    {
+      "step": "peek_updated",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "media": "xml",
+      "body": {
+        "kind": "messages",
+        "count": 1,
+        "identity": "matches",
+        "receipt": "missing",
+        "ttl_seconds": 604800,
+        "visibility": "missing",
+        "dequeue_count": 1,
+        "text": "matches"
+      }
+    },
+    {
+      "step": "stale",
+      "status": 404,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "message_not_found",
+      "media": "xml",
+      "body": {
+        "kind": "error",
+        "code": "message_not_found",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "delete",
+      "status": 204,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "media": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "empty",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "error_header": "missing",
+      "media": "xml",
+      "body": {
+        "kind": "messages",
+        "count": 0,
+        "identity": "missing",
+        "receipt": "missing",
+        "ttl_seconds": null,
+        "visibility": "missing",
+        "dequeue_count": null,
+        "text": "missing"
+      }
+    }
+  ]
+}

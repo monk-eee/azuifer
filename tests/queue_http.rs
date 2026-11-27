@@ -553,7 +553,7 @@ fn message_operations_receipts_and_errors() {
     error(
         server.call(Method::DELETE, &target("bogus", ""), &[], ""),
         400,
-        "PopReceiptMismatch",
+        "InvalidQueryParameterValue",
     );
     error(
         server.call(
@@ -563,7 +563,7 @@ fn message_operations_receipts_and_errors() {
             &message_xml("x"),
         ),
         400,
-        "PopReceiptMismatch",
+        "InvalidQueryParameterValue",
     );
     error(
         server.call(Method::DELETE, &format!("/messages/messages/{id}"), &[], ""),
@@ -591,8 +591,18 @@ fn message_operations_receipts_and_errors() {
     assert_http_date(update.headers()["x-ms-time-next-visible"].to_str().unwrap());
     error(
         server.call(Method::DELETE, &target(&receipt, ""), &[], ""),
-        400,
-        "PopReceiptMismatch",
+        404,
+        "MessageNotFound",
+    );
+    error(
+        server.call(
+            Method::PUT,
+            &target(&receipt, "&visibilitytimeout=0"),
+            &[],
+            "",
+        ),
+        404,
+        "MessageNotFound",
     );
 
     let again = server.messages("messages", "?visibilitytimeout=60");
@@ -630,7 +640,7 @@ fn message_operations_receipts_and_errors() {
     error(
         server.call(
             Method::DELETE,
-            "/messages/messages/no-such-id?popreceipt=x",
+            &format!("/messages/messages/no-such-id?{}", encoded(&after_update)),
             &[],
             "",
         ),
