@@ -1,0 +1,15 @@
+repos:
+  - repo: local
+    hooks:
+      - id: wire-discrepancies
+        name: Validate wire discrepancy evidence
+        entry: python scripts/audit-wire-discrepancies.py
+        language: python
+        pass_filenames: false
+        files: ^(\.github/governor\.(json|md)|docs/compatibility/wire-discrepancies\.json|scripts/(audit-wire-discrepancies|test_audit_wire_discrepancies)\.py)$
+      - id: wire-discrepancy-tests
+        name: Test wire discrepancy audit
+        entry: python -m unittest discover -s scripts -p test_audit_wire_discrepancies.py
+        language: python
+        pass_filenames: false
+        files: ^(\.github/governor\.(json|md)|docs/compatibility/wire-discrepancies\.json|scripts/(audit-wire-discrepancies|test_audit_wire_discrepancies)\.py)$

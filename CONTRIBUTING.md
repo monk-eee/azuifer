@@ -19,3 +19,24 @@ Update the matching [service manifest](specs/conformance) alongside changes to s
 Use the [Azure contract tests](docs/compatibility/azure-contracts.md) to record a scenario against a dedicated test account and replay its response contract offline. Never publish raw traffic or live credentials. Review the normalized cassette and verify its provenance before promoting it to an offline fixture.
 
 For docs-only changes, check that links resolve, ADRs are indexed, and public docs contain no credentials or private references.
+
+## Governor and wire evidence
+
+The [governor rules](.github/governor.md) and [configuration](.github/governor.json)
+extend the installed multi-agent governor without changing its four core gates.
+Add scoped evidence to the [wire discrepancy ledger](docs/compatibility/wire-discrepancies.json)
+when Learn, an official SDK, and live Azure disagree. Documented matches and
+unsubstantiated leads belong in `observations`, not the running discrepancy tally.
+Ledger validation does not establish Azuifer parity.
+
+Run these stdlib-only checks with an active virtualenv's Python (or use `uv run`
+for the audit script):
+
+```sh
+python scripts/audit-wire-discrepancies.py
+python -m unittest discover -s scripts -p test_audit_wire_discrepancies.py
+```
+
+Both run in CI on Linux, macOS, and Windows. The same checks are available through
+the [local pre-commit hooks](.pre-commit-config.yaml) with `pre-commit run --all-files`
+when pre-commit is installed in your development environment.

@@ -12,13 +12,18 @@ import json
 from pathlib import Path
 import re
 import sys
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 LEDGER = ROOT / "docs" / "compatibility" / "wire-discrepancies.json"
 VALID_SERVICES = frozenset({"blob", "dfs", "file", "queue", "table", "shared"})
 VALID_STATUSES = frozenset(
-    {"aligned_in_azuifer", "awaiting_live_recording", "open_gap", "wont_fix"}
+    {"observed", "awaiting_live_recording", "open_gap", "wont_fix"}
 )
+VALID_CATEGORIES = frozenset(
+    {"live_vs_docs", "sdk_vs_docs", "live_vs_sdk", "docs_inconsistency", "undocumented_live"}
+)
+OBSERVATION_CATEGORIES = frozenset({"documented_match", "needs_evidence"})
 REQUIRED_FIELDS = (
     "id",
     "service",
@@ -27,32 +32,103 @@ REQUIRED_FIELDS = (
     "summary",
     "expected_by_docs_or_sdk",
     "observed_behavior",
-    "evidence",
     "status",
 )
 ID_RE = re.compile(r"^WD-\d{3,}$")
+LIVE_REFERENCE_RE = re.compile(r"^[0-9a-f]{40}:tests/contracts/cassettes/[^:#]+\.json#[\w-]+$")
+EVIDENCE_KINDS = {
+    "live_vs_docs": {"live", "docs"},
+    "sdk_vs_docs": {"sdk", "docs"},
+    "live_vs_sdk": {"live", "sdk"},
+    "docs_inconsistency": {"docs"},
+    "undocumented_live": {"live", "docs"},
+    "documented_match": {"docs"},
+    "needs_evidence": {"docs"},
+}
+
+
+def validate_evidence(entry: dict[str, object], label: str) -> list[str]:
+    errors: list[str] = []
+    evidence = entry.get("evidence")
+    if not isinstance(evidence, list) or not evidence:
+        return [f"{label}: evidence must be a non-empty list of sources"]
+    kinds: list[str] = []
+    for source in evidence:
+        if not isinstance(source, dict):
+            errors.append(f"{label}: evidence source must be an object")
+            continue
+        kind = source.get("kind")
+        if kind not in ("docs", "sdk", "live"):
+            errors.append(f"{label}: invalid evidence kind")
+            continue
+        kinds.append(kind)
+        reference = source.get("reference")
+        detail = source.get("detail")
+        if not isinstance(detail, str) or not detail.strip():
+            errors.append(f"{label}: evidence requires a non-empty detail")
+        if not isinstance(reference, str):
+            errors.append(f"{label}: evidence requires a reference")
+            continue
+        if kind == "live":
+            if not LIVE_REFERENCE_RE.fullmatch(reference):
+                errors.append(f"{label}: live evidence requires commit:path.json#step")
+            if source.get("source") != "azure":
+                errors.append(f"{label}: live evidence must have source=azure")
+            for field in ("api_version", "auth_mode"):
+                value = source.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(f"{label}: live evidence requires {field}")
+        else:
+            try:
+                url = urlparse(reference)
+            except ValueError:
+                errors.append(f"{label}: docs/SDK evidence requires a valid HTTPS URL")
+                continue
+            if url.scheme != "https" or not url.netloc:
+                errors.append(f"{label}: docs/SDK evidence requires an HTTPS URL")
+    category = entry.get("category")
+    required = EVIDENCE_KINDS.get(category) if isinstance(category, str) else None
+    if required and not required.issubset(kinds):
+        errors.append(f"{label}: evidence requires {', '.join(sorted(required))} sources")
+    if category == "docs_inconsistency" and kinds.count("docs") < 2:
+        errors.append(f"{label}: docs_inconsistency requires two documented claims")
+    return errors
 
 
 def validate(path: Path) -> tuple[list[dict[str, object]], list[str]]:
     errors: list[str] = []
-    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return [], [f"{path}: {exc}"]
     if not isinstance(data, dict):
         return [], ["ledger root must be a JSON object"]
+    if type(data.get("schema_version")) is not int or data["schema_version"] != 1:
+        errors.append("schema_version must be 1")
 
     categories = data.get("categories")
-    if not isinstance(categories, list) or not all(isinstance(c, str) for c in categories):
-        return [], ["'categories' must be a list of strings"]
-    allowed_categories = set(categories)
+    if (
+        not isinstance(categories, list)
+        or not all(isinstance(c, str) for c in categories)
+        or len(categories) != len(VALID_CATEGORIES)
+        or set(categories) != VALID_CATEGORIES
+    ):
+        errors.append("categories must list the five supported discrepancy categories once")
 
     entries = data.get("entries")
-    if not isinstance(entries, list):
-        return [], ["'entries' must be a list"]
+    observations = data.get("observations", [])
+    if not isinstance(entries, list) or not isinstance(observations, list):
+        return [], errors + ["entries and observations must be lists"]
 
+    valid_entries: list[dict[str, object]] = []
     seen_ids: set[str] = set()
-    for idx, entry in enumerate(entries):
+    for idx, entry in enumerate(entries + observations):
         if not isinstance(entry, dict):
             errors.append(f"entry[{idx}] must be an object")
             continue
+        is_discrepancy = idx < len(entries)
+        if is_discrepancy:
+            valid_entries.append(entry)
         for field in REQUIRED_FIELDS:
             val = entry.get(field)
             if not isinstance(val, str) or not val.strip():
@@ -68,13 +144,16 @@ def validate(path: Path) -> tuple[list[dict[str, object]], list[str]]:
         if service and service not in VALID_SERVICES:
             errors.append(f"{entry_id}: invalid service '{service}'")
         category = str(entry.get("category", ""))
-        if category and category not in allowed_categories:
+        allowed = VALID_CATEGORIES if is_discrepancy else OBSERVATION_CATEGORIES
+        if category and category not in allowed:
             errors.append(f"{entry_id}: invalid category '{category}'")
         status = str(entry.get("status", ""))
-        if status and status not in VALID_STATUSES:
+        allowed_statuses = VALID_STATUSES if is_discrepancy else OBSERVATION_CATEGORIES
+        if status and status not in allowed_statuses:
             errors.append(f"{entry_id}: invalid status '{status}'")
+        errors.extend(validate_evidence(entry, entry_id))
 
-    return entries, errors
+    return valid_entries, errors
 
 
 def main() -> int:
@@ -96,8 +175,10 @@ def main() -> int:
     cats = ", ".join(f"{k}={v}" for k, v in sorted(by_cat.items()))
     svcs = ", ".join(f"{k}={v}" for k, v in sorted(by_svc.items()))
     statuses = ", ".join(f"{k}={v}" for k, v in sorted(by_status.items()))
-    print(f"Wire discrepancies: total={len(entries)} | categories: {cats}")
-    print(f"  services: {svcs} | status: {statuses}")
+    print(
+        f"Wire discrepancies: total={len(entries)} | categories: {cats}"
+        f" | services: {svcs} | status: {statuses}"
+    )
     return 0
 
 

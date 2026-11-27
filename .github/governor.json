@@ -4,7 +4,6 @@
   "extra_checks": [
     {
       "name": "wire-discrepancies-ledger",
-      "when_exists": "scripts/audit-wire-discrepancies.py",
       "command": ["python", "scripts/audit-wire-discrepancies.py"]
     },
     {
