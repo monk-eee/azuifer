@@ -76,7 +76,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Deletes the current blob, a snapshot, or a version; x-ms-delete-snapshots include or only, otherwise SnapshotsPresent (Azure's code is BlobHasSnapshots). Requires the lease id while leased and supports conditions. Honors the account delete retention (soft delete, evaluated lazily against the clock) and versioning. Page and append blobs follow the same soft delete, version, and snapshot rules as block blobs. A legal hold or unexpired immutability policy refuses the delete. Deletes are synchronous."
+      "notes": "Deletes the current blob, a snapshot, or a version; x-ms-delete-snapshots include or only, otherwise SnapshotsPresent (Azure's code is BlobHasSnapshots). Requires the lease id while leased and supports conditions. Honors the account delete retention (soft delete, evaluated lazily against the clock) and versioning. Page and append blobs follow the same soft delete, version, and snapshot rules as block blobs. A legal hold or unexpired immutability policy refuses the delete. Deletes are synchronous. On an HNS account a directory with children answers 409 DirectoryIsNotEmpty (\"This operation is not permitted on a non-empty directory.\"), the code and message public AzCopy and SDK reports show for Azure; no recording of it exists here."
     },
     {
       "name": "Delete Blob Immutability Policy",
