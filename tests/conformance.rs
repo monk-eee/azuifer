@@ -70,6 +70,7 @@ fn markdown_export_shows_the_same_verified_and_unsupported_operations() {
     ));
     assert!(markdown.contains("## dfs (`2023-11-03`)"));
     assert!(markdown.contains("| Rename Path | known-difference |"));
-    assert!(markdown.contains("| Query Blob Contents | unsupported | - |"));
+    assert!(markdown.contains("| Query Blob Contents | known-difference |"));
+    assert!(markdown.contains("| Rename Container | unsupported | - |"));
     assert!(!markdown.contains("| exact |"));
 }

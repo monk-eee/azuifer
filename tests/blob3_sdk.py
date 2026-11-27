@@ -34,6 +34,8 @@ from azure.storage.blob import (
     BlobImmutabilityPolicyMode,
     BlobServiceClient,
     BlobType,
+    DelimitedJsonDialect,
+    DelimitedTextDialect,
     ImmutabilityPolicy,
     ResourceTypes,
     RetentionPolicy,
@@ -314,6 +316,44 @@ def tags_and_stats(ctx):
     port = ctx.blob_url.rsplit(":", 1)[1]
     secondary = requests.get(f"http://{ctx.account}-secondary.blob.localhost:{port}/?restype=service&comp=stats&{sas}")
     require(secondary.status_code == 200 and "<Status>live</Status>" in secondary.text, f"secondary {secondary.status_code} {secondary.text}")
+
+
+@check("query blob contents over delimited text and JSON")
+def query_contents(ctx):
+    people = ctx.blob("people.csv")
+    people.upload_blob(b"name,age\nann,31\nbob,25\ncy,40\n")
+    with_header = DelimitedTextDialect(has_header=True)
+    reader = people.query_blob(
+        "SELECT name FROM BlobStorage WHERE age > 30", blob_format=with_header, output_format=with_header
+    )
+    require(reader.readall() == b"ann\ncy\n", "filtered rows")
+    counted = people.query_blob("SELECT COUNT(*) FROM BlobStorage", blob_format=with_header)
+    require(counted.readall() == b"3\n", "aggregate")
+    as_json = people.query_blob(
+        "SELECT name, CAST(age AS INT) + 1 AS next FROM BlobStorage LIMIT 2",
+        blob_format=with_header,
+        output_format=DelimitedJsonDialect(),
+    )
+    require(
+        as_json.readall() == b'{"name":"ann","next":32}\n{"name":"bob","next":26}\n', "json output"
+    )
+    events = ctx.blob("events.json")
+    events.upload_blob(b'{"a":1,"b":{"c":"x"}}\n{"a":2,"b":{"c":"y"}}\n')
+    nested = events.query_blob(
+        "SELECT s.b.c FROM BlobStorage s WHERE s.a = 2",
+        blob_format=DelimitedJsonDialect(),
+        output_format=DelimitedTextDialect(),
+    )
+    require(nested.readall() == b"y\n", "json input")
+    errors = []
+    failing = people.query_blob(
+        "SELECT CAST(name AS INT) FROM BlobStorage",
+        blob_format=with_header,
+        on_error=errors.append,
+    )
+    failing.readall()
+    require(errors and errors[0].error == "CastFailed" and errors[0].is_fatal, f"error callback {errors}")
+    expect("ParseError", lambda: people.query_blob("SELEC 1 FROM BlobStorage"))
 
 
 @check("copy from an external http source (opt-in)")

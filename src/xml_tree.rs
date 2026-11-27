@@ -11,6 +11,8 @@ const MAX_NODES: usize = 4096;
 pub(crate) struct Node {
     pub(crate) name: String,
     pub(crate) text: String,
+    /// The text as written, before trimming, for values such as a tab or newline separator.
+    pub(crate) raw: String,
     pub(crate) children: Vec<Node>,
 }
 
@@ -108,6 +110,7 @@ pub(crate) fn parse(body: &[u8]) -> Result<Node> {
             }
             Event::End(_) => {
                 let mut node = stack.pop().ok_or(Error::InvalidXml)?;
+                node.raw.clone_from(&node.text);
                 node.text = node.text.trim().to_owned();
                 attach(node, &mut stack, &mut root)?;
             }

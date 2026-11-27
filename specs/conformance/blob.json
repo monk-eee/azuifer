@@ -447,9 +447,16 @@
     },
     {
       "name": "Query Blob Contents",
-      "state": "unsupported",
-      "authorization": [],
-      "notes": "Not planned."
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "A SQL subset (SELECT, WHERE, LIMIT, comparisons, LIKE, IN, BETWEEN, CAST, a few string functions, and COUNT/SUM/AVG/MIN/MAX without GROUP BY) over delimited text and JSON lines, answered as an Avro stream of result, progress, end, and error records. Arrow and Parquet answer NotImplemented. The whole blob is read into memory. The wire format follows the Python SDK decoder, not a recording of Azure: the ParseError status and code, runtime error names, progress cadence, and SQL dialect details are unverified."
     },
     {
       "name": "Rename Container",

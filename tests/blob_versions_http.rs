@@ -1708,3 +1708,275 @@ fn the_versioning_option_validates_account_names() {
         .unwrap();
     assert!(!from_env.status.success());
 }
+
+/// The records of a Query Blob Contents Avro stream: the concatenated result data, the
+/// `end` total, and any `error` record as `(fatal, name, description, position)`.
+struct Queried {
+    data: String,
+    total: Option<i64>,
+    error: Option<(bool, String, String, i64)>,
+    progress: usize,
+}
+
+fn decode_query(bytes: &[u8]) -> Queried {
+    fn long(bytes: &[u8], at: &mut usize) -> i64 {
+        let (mut value, mut shift) = (0u64, 0);
+        loop {
+            let byte = bytes[*at];
+            *at += 1;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return ((value >> 1) as i64) ^ -((value & 1) as i64);
+            }
+            shift += 7;
+        }
+    }
+    fn blob(bytes: &[u8], at: &mut usize) -> Vec<u8> {
+        let length = long(bytes, at) as usize;
+        *at += length;
+        bytes[*at - length..*at].to_vec()
+    }
+    assert_eq!(&bytes[..4], b"Obj\x01");
+    let mut at = 4;
+    let mut schema = String::new();
+    loop {
+        let count = long(bytes, &mut at);
+        if count == 0 {
+            break;
+        }
+        for _ in 0..count {
+            let key = blob(bytes, &mut at);
+            let value = blob(bytes, &mut at);
+            if key == b"avro.schema" {
+                schema = String::from_utf8(value).unwrap();
+            }
+        }
+    }
+    assert!(schema.contains("com.microsoft.azure.storage.queryBlobContents"));
+    let sync = bytes[at..at + 16].to_vec();
+    at += 16;
+    let mut out = Queried {
+        data: String::new(),
+        total: None,
+        error: None,
+        progress: 0,
+    };
+    let records = long(bytes, &mut at);
+    let size = long(bytes, &mut at) as usize;
+    let end = at + size;
+    assert_eq!(
+        &bytes[end..end + 16],
+        &sync[..],
+        "sync marker closes the block"
+    );
+    for _ in 0..records {
+        match long(bytes, &mut at) {
+            0 => out
+                .data
+                .push_str(&String::from_utf8(blob(bytes, &mut at)).unwrap()),
+            1 => {
+                long(bytes, &mut at);
+                long(bytes, &mut at);
+                out.progress += 1;
+            }
+            2 => out.total = Some(long(bytes, &mut at)),
+            3 => {
+                let fatal = bytes[at] == 1;
+                at += 1;
+                let name = String::from_utf8(blob(bytes, &mut at)).unwrap();
+                let description = String::from_utf8(blob(bytes, &mut at)).unwrap();
+                out.error = Some((fatal, name, description, long(bytes, &mut at)));
+            }
+            other => panic!("unknown union branch {other}"),
+        }
+    }
+    assert_eq!(at, end);
+    out
+}
+
+fn query_body(expression: &str, input: &str, output: &str) -> String {
+    format!(
+        "<QueryRequest><QueryType>SQL</QueryType><Expression>{expression}</Expression>\
+         <InputSerialization>{input}</InputSerialization>\
+         <OutputSerialization>{output}</OutputSerialization></QueryRequest>"
+    )
+}
+
+const CSV_WITH_HEADERS: &str = "<Format><Type>delimited</Type><DelimitedTextConfiguration>\
+    <ColumnSeparator>,</ColumnSeparator><FieldQuote>\"</FieldQuote><RecordSeparator>\n</RecordSeparator>\
+    <HasHeaders>true</HasHeaders></DelimitedTextConfiguration></Format>";
+const CSV_PLAIN: &str = "<Format><Type>delimited</Type><DelimitedTextConfiguration>\
+    <ColumnSeparator>,</ColumnSeparator><RecordSeparator>\n</RecordSeparator>\
+    </DelimitedTextConfiguration></Format>";
+const JSON_LINES: &str = "<Format><Type>json</Type><JsonTextConfiguration>\
+    <RecordSeparator>\n</RecordSeparator></JsonTextConfiguration></Format>";
+
+#[test]
+fn query_blob_contents_runs_sql_over_csv_and_json_and_streams_avro() {
+    let server = Emulator::memory();
+    server.create_container();
+    let csv = "name,age\nann,31\nbob,25\ncy,40\n";
+    assert_eq!(server.put("people.csv", &[], csv.as_bytes()).status(), 201);
+    let query = |name: &str, extra: &str, body: String| {
+        server.send(
+            Method::POST,
+            &format!("{}?comp=query{extra}", blob(name)),
+            &[],
+            body.as_bytes(),
+        )
+    };
+
+    let response = query(
+        "people.csv",
+        "",
+        query_body(
+            "SELECT name FROM BlobStorage WHERE age &gt; 30",
+            CSV_WITH_HEADERS,
+            CSV_PLAIN,
+        ),
+    );
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        header(&response, "content-type"),
+        "application/octet-stream"
+    );
+    let length = header(&response, "content-length");
+    let bytes = response.bytes().unwrap();
+    assert_eq!(length, bytes.len().to_string());
+    let rows = decode_query(&bytes);
+    assert_eq!(rows.data, "ann\ncy\n");
+    assert_eq!(rows.total, Some(csv.len() as i64));
+    assert!(
+        rows.progress >= 1,
+        "SDKs read the first record unconditionally"
+    );
+    assert!(rows.error.is_none());
+
+    let positional = decode_query(
+        &query(
+            "people.csv",
+            "",
+            query_body(
+                "SELECT _1, _2 FROM BlobStorage LIMIT 2",
+                CSV_PLAIN,
+                JSON_LINES,
+            ),
+        )
+        .bytes()
+        .unwrap(),
+    );
+    assert_eq!(
+        positional.data,
+        "{\"_1\":\"name\",\"_2\":\"age\"}\n{\"_1\":\"ann\",\"_2\":\"31\"}\n"
+    );
+
+    let count = decode_query(
+        &query(
+            "people.csv",
+            "",
+            query_body(
+                "SELECT COUNT(*) AS n, MAX(CAST(age AS INT)) FROM BlobStorage WHERE age &lt; 41",
+                CSV_WITH_HEADERS,
+                CSV_PLAIN,
+            ),
+        )
+        .bytes()
+        .unwrap(),
+    );
+    assert_eq!(count.data, "3,40\n");
+
+    assert_eq!(
+        server
+            .put(
+                "events.json",
+                &[],
+                b"{\"a\":1,\"b\":{\"c\":\"x\"}}\n{\"a\":2,\"b\":{\"c\":\"y\"}}"
+            )
+            .status(),
+        201
+    );
+    let json = decode_query(
+        &query(
+            "events.json",
+            "",
+            query_body(
+                "SELECT s.b.c AS c, s.a + 10 AS shifted FROM BlobStorage s WHERE s.a = 2",
+                JSON_LINES,
+                JSON_LINES,
+            ),
+        )
+        .bytes()
+        .unwrap(),
+    );
+    assert_eq!(json.data, "{\"c\":\"y\",\"shifted\":12}\n");
+
+    let failed = decode_query(
+        &query(
+            "people.csv",
+            "",
+            query_body(
+                "SELECT CAST(name AS INT) FROM BlobStorage",
+                CSV_WITH_HEADERS,
+                CSV_PLAIN,
+            ),
+        )
+        .bytes()
+        .unwrap(),
+    );
+    let (fatal, name, _, position) = failed.error.expect("a runtime failure is an error record");
+    assert!(fatal);
+    assert_eq!(name, "CastFailed");
+    assert_eq!(position, 0);
+    assert_eq!(failed.total, Some(csv.len() as i64));
+}
+
+#[test]
+fn query_blob_contents_reads_snapshots_and_rejects_bad_requests() {
+    let server = Emulator::memory();
+    server.create_container();
+    assert_eq!(server.put("data.csv", &[], b"old\n").status(), 201);
+    let snapshot = server.snapshot("data.csv");
+    assert_eq!(server.put("data.csv", &[], b"new\n").status(), 201);
+    let run = |name: &str, extra: &str, body: String| {
+        server.send(
+            Method::POST,
+            &format!("{}?comp=query{extra}", blob(name)),
+            &[],
+            body.as_bytes(),
+        )
+    };
+    let select = || query_body("SELECT _1 FROM BlobStorage", CSV_PLAIN, CSV_PLAIN);
+
+    let old = run(
+        "data.csv",
+        &format!("&snapshot={}", encode(&snapshot)),
+        select(),
+    );
+    assert_eq!(old.status(), 200);
+    assert_eq!(decode_query(&old.bytes().unwrap()).data, "old\n");
+    let current = run("data.csv", "", select());
+    assert_eq!(decode_query(&current.bytes().unwrap()).data, "new\n");
+
+    let syntax = run(
+        "data.csv",
+        "",
+        query_body("SELEC _1 FROM BlobStorage", CSV_PLAIN, CSV_PLAIN),
+    );
+    assert_eq!(syntax.status(), 400);
+    assert_eq!(error_code(syntax), "ParseError");
+    let parquet = run(
+        "data.csv",
+        "",
+        query_body(
+            "SELECT * FROM BlobStorage",
+            "<Format><Type>parquet</Type></Format>",
+            CSV_PLAIN,
+        ),
+    );
+    assert_eq!(status_of(parquet), 501);
+    assert_eq!(
+        status_of(run("data.csv", "", "<QueryRequest/>".into())),
+        400
+    );
+    assert_eq!(status_of(run("missing.csv", "", select())), 404);
+}
