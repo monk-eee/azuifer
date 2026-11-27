@@ -116,7 +116,7 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "MERGE or PATCH without If-Match creates the entity or merges into it and returns 204. SAS tokens need both add and update permissions."
+      "notes": "MERGE or PATCH without If-Match creates the entity or merges into it and returns 204. T-03 verifies Bearer insert and merge with retained properties on read-back. SAS tokens need both add and update permissions; the recording does not cover SAS."
     },
     {
       "name": "Insert Or Replace Entity",
@@ -128,7 +128,7 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "PUT without If-Match creates or replaces the entity and returns 204. SAS tokens need both add and update permissions."
+      "notes": "PUT without If-Match creates or replaces the entity and returns 204. T-03 verifies Bearer insert and replacement with removed properties on read-back. SAS tokens need both add and update permissions; the recording does not cover SAS."
     },
     {
       "name": "Merge Entity",
@@ -206,5 +206,59 @@
       ],
       "notes": "PUT /{table}(PartitionKey,RowKey) with If-Match (* or an ETag) replaces all properties and returns 204 with the new ETag. A missing entity returns 404 ResourceNotFound and a stale ETag 412 UpdateConditionNotSatisfied; If-None-Match is rejected with 400 InvalidInput. Weak, strong and percent-encoded forms of the Timestamp ETag all match."
     }
-  ]
+  ],
+  "live_azure_evidence": {
+    "cassettes": 10,
+    "target_exchanges": 117,
+    "recorded_exchanges": 48,
+    "matched_exchanges": 48,
+    "matched_operation_auth": {
+      "Create Table": {
+        "Bearer": "T-01"
+      },
+      "Query Tables": {
+        "Bearer": "T-01"
+      },
+      "Delete Table": {
+        "Bearer": "T-01"
+      },
+      "Insert Entity": {
+        "Bearer": "T-02"
+      },
+      "Query Entities": {
+        "Bearer": "T-02"
+      },
+      "Merge Entity": {
+        "Bearer": "T-02"
+      },
+      "Update Entity": {
+        "Bearer": "T-02"
+      },
+      "Delete Entity": {
+        "Bearer": "T-02"
+      },
+      "Insert Or Merge Entity": {
+        "Bearer": "T-03"
+      },
+      "Insert Or Replace Entity": {
+        "Bearer": "T-03"
+      },
+      "Entity Group Transactions": {
+        "Bearer": "T-05"
+      },
+      "Get Table Service Properties": {
+        "Bearer": "T-14"
+      },
+      "Get Table ACL": {
+        "Bearer": "T-14"
+      },
+      "Preflight Table Request": {
+        "Anonymous": "T-14"
+      }
+    },
+    "matched_unsupported_boundaries": {
+      "Atom payloads": "T-10"
+    },
+    "wire_discrepancies": 10
+  }
 }

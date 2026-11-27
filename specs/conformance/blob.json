@@ -26,7 +26,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Up to 4 MiB and 50,000 blocks, with Content-MD5 or crc64, x-ms-blob-condition-maxsize and -appendpos, leases, and the append offset and committed block count headers."
+      "notes": "Up to 100 MiB per block at the 2023-11-03 baseline and 50,000 blocks, with Content-MD5 or CRC64, maximum-size and append-position guards, leases, and offset and committed block count headers. Bearer recordings B-10 and B-18 check small appends and guard failures, not the version-specific block size limit."
     },
     {
       "name": "Append Block From URL",
@@ -126,7 +126,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "GET and HEAD at the service, container, and blob level return fixed values: Standard_LRS, StorageV2, and hierarchical namespace disabled. Any valid SAS is accepted."
+      "notes": "GET and HEAD at service, container, and blob scope return fixed values for SKU (Standard_LRS) and kind (StorageV2). The HNS flag reflects local account configuration. B-41 checks the flat StorageV2 Bearer profile, not other SKUs or account kinds."
     },
     {
       "name": "Get Blob",
@@ -140,7 +140,7 @@
         "Anonymous",
         "Bearer"
       ],
-      "notes": "Reads the current blob, a snapshot (snapshot), or a version (versionid), with a single byte range (Range or x-ms-range), x-ms-range-get-content-md5 and -crc64 up to 4 MiB, all four conditions, x-ms-if-tags, lease id, and service SAS response-header overrides. Page blob holes read as zeros and append blobs return their concatenated blocks. Archived blobs answer BlobArchived. Downloading an incremental copy base returns 409 OperationNotAllowedOnIncrementalCopyBlob; the copied snapshots remain readable. Reports x-ms-version-id, x-ms-is-current-version, and x-ms-tag-count. Metadata names are returned in lowercase. x-ms-content-crc64 uses CRC-64/NVME, which has not been differentially verified against Azure."
+      "notes": "Reads the current blob, a snapshot (snapshot), or a version (versionid), with a single byte range (Range or x-ms-range), x-ms-range-get-content-md5 and -crc64 up to 4 MiB, all four conditions, x-ms-if-tags, lease id, and service SAS response-header overrides. B-12 verifies the CRC-64/NVME checksum on a recorded block-blob range, not all checksum or history profiles. Page blob holes read as zeros and append blobs return their concatenated blocks. Archived blobs answer BlobArchived. Downloading an incremental copy base returns 409 OperationNotAllowedOnIncrementalCopyBlob; the copied snapshots remain readable. Reports x-ms-version-id, x-ms-is-current-version, and x-ms-tag-count. Metadata names are returned in lowercase."
     },
     {
       "name": "Get Blob Metadata",
@@ -179,7 +179,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Returns stored logging, metrics, CORS, default service version, delete retention, and static website settings, with Azure's defaults for a new account (ADR-0019). Only CORS is acted on."
+      "notes": "Returns stored logging, metrics, CORS, default service version, delete retention, and static website settings (ADR-0019). B-41 checks one flat Bearer profile with empty CORS and disabled retention and website, not the defaults for a new Azure account or configured feature behavior."
     },
     {
       "name": "Get Blob Service Stats",
@@ -271,7 +271,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Lists allocated ranges with a byte window, marker, and maxresults; touching ranges merge. Unpaged listings omit NextMarker. snapshot lists a snapshot's ranges, and prevsnapshot returns the diff (PageRange for changed ranges, ClearRange for ranges cleared since) against the live blob or a newer snapshot. Page range diffs have not been compared with Azure."
+      "notes": "Lists allocated ranges with a byte window, marker, and maxresults; touching ranges merge. Unpaged listings omit NextMarker. B-17 checks ordinary and bounded listings, and B-24 compares the changed-range result between two incremental copy snapshots. ClearRange, paging of diffs and other snapshot profiles remain unverified against Azure."
     },
     {
       "name": "Get User Delegation Key",
@@ -378,7 +378,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "The 2023-11-03 Bearer cassette verifies a full same-account HTTPS copy with x-ms-copy-source-authorization and request properties. x-ms-copy-source-blob-properties selects source or request properties. Source conditions apply. Tags, encryption, and source MD5 validation are unsupported."
+      "notes": "B-23 verifies a full same-account HTTPS copy with x-ms-copy-source-authorization and request properties. x-ms-copy-source-blob-properties selects source or request properties, and x-ms-copy-source-tag-option can copy tags. Source conditions apply. Tag behavior is not covered by the cassette; encryption and source MD5 validation are unsupported."
     },
     {
       "name": "Put Block",
@@ -475,7 +475,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Set Blob Properties with x-ms-blob-content-length; shrinking discards trailing data and growing adds a hole."
+      "notes": "Set Blob Properties with x-ms-blob-content-length; B-17 verifies shrink and grow with discard and zero-fill read-back. Azure's premium tier size constraints are not modeled, and resize with retained history is not covered by this recording."
     },
     {
       "name": "Restore Container",
@@ -492,7 +492,7 @@
     },
     {
       "name": "Seal Append Blob",
-      "state": "known-difference",
+      "state": "compatible",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
@@ -501,7 +501,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Makes the blob read-only (BlobIsSealed on further appends); x-ms-seal-blob on Copy Blob is not supported."
+      "notes": "B-18 verifies conditional seal on a flat append blob: 200, changed ETag, sealed flag, and 409 BlobIsSealed on another append without changing the existing bytes. Sealing an already sealed blob is idempotent locally. This does not cover versioning, soft delete, or sealing through Copy Blob."
     },
     {
       "name": "Set Blob Expiry",
@@ -566,7 +566,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Replaces all six content properties when any is supplied, clearing the rest; with none supplied only the ETag and Last-Modified change. Requires the lease id while leased. Page blob and sequence number headers are unsupported. For a page blob, x-ms-blob-content-length resizes it and the sequence-number headers update it."
+      "notes": "Replaces all six content properties when any is supplied, clearing the rest; with none supplied the content properties are unchanged. Requires the lease id while leased. Resize Page Blob and Update Sequence Number use the same operation on a page blob."
     },
     {
       "name": "Set Blob Service Properties",
@@ -678,7 +678,7 @@
     },
     {
       "name": "Update Sequence Number",
-      "state": "known-difference",
+      "state": "compatible",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
@@ -687,7 +687,138 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Set Blob Properties with x-ms-sequence-number-action max, update, or increment; reported as x-ms-blob-sequence-number."
+      "notes": "B-17 verifies max, update and increment on a flat page blob through Set Blob Properties, including the returned sequence number and a changed ETag. The parser enforces the action's required or forbidden numeric header and signed 64-bit bounds. Live overflow and other profiles are not covered."
     }
-  ]
+  ],
+  "live_azure_evidence": {
+    "cassettes": 34,
+    "target_exchanges": 500,
+    "recorded_exchanges": 187,
+    "matched_exchanges": 187,
+    "matched_operation_auth": {
+      "Get User Delegation Key": {
+        "Bearer": "B-01"
+      },
+      "Get Blob Properties": {
+        "UserDelegationSAS": "B-03",
+        "Bearer": "B-13"
+      },
+      "Get Blob": {
+        "UserDelegationSAS": "B-03",
+        "Bearer": "B-06"
+      },
+      "List Blobs": {
+        "UserDelegationSAS": "B-04"
+      },
+      "Put Blob": {
+        "Bearer": "B-06"
+      },
+      "Put Block": {
+        "Bearer": "B-07"
+      },
+      "Put Block List": {
+        "Bearer": "B-07"
+      },
+      "Lease Blob": {
+        "Bearer": "B-08"
+      },
+      "Snapshot Blob": {
+        "Bearer": "B-09"
+      },
+      "Append Block": {
+        "Bearer": "B-10"
+      },
+      "Put Page": {
+        "Bearer": "B-11"
+      },
+      "Set Blob Metadata": {
+        "Bearer": "B-13"
+      },
+      "Get Blob Metadata": {
+        "Bearer": "B-13"
+      },
+      "Set Blob Properties": {
+        "Bearer": "B-13"
+      },
+      "Create Container": {
+        "Bearer": "B-15"
+      },
+      "Set Container Metadata": {
+        "Bearer": "B-15"
+      },
+      "Get Container Metadata": {
+        "Bearer": "B-15"
+      },
+      "Get Container Properties": {
+        "Bearer": "B-15"
+      },
+      "List Containers": {
+        "Bearer": "B-15"
+      },
+      "Delete Container": {
+        "Bearer": "B-15"
+      },
+      "Get Block List": {
+        "Bearer": "B-16"
+      },
+      "Get Page Ranges": {
+        "Bearer": "B-17"
+      },
+      "Resize Page Blob": {
+        "Bearer": "B-17"
+      },
+      "Update Sequence Number": {
+        "Bearer": "B-17"
+      },
+      "Seal Append Blob": {
+        "Bearer": "B-18"
+      },
+      "Delete Blob": {
+        "Bearer": "B-19"
+      },
+      "Lease Container": {
+        "Bearer": "B-21"
+      },
+      "Copy Blob": {
+        "Bearer": "B-22"
+      },
+      "Abort Copy Blob": {
+        "Bearer": "B-22"
+      },
+      "Put Blob From URL": {
+        "Bearer": "B-23"
+      },
+      "Put Block From URL": {
+        "Bearer": "B-23"
+      },
+      "Append Block From URL": {
+        "Bearer": "B-23"
+      },
+      "Put Page From URL": {
+        "Bearer": "B-23"
+      },
+      "Incremental Copy Blob": {
+        "Bearer": "B-24"
+      },
+      "Set Blob Tier": {
+        "Bearer": "B-29"
+      },
+      "Submit Batch": {
+        "Bearer": "B-32"
+      },
+      "Query Blob Contents": {
+        "Bearer": "B-33"
+      },
+      "Get Account Information": {
+        "Bearer": "B-41"
+      },
+      "Get Blob Service Properties": {
+        "Bearer": "B-41"
+      }
+    },
+    "matched_unsupported_boundaries": {
+      "Rename Container": "B-40"
+    },
+    "wire_discrepancies": 15
+  }
 }

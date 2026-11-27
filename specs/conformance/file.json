@@ -357,7 +357,7 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Same-instance sources in the same account only, which is what AzCopy's file-to-file copy needs. Like Copy File, a SAS on the source URL must allow reading that file or the request is 403 CannotVerifyCopySource (ADR-0032). NFS: NFS shares: a symbolic link as source or destination is 400 XNfs4FileTypeUnsupportedException (unverified). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
+      "notes": "Same-instance sources in the same account only, which is what AzCopy's file-to-file copy needs. Like Copy File, a SAS on the source URL must allow reading that file or Azuifer returns 403 CannotVerifyCopySource (ADR-0032). Source-SAS errors and newer copy diagnostics are pending live recording (F-24 and F-25). On NFS shares a symbolic link as source or destination returns 400 XNfs4FileTypeUnsupportedException locally; NFS behavior is not recorded from Azure (ADR-0029)."
     },
     {
       "name": "Read Symbolic Link",
@@ -507,5 +507,14 @@
       ],
       "notes": "Copies the share's rows and shares file content by extent reference. The 200-snapshot limit is not enforced. Snapshot IDs are millisecond timestamps rendered with seven fractional digits. NFS: An NFS share's snapshot keeps its hard links and symbolic links. Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     }
-  ]
+  ],
+  "live_azure_evidence": {
+    "cassettes": 0,
+    "target_exchanges": 322,
+    "recorded_exchanges": 0,
+    "matched_exchanges": 0,
+    "matched_operation_auth": {},
+    "matched_unsupported_boundaries": {},
+    "wire_discrepancies": 2
+  }
 }

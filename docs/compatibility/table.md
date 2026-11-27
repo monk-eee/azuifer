@@ -1,6 +1,6 @@
 # Table wire compatibility
 
-The Table service runs on its own listener (`--table-port`, default 10002; ephemeral when `--port 0`) with API baseline `2023-11-03`, path-style (`http://127.0.0.1:10002/{account}/...`) and host-style (`http://{account}.table.localhost:10002/...`) endpoints, and JSON payloads only. [The manifest](../../specs/conformance/table.json) is the operation inventory; every state is `implemented`, `known-difference`, or `unsupported`, and nothing has been differentially verified against Azure.
+The Table service runs on its own listener (`--table-port`, default 10002; ephemeral when `--port 0`) with API baseline `2023-11-03`, path-style (`http://127.0.0.1:10002/{account}/...`) and host-style (`http://{account}.table.localhost:10002/...`) endpoints, and JSON entity payloads. Of the 19 operations in the [manifest](../../specs/conformance/table.json), 18 are implemented; Atom payloads are an unsupported boundary. Ten reviewed cassettes match 48 of 117 planned [exchanges](azure-recording-plan.md#table). They cover scoped Bearer catalog, entity, and transaction paths and anonymous preflight failures, not all auth modes or account settings.
 
 The behavior follows [ADR-0014](../adr.d/0014-evaluate-table-queries-in-rust-over-typed-entities.md): entities are typed values in SQLite, `$filter` is parsed to an AST and evaluated in Rust, and batches commit in one transaction.
 
@@ -68,10 +68,9 @@ The [entity lifecycle](../../tests/contracts/cassettes/table-entity-lifecycle.js
 
 - Unit tests live beside the code in `src/table/` (filter parser and evaluator, Edm serialization, string-to-sign and SAS, batch parsing, ETags).
 - [HTTP suite](../../tests/table_http.rs) runs the real binary: table lifecycle, every entity operation, ETag concurrency, batches, paging, limits, authentication, ACLs, and restart persistence. The [addressing suite](../../tests/addressing_http.rs) covers host-style Shared Key, SAS and the secondary host.
-- [SDK and CLI script](../../tests/table_sdk.py) drives the `azure-data-tables` Python SDK and the Azure CLI (`az storage table`, `az storage entity`) against the built binary. It is a manual run, not part of `cargo test`:
+- The [SDK and CLI script](../../tests/table_sdk.py) drives the `azure-data-tables` Python SDK against the binary. The Python [CI job](../../.github/workflows/rust.yml) uses `--skip-az`. Omit that flag locally to run the optional `az storage table` and `az storage entity` checks as well:
 
 ```sh
-pip install azure-data-tables
-cargo build
-python tests/table_sdk.py            # add --skip-az to omit the Azure CLI checks
+cargo build --locked
+uv run --with azure-data-tables python tests/table_sdk.py --skip-az
 ```

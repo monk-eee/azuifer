@@ -24,6 +24,13 @@ This is a finite coverage target, not a claim that every possible input is cover
 
 **Target = journey exchanges + uncovered grid cells.** Cross-service journey exchanges count under the journey's service; auth credits belong to the operation's service. From the repository root, run `python scripts/audit-azure-recording-plan.py` with Python 3.10 or later to see current progress. The checker verifies counts, credits, fixture provenance and links. The Batch plan now includes tiering and mixed-operation rejection, and Query includes an in-band conversion-error stream as well as invalid SQL.
 
+After changing the plan, cassettes, wire ledger or manifest auth grid, run
+`python scripts/audit-azure-recording-plan.py --write-evidence` to refresh the
+manifests' `live_azure_evidence`. The default check rejects stale projections.
+`azuifer conformance export --format markdown` shows the full target, separate
+recorded and matched totals, and explicit matched operation/auth credits by row.
+Plain-text steps still count as exchanges but do not grant an operation/auth credit.
+
 ```text
 manifest pairs + journeys -> select safe target -> record Azure candidate
      -> review projection -> replay Azuifer -> fix or record the gap
@@ -46,6 +53,23 @@ manifest pairs + journeys -> select safe target -> record Azure candidate
 | `queue`, `table` | Approved data-plane scopes for fresh synthetic resources, such as Storage Queue Data Contributor and Storage Table Data Contributor on dedicated targets. Queue/table lifecycle and request rejection do not establish message/entity permissions. Account settings and multirole tests use dedicated accounts/identities. |
 
 The current target supports `flat`, same-account Blob `copy` with an authorized synthetic source, and the recorded Queue and Table Bearer journeys. Blob tag writes and reads and FileREST backup writes were denied. Shared Key and anonymous Blob access are disabled; HNS, versioning, and both retention policies are off. Blob, Queue, and Table have no CORS rules. Rows requiring those permissions or settings need a separate approved scope or target. This ledger never authorizes granting access or changing settings.
+
+### Reachability on Entra-only targets
+
+Corporate storage controls (for example Secure Future Initiative restrictions)
+can disallow Shared Key and public blob access. This affects what an approved
+target can record, not Azuifer's advertised scope or the full **1,243-exchange**
+target. The `Auth` and `Profile` columns describe separate prerequisites:
+
+| Requirement | What can be recorded |
+| --- | --- |
+| Bearer or Blob user-delegation SAS | The matched `flat`, same-account `copy`, and Queue/Table data-plane paths are reachable on the current profile. Blob user-delegation SAS does not need Shared Key. Bearer alone does not grant tag access (B-28), FileREST backup permissions, HNS, history, or geo capabilities. Those paths still need suitable permissions or features. |
+| Key-backed auth | SharedKey, SharedKeyLite, AccountSAS, and ServiceSAS need a separately approved `keys` target when the recorder disallows Shared Key. Examples include Q-05, T-06, F-02, F-03, F-14, and F-24 through F-27. `Mixed` rows name the credentials at each step or in the journey; one Bearer step does not unlock the whole row. |
+| Anonymous access | Public Blob access and static website scenarios need approved configuration (B-35 and B-37). Unauthenticated CORS preflight is a separate operation: Q-10 and T-14 recorded rule-miss and malformed requests without enabling public access. Successful preflights still need configured CORS. |
+
+Use `--grid` on the audit to see uncovered advertised operation/auth cells
+separately from pending journeys. Do not remove blocked cells or count a denial
+from the wrong profile as a match.
 
 ## Pathways
 

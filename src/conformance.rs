@@ -21,6 +21,42 @@ struct Manifest {
     service: String,
     api_version: String,
     operations: Vec<Operation>,
+    live_azure_evidence: ServiceEvidence,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceEvidence {
+    cassettes: usize,
+    target_exchanges: usize,
+    recorded_exchanges: usize,
+    matched_exchanges: usize,
+    matched_operation_auth: BTreeMap<String, BTreeMap<Authorization, String>>,
+    matched_unsupported_boundaries: BTreeMap<String, String>,
+    wire_discrepancies: usize,
+}
+
+impl ServiceEvidence {
+    fn matched_auth_pairs(&self) -> usize {
+        self.matched_operation_auth
+            .values()
+            .map(BTreeMap::len)
+            .sum()
+    }
+
+    fn annotation(&self, operation: &str) -> String {
+        if let Some(modes) = self.matched_operation_auth.get(operation) {
+            modes
+                .iter()
+                .map(|(auth, row)| format!("{} ({row})", auth.label()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        } else if let Some(row) = self.matched_unsupported_boundaries.get(operation) {
+            format!("Unsupported boundary ({row})")
+        } else {
+            "-".to_owned()
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -44,6 +80,14 @@ enum State {
 }
 
 impl State {
+    const ALL: [Self; 5] = [
+        Self::Exact,
+        Self::Compatible,
+        Self::KnownDifference,
+        Self::Unsupported,
+        Self::NotApplicable,
+    ];
+
     fn implemented(self) -> bool {
         matches!(self, Self::Exact | Self::Compatible | Self::KnownDifference)
     }
@@ -102,6 +146,13 @@ fn load(service: Service, data: &str) -> Result<Manifest> {
         "invalid {name} API version"
     );
     ensure!(!manifest.operations.is_empty(), "{name} manifest is empty");
+    let evidence = &manifest.live_azure_evidence;
+    ensure!(
+        evidence.matched_exchanges <= evidence.recorded_exchanges
+            && evidence.recorded_exchanges <= evidence.target_exchanges
+            && evidence.cassettes <= evidence.recorded_exchanges,
+        "{name}: invalid live Azure exchange counts"
+    );
     let mut names = BTreeSet::new();
     for operation in &manifest.operations {
         let label = &operation.name;
@@ -111,7 +162,7 @@ fn load(service: Service, data: &str) -> Result<Manifest> {
         );
         ensure!(
             operation.state != State::Exact,
-            "{name}/{label}: exact requires verified Azure differential evidence; none is recorded by this build"
+            "{name}/{label}: exact requires full-scope Azure differential evidence, not individual scenario matches"
         );
         let modes: BTreeSet<_> = operation.authorization.iter().collect();
         ensure!(
@@ -128,7 +179,27 @@ fn load(service: Service, data: &str) -> Result<Manifest> {
                 "{name}/{label}: explain the evidence, difference, or exclusion in notes"
             );
         }
+        if let Some(matched) = evidence.matched_operation_auth.get(label) {
+            ensure!(
+                !matched.is_empty() && matched.keys().all(|mode| modes.contains(mode)),
+                "{name}/{label}: matched auth must be advertised by an implemented operation"
+            );
+        }
+        if evidence.matched_unsupported_boundaries.contains_key(label) {
+            ensure!(
+                operation.state == State::Unsupported,
+                "{name}/{label}: boundary evidence must name an unsupported operation"
+            );
+        }
     }
+    ensure!(
+        evidence
+            .matched_operation_auth
+            .keys()
+            .chain(evidence.matched_unsupported_boundaries.keys())
+            .all(|label| names.contains(label)),
+        "{name}: live evidence names an unknown operation"
+    );
     Ok(manifest)
 }
 
@@ -149,6 +220,59 @@ fn catalog() -> Result<Catalog> {
 }
 
 #[derive(Serialize)]
+struct OperationSummary {
+    recognized: usize,
+    implemented: usize,
+    states: BTreeMap<&'static str, usize>,
+}
+
+#[derive(Default, Serialize)]
+struct EvidenceSummary {
+    cassettes: usize,
+    target_exchanges: usize,
+    recorded_exchanges: usize,
+    matched_exchanges: usize,
+    operations_with_matched_evidence: usize,
+    operation_auth_pairs_with_matched_evidence: usize,
+    advertised_operation_auth_pairs: usize,
+    matched_unsupported_boundaries: usize,
+    wire_discrepancies: usize,
+}
+
+fn summaries(catalog: &Catalog) -> (OperationSummary, EvidenceSummary) {
+    let mut operations = OperationSummary {
+        recognized: 0,
+        implemented: 0,
+        states: State::ALL
+            .into_iter()
+            .map(|state| (state.label(), 0))
+            .collect(),
+    };
+    let mut evidence = EvidenceSummary::default();
+    for manifest in catalog.values() {
+        let service = &manifest.live_azure_evidence;
+        evidence.cassettes += service.cassettes;
+        evidence.target_exchanges += service.target_exchanges;
+        evidence.recorded_exchanges += service.recorded_exchanges;
+        evidence.matched_exchanges += service.matched_exchanges;
+        evidence.operations_with_matched_evidence += service.matched_operation_auth.len();
+        evidence.operation_auth_pairs_with_matched_evidence += service.matched_auth_pairs();
+        evidence.matched_unsupported_boundaries += service.matched_unsupported_boundaries.len();
+        evidence.wire_discrepancies += service.wire_discrepancies;
+        for operation in &manifest.operations {
+            operations.recognized += 1;
+            operations.implemented += usize::from(operation.state.implemented());
+            *operations
+                .states
+                .entry(operation.state.label())
+                .or_default() += 1;
+            evidence.advertised_operation_auth_pairs += operation.authorization.len();
+        }
+    }
+    (operations, evidence)
+}
+
+#[derive(Serialize)]
 struct JsonReport<'a> {
     schema_version: u32,
     service: &'a str,
@@ -159,17 +283,21 @@ struct JsonReport<'a> {
     implemented_locally: Vec<&'a str>,
     other_services: BTreeMap<&'static str, &'static str>,
     services: &'a Catalog,
+    operation_summary: OperationSummary,
+    live_azure_evidence: EvidenceSummary,
 }
 
 fn json_report(catalog: &Catalog) -> Result<JsonReport<'_>> {
     let blob = catalog
         .get(Service::Blob.name())
         .context("Blob manifest missing")?;
+    let (operation_summary, live_azure_evidence) = summaries(catalog);
     Ok(JsonReport {
         schema_version: 1,
         service: &blob.service,
         api_version: &blob.api_version,
         authorization: Authorization::SharedKey,
+        // Legacy whole-contract Blob/SharedKey flag, not a count of matched scenarios.
         azure_differential_verified: false,
         unsupported_by_default: true,
         implemented_locally: blob
@@ -195,6 +323,8 @@ fn json_report(catalog: &Catalog) -> Result<JsonReport<'_>> {
             })
             .collect(),
         services: catalog,
+        operation_summary,
+        live_azure_evidence,
     })
 }
 
@@ -205,15 +335,62 @@ fn markdown_report(output: &mut impl Write, catalog: &Catalog) -> io::Result<()>
             .replace(['\r', '\n'], " ")
     }
 
+    let (operations, evidence) = summaries(catalog);
+    let states = operations
+        .states
+        .iter()
+        .map(|(state, count)| format!("{count} {state}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    writeln!(output, "# Azuifer conformance\n")?;
     writeln!(
         output,
-        "# Azuifer conformance\n\nOperation inventory. Local tests are not Azure differential evidence."
+        "**{}/{} operations implemented locally.** States: {states}.",
+        operations.implemented, operations.recognized
     )?;
+    writeln!(output, "\n## Live Azure evidence\n")?;
+    writeln!(
+        output,
+        "**{}/{} planned exchanges matched**, with {} recorded across {} reviewed cassettes.",
+        evidence.matched_exchanges,
+        evidence.target_exchanges,
+        evidence.recorded_exchanges,
+        evidence.cassettes
+    )?;
+    writeln!(
+        output,
+        "Explicit matches cover {} operations and {}/{} advertised operation/auth pairs, plus {} unsupported boundaries. The wire ledger has {} discrepancy entries.",
+        evidence.operations_with_matched_evidence,
+        evidence.operation_auth_pairs_with_matched_evidence,
+        evidence.advertised_operation_auth_pairs,
+        evidence.matched_unsupported_boundaries,
+        evidence.wire_discrepancies
+    )?;
+    writeln!(
+        output,
+        "\nMatched cassettes cover only the recorded scenario and auth mode, including rejection cases. They do not imply `exact` or count local-only SDK tests."
+    )?;
+    writeln!(
+        output,
+        "\n| Service | Cassettes | Recorded | Matched / target | Operations with a match |\n| --- | ---: | ---: | ---: | ---: |"
+    )?;
+    for (service, manifest) in catalog {
+        let coverage = &manifest.live_azure_evidence;
+        writeln!(
+            output,
+            "| {service} | {} | {} | {} / {} | {} |",
+            coverage.cassettes,
+            coverage.recorded_exchanges,
+            coverage.matched_exchanges,
+            coverage.target_exchanges,
+            coverage.matched_operation_auth.len()
+        )?;
+    }
     for (service, manifest) in catalog {
         writeln!(output, "\n## {service} (`{}`)\n", manifest.api_version)?;
         writeln!(
             output,
-            "| Operation | State | Authorization | Notes |\n| --- | --- | --- | --- |"
+            "| Operation | State | Authorization | Matched Azure evidence (plan row) | Notes |\n| --- | --- | --- | --- | --- |"
         )?;
         for operation in &manifest.operations {
             let modes = operation
@@ -224,10 +401,11 @@ fn markdown_report(output: &mut impl Write, catalog: &Catalog) -> io::Result<()>
                 .join(", ");
             writeln!(
                 output,
-                "| {} | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} |",
                 cell(&operation.name),
                 operation.state.label(),
                 if modes.is_empty() { "-" } else { &modes },
+                cell(&manifest.live_azure_evidence.annotation(&operation.name)),
                 cell(operation.notes.as_deref().unwrap_or("-")),
             )?;
         }
@@ -252,30 +430,39 @@ pub(crate) fn export(format: Format) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn load_one(service: Service, operation: serde_json::Value) -> Result<Manifest> {
+        let data = serde_json::json!({
+            "service": service.name(), "api_version": "2023-11-03",
+            "operations": [operation],
+            "live_azure_evidence": {
+                "target_exchanges": 1, "recorded_exchanges": 0, "matched_exchanges": 0,
+                "cassettes": 0, "wire_discrepancies": 0,
+                "matched_operation_auth": {}, "matched_unsupported_boundaries": {}
+            }
+        });
+        load(service, &data.to_string())
+    }
+
     #[test]
     fn a_local_manifest_cannot_assert_exact_azure_behavior() {
-        let error = load(
+        let error = load_one(
             Service::Blob,
-            r#"{"service":"blob","api_version":"2023-11-03","operations":[
-                {"name":"Get Blob","state":"exact","authorization":["SharedKey"],"notes":"Local HTTP test passed"}
-            ]}"#,
+            serde_json::json!({"name":"Get Blob","state":"exact","authorization":["SharedKey"],"notes":"Local HTTP test passed"}),
         )
         .err()
         .expect("exact without Azure differential evidence must fail validation");
         assert!(
             error
                 .to_string()
-                .contains("exact requires verified Azure differential evidence")
+                .contains("exact requires full-scope Azure differential evidence")
         );
     }
 
     #[test]
     fn a_manifest_cannot_advertise_authorization_for_an_unsupported_operation() {
-        let error = load(
+        let error = load_one(
             Service::Queue,
-            r#"{"service":"queue","api_version":"2023-11-03","operations":[
-                {"name":"Put Message","state":"unsupported","authorization":["SharedKey"]}
-            ]}"#,
+            serde_json::json!({"name":"Put Message","state":"unsupported","authorization":["SharedKey"]}),
         )
         .err()
         .expect("unsupported operations cannot claim working authorization");
