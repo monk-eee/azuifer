@@ -1,8 +1,8 @@
 //! Directory and file operations.
 
 use super::{
-    Env, NODE_COLUMNS, ShareRow, Store, content, db_error, insert_node, internal, new_etag,
-    node_row, resolve, save_node, shares,
+    Env, LINK_COLUMNS, NODE_COLUMNS, ShareRow, Store, content, db_error, insert_node, internal,
+    new_etag, node_row, resolve, save_node, shares,
     shares::{ShareRef, intern_permission, load_share, permission_exists, valid_sddl},
 };
 use crate::{
@@ -10,8 +10,8 @@ use crate::{
         error::{Error, Result},
         lease::{self, Kind, Outcome, Use},
         model::{
-            Attributes, CopyState, HttpProperties, Metadata, NodeInfo, PermissionSpec,
-            SmbProperties, TimeSpec,
+            Attributes, CopyState, FileKind, HttpProperties, Metadata, NfsProps, NodeInfo,
+            PermissionSpec, Posix, Protocol, SmbProperties, TimeSpec,
         },
         name::{EntryPath, fold},
         time::TICKS_PER_MILLI,
@@ -20,16 +20,20 @@ use crate::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use md5::{Digest as _, Md5};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension as _, params};
 use std::ops::Range;
 
 const MAX_MD5_RANGE: u64 = 4 * 1024 * 1024;
 const GIB: u64 = 1 << 30;
+const MAX_LINK_TEXT_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum Want {
     Directory,
+    /// A file of any kind, including an NFS symbolic link.
     File,
+    /// A file whose bytes can be read or written: not a symbolic link.
+    Regular,
     Any,
 }
 
@@ -45,6 +49,15 @@ pub(crate) struct NewFile {
     pub(crate) http: HttpProperties,
     pub(crate) smb: SmbProperties,
     pub(crate) metadata: Metadata,
+    pub(crate) posix: Posix,
+}
+
+/// What Set File Properties changes.
+pub(crate) struct FilePatch {
+    pub(crate) length: Option<u64>,
+    pub(crate) http: Option<HttpProperties>,
+    pub(crate) smb: SmbProperties,
+    pub(crate) posix: Posix,
 }
 
 pub(crate) struct ReadOptions {
@@ -102,6 +115,33 @@ pub(crate) struct CopyRequest {
     pub(crate) metadata: Option<Metadata>,
     /// Present for `x-ms-file-copy-mode: override`.
     pub(crate) smb: Option<SmbProperties>,
+    /// The NFS mode and owner choices, used when the destination share is NFS.
+    pub(crate) nfs: NfsCopy,
+}
+
+/// Where a copy takes a property of an NFS destination from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CopyBy {
+    Source,
+    Override,
+}
+
+/// `x-ms-file-mode-copy-mode`, `x-ms-file-owner-copy-mode`, and the values they override with.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NfsCopy {
+    pub(crate) mode: CopyBy,
+    pub(crate) owner: CopyBy,
+    pub(crate) posix: Posix,
+}
+
+impl Default for NfsCopy {
+    fn default() -> Self {
+        Self {
+            mode: CopyBy::Source,
+            owner: CopyBy::Source,
+            posix: Posix::default(),
+        }
+    }
 }
 
 fn find(db: &Connection, share: &ShareRow, path: &EntryPath, want: Want) -> Result<NodeInfo> {
@@ -114,9 +154,56 @@ fn find(db: &Connection, share: &ShareRow, path: &EntryPath, want: Want) -> Resu
         });
     };
     match (want, node.directory) {
-        (Want::Directory, false) | (Want::File, true) => Err(Error::ResourceTypeMismatch),
+        (Want::Directory, false) | (Want::File | Want::Regular, true) => {
+            Err(Error::ResourceTypeMismatch)
+        }
+        (Want::Regular, false) if is_symlink(&node) => {
+            Err(Error::XNfs4FileTypeUnsupportedException)
+        }
         _ => Ok(node),
     }
+}
+
+fn is_symlink(node: &NodeInfo) -> bool {
+    node.nfs
+        .as_ref()
+        .is_some_and(|nfs| nfs.kind == FileKind::SymLink)
+}
+
+fn is_nfs(share: &ShareRow) -> bool {
+    share.info.protocol == Protocol::Nfs
+}
+
+/// The POSIX properties a new node of an NFS share starts with; `None` on an SMB share.
+fn new_nfs(
+    share: &ShareRow,
+    kind: FileKind,
+    posix: Posix,
+    link_text: Option<String>,
+) -> Option<NfsProps> {
+    is_nfs(share).then(|| NfsProps::create(kind, posix, link_text))
+}
+
+/// NFS shares have no SMB attributes or permissions: whatever a request carried for them
+/// is dropped, so a client that sends them anyway is not refused (ADR-0029).
+fn for_share(share: &ShareRow, mut smb: SmbProperties) -> SmbProperties {
+    if is_nfs(share) {
+        smb.attributes = None;
+        smb.change = None;
+        smb.permission = match smb.permission {
+            PermissionSpec::Preserve => PermissionSpec::Preserve,
+            _ => PermissionSpec::Inherit,
+        };
+    }
+    smb
+}
+
+/// File leases do not exist on NFS shares: a lease header is ignored.
+fn check_file_lease(node: &NodeInfo, now: i64, lease_id: Option<&str>, action: Use) -> Result<()> {
+    if node.nfs.is_some() {
+        return Ok(());
+    }
+    lease::check_use(Kind::File, node.lease.as_ref(), now, lease_id, action)
 }
 
 fn touch(node: &mut NodeInfo, now: i64) {
@@ -193,6 +280,9 @@ fn blank(parent: &NodeInfo, name: &str, directory: bool, now: i64) -> NodeInfo {
         http: HttpProperties::default(),
         lease: None,
         copy: None,
+        nfs: None,
+        links: 1,
+        entry: None,
     }
 }
 
@@ -222,12 +312,45 @@ fn writable(db: &Connection, target: &ShareRef) -> Result<ShareRow> {
     shares::load_writable(db, target)
 }
 
+/// Removes one name. A hard link's name just goes. When the inode's first name goes while
+/// links remain, the oldest link's name becomes the inode's, so the content and file id
+/// stay; only the last name frees the content.
 fn delete_node(
     db: &Connection,
     share_id: i64,
     node: &NodeInfo,
     reclaim: &mut content::Reclaim,
 ) -> Result<()> {
+    if let Some(entry) = node.entry {
+        db.execute(
+            "DELETE FROM links WHERE share_id=?1 AND entry_id=?2",
+            params![share_id, entry],
+        )
+        .map_err(db_error)?;
+        return Ok(());
+    }
+    let oldest: Option<(i64, i64, String, String)> = db
+        .query_row(
+            "SELECT entry_id, parent_id, name, key FROM links
+             WHERE share_id=?1 AND file_id=?2 ORDER BY entry_id LIMIT 1",
+            params![share_id, node.file_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(db_error)?;
+    if let Some((entry, parent, name, key)) = oldest {
+        db.execute(
+            "DELETE FROM links WHERE share_id=?1 AND entry_id=?2",
+            params![share_id, entry],
+        )
+        .map_err(db_error)?;
+        db.execute(
+            "UPDATE nodes SET parent_id=?3, name=?4, key=?5 WHERE share_id=?1 AND file_id=?2",
+            params![share_id, node.file_id, parent, name, key],
+        )
+        .map_err(db_error)?;
+        return Ok(());
+    }
     reclaim.add_stored(db, share_id, Some(node.file_id))?;
     db.execute(
         "DELETE FROM nodes WHERE share_id=?1 AND file_id=?2",
@@ -242,6 +365,25 @@ fn check_not_read_only(node: &NodeInfo) -> Result<()> {
         return Err(Error::ReadOnlyAttribute);
     }
     Ok(())
+}
+
+/// The POSIX properties a copy gives an NFS destination: each of mode and owner comes from
+/// the source or from the request, as `x-ms-file-mode-copy-mode` and
+/// `x-ms-file-owner-copy-mode` say. A source without POSIX properties yields the defaults.
+fn copied_posix(from: &NodeInfo, copy: &NfsCopy) -> Posix {
+    let source = from.nfs.as_ref();
+    let (owner, group) = match copy.owner {
+        CopyBy::Override => (copy.posix.owner, copy.posix.group),
+        CopyBy::Source => (source.map(|nfs| nfs.owner), source.map(|nfs| nfs.group)),
+    };
+    Posix {
+        mode: match copy.mode {
+            CopyBy::Override => copy.posix.mode,
+            CopyBy::Source => source.map(|nfs| nfs.mode),
+        },
+        owner,
+        group,
+    }
 }
 
 /// Commits a transaction, then removes the extents that lost their last reference.
@@ -260,6 +402,7 @@ impl Store {
         path: EntryPath,
         smb: SmbProperties,
         metadata: Metadata,
+        posix: Posix,
     ) -> Result<NodeInfo> {
         self.run(move |db, env| {
             let now = env.clock.now_millis();
@@ -273,6 +416,8 @@ impl Store {
             }
             let mut node = blank(&parent, name, true, now);
             node.metadata = metadata;
+            node.nfs = new_nfs(&share, FileKind::Directory, posix, None);
+            let smb = for_share(&share, smb);
             apply_smb(&tx, &target, &mut node, &smb, &parent.permission_key, now)?;
             insert_node(&tx, share.id, &mut node)?;
             tx.commit().map_err(db_error)?;
@@ -294,9 +439,8 @@ impl Store {
             let share = shares::load_share(db, &target)?;
             let node = find(db, &share, &path, want)?;
             if !node.directory {
-                lease::check_use(
-                    Kind::File,
-                    node.lease.as_ref(),
+                check_file_lease(
+                    &node,
                     env.clock.now_millis(),
                     lease_id.as_deref(),
                     Use::Read,
@@ -313,13 +457,18 @@ impl Store {
         target: ShareRef,
         path: EntryPath,
         smb: SmbProperties,
+        posix: Posix,
     ) -> Result<NodeInfo> {
         self.run(move |db, env| {
             let now = env.clock.now_millis();
             let share = writable(db, &target)?;
             let mut node = find(db, &share, &path, Want::Directory)?;
             let inherited = node.permission_key.clone();
+            let smb = for_share(&share, smb);
             apply_smb(db, &target, &mut node, &smb, &inherited, now)?;
+            if let Some(nfs) = node.nfs.as_mut() {
+                nfs.update(posix);
+            }
             save_node(db, share.id, &node)?;
             Ok(node)
         })
@@ -339,14 +488,10 @@ impl Store {
             let share = writable(db, &target)?;
             let mut node = find(db, &share, &path, want)?;
             if !node.directory {
-                lease::check_use(
-                    Kind::File,
-                    node.lease.as_ref(),
-                    now,
-                    lease_id.as_deref(),
-                    Use::Write,
-                )?;
-                lease::after_write(Kind::File, &mut node.lease, now);
+                check_file_lease(&node, now, lease_id.as_deref(), Use::Write)?;
+                if node.nfs.is_none() {
+                    lease::after_write(Kind::File, &mut node.lease, now);
+                }
             }
             node.metadata = metadata;
             node.change = now * TICKS_PER_MILLI;
@@ -367,7 +512,8 @@ impl Store {
             let node = find(&tx, &share, &path, Want::Directory)?;
             let occupied: bool = tx
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM nodes WHERE share_id=?1 AND parent_id=?2)",
+                    "SELECT EXISTS(SELECT 1 FROM nodes WHERE share_id=?1 AND parent_id=?2)
+                         OR EXISTS(SELECT 1 FROM links WHERE share_id=?1 AND parent_id=?2)",
                     params![share.id, node.file_id],
                     |row| row.get(0),
                 )
@@ -399,9 +545,13 @@ impl Store {
             let directory = find(db, &share, &path, Want::Directory)?;
             let mut query = db
                 .prepare(&format!(
-                    "SELECT {NODE_COLUMNS} FROM nodes
+                    "SELECT {NODE_COLUMNS}, key AS sort_key FROM nodes
                      WHERE share_id=?1 AND parent_id=?2 AND key>?3 AND instr(key, ?4)=1
-                     ORDER BY key LIMIT ?5"
+                     UNION ALL
+                     SELECT {LINK_COLUMNS}, a.key FROM links a JOIN nodes n
+                       ON n.share_id = a.share_id AND n.file_id = a.file_id
+                     WHERE a.share_id=?1 AND a.parent_id=?2 AND a.key>?3 AND instr(a.key, ?4)=1
+                     ORDER BY sort_key LIMIT ?5"
                 ))
                 .map_err(db_error)?;
             let mut entries = query
@@ -525,6 +675,7 @@ impl Store {
                 http,
                 smb,
                 metadata,
+                posix,
             } = file;
             let now = env.clock.now_millis();
             let tx = db.transaction().map_err(db_error)?;
@@ -535,14 +686,11 @@ impl Store {
             let mut reclaim = content::Reclaim::default();
             let mut node = match resolved.node {
                 Some(existing) if existing.directory => return Err(Error::ResourceTypeMismatch),
+                Some(existing) if is_symlink(&existing) => {
+                    return Err(Error::XNfs4FileTypeUnsupportedException);
+                }
                 Some(existing) => {
-                    lease::check_use(
-                        Kind::File,
-                        existing.lease.as_ref(),
-                        now,
-                        lease_id.as_deref(),
-                        Use::Write,
-                    )?;
+                    check_file_lease(&existing, now, lease_id.as_deref(), Use::Write)?;
                     check_not_read_only(&existing)?;
                     reclaim.add_stored(&tx, share.id, Some(existing.file_id))?;
                     tx.execute(
@@ -552,8 +700,13 @@ impl Store {
                     .map_err(db_error)?;
                     let mut node = blank(&parent, &existing.name, false, now);
                     node.file_id = existing.file_id;
+                    node.parent_id = existing.parent_id;
+                    node.entry = existing.entry;
+                    node.links = existing.links;
                     node.lease = existing.lease;
-                    lease::after_write(Kind::File, &mut node.lease, now);
+                    if existing.nfs.is_none() {
+                        lease::after_write(Kind::File, &mut node.lease, now);
+                    }
                     node
                 }
                 None => blank(&parent, name, false, now),
@@ -561,6 +714,8 @@ impl Store {
             node.length = length;
             node.http = file_http(http);
             node.metadata = metadata;
+            node.nfs = new_nfs(&share, FileKind::Regular, posix, None);
+            let smb = for_share(&share, smb);
             apply_smb(&tx, &target, &mut node, &smb, &parent.permission_key, now)?;
             if node.file_id == 0 {
                 insert_node(&tx, share.id, &mut node)?;
@@ -579,22 +734,23 @@ impl Store {
         target: ShareRef,
         path: EntryPath,
         lease_id: Option<String>,
-        length: Option<u64>,
-        http: Option<HttpProperties>,
-        smb: SmbProperties,
+        patch: FilePatch,
     ) -> Result<NodeInfo> {
         self.run(move |db, env| {
+            let FilePatch {
+                length,
+                http,
+                smb,
+                posix,
+            } = patch;
             let now = env.clock.now_millis();
             let tx = db.transaction().map_err(db_error)?;
             let share = writable(&tx, &target)?;
             let mut node = find(&tx, &share, &path, Want::File)?;
-            lease::check_use(
-                Kind::File,
-                node.lease.as_ref(),
-                now,
-                lease_id.as_deref(),
-                Use::Write,
-            )?;
+            check_file_lease(&node, now, lease_id.as_deref(), Use::Write)?;
+            if is_symlink(&node) && length.is_some_and(|length| length != node.length) {
+                return Err(Error::XNfs4FileTypeUnsupportedException);
+            }
             let mut reclaim = content::Reclaim::default();
             if let Some(length) = length.filter(|length| *length != node.length) {
                 let old = content::load_map(&tx, share.id, node.file_id, node.length)?;
@@ -609,8 +765,13 @@ impl Store {
                 node.http = file_http(http);
             }
             let inherited = node.permission_key.clone();
+            let smb = for_share(&share, smb);
             apply_smb(&tx, &target, &mut node, &smb, &inherited, now)?;
-            lease::after_write(Kind::File, &mut node.lease, now);
+            if let Some(nfs) = node.nfs.as_mut() {
+                nfs.update(posix);
+            } else {
+                lease::after_write(Kind::File, &mut node.lease, now);
+            }
             save_node(&tx, share.id, &node)?;
             finish(tx, env, reclaim)?;
             Ok(node)
@@ -618,28 +779,25 @@ impl Store {
         .await
     }
 
+    /// Deletes a file or symbolic link name. On an NFS share the answer is the inode's link
+    /// count after the delete.
     pub(crate) async fn delete_file(
         &self,
         target: ShareRef,
         path: EntryPath,
         lease_id: Option<String>,
-    ) -> Result<()> {
+    ) -> Result<Option<u32>> {
         self.run(move |db, env| {
             let now = env.clock.now_millis();
             let tx = db.transaction().map_err(db_error)?;
             let share = writable(&tx, &target)?;
             let node = find(&tx, &share, &path, Want::File)?;
-            lease::check_use(
-                Kind::File,
-                node.lease.as_ref(),
-                now,
-                lease_id.as_deref(),
-                Use::Delete,
-            )?;
+            check_file_lease(&node, now, lease_id.as_deref(), Use::Delete)?;
             check_not_read_only(&node)?;
             let mut reclaim = content::Reclaim::default();
             delete_node(&tx, share.id, &node, &mut reclaim)?;
-            finish(tx, env, reclaim)
+            finish(tx, env, reclaim)?;
+            Ok(node.nfs.is_some().then(|| node.links - 1))
         })
         .await
     }
@@ -658,14 +816,8 @@ impl Store {
             let now = env.clock.now_millis();
             let tx = db.transaction().map_err(db_error)?;
             let share = writable(&tx, &target)?;
-            let mut node = find(&tx, &share, &path, Want::File)?;
-            lease::check_use(
-                Kind::File,
-                node.lease.as_ref(),
-                now,
-                lease_id.as_deref(),
-                Use::Write,
-            )?;
+            let mut node = find(&tx, &share, &path, Want::Regular)?;
+            check_file_lease(&node, now, lease_id.as_deref(), Use::Write)?;
             check_not_read_only(&node)?;
             if offset
                 .checked_add(data.length)
@@ -723,14 +875,8 @@ impl Store {
             let now = env.clock.now_millis();
             let tx = db.transaction().map_err(db_error)?;
             let share = writable(&tx, &target)?;
-            let mut node = find(&tx, &share, &path, Want::File)?;
-            lease::check_use(
-                Kind::File,
-                node.lease.as_ref(),
-                now,
-                lease_id.as_deref(),
-                Use::Write,
-            )?;
+            let mut node = find(&tx, &share, &path, Want::Regular)?;
+            check_file_lease(&node, now, lease_id.as_deref(), Use::Write)?;
             check_not_read_only(&node)?;
             if offset
                 .checked_add(length)
@@ -767,10 +913,14 @@ impl Store {
                 with_body,
             } = options;
             let share = shares::load_share(db, &target)?;
-            let node = find(db, &share, &path, Want::File)?;
-            lease::check_use(
-                Kind::File,
-                node.lease.as_ref(),
+            let node = find(
+                db,
+                &share,
+                &path,
+                if with_body { Want::Regular } else { Want::File },
+            )?;
+            check_file_lease(
+                &node,
                 env.clock.now_millis(),
                 lease_id.as_deref(),
                 Use::Read,
@@ -830,10 +980,9 @@ impl Store {
     ) -> Result<RangeListing> {
         self.run(move |db, env| {
             let share = shares::load_share(db, &target)?;
-            let node = find(db, &share, &path, Want::File)?;
-            lease::check_use(
-                Kind::File,
-                node.lease.as_ref(),
+            let node = find(db, &share, &path, Want::Regular)?;
+            check_file_lease(
+                &node,
                 env.clock.now_millis(),
                 lease_id.as_deref(),
                 Use::Read,
@@ -896,10 +1045,15 @@ impl Store {
         self.run(move |db, env| {
             let now = env.clock.now_millis();
             let tx = db.transaction().map_err(db_error)?;
-            let source_share =
+            let share_source =
                 load_share(&tx, &source.target).map_err(|_| Error::CannotVerifyCopySource)?;
-            let from = find(&tx, &source_share, &source.path, Want::File)
-                .map_err(|_| Error::CannotVerifyCopySource)?;
+            let from = find(&tx, &share_source, &source.path, Want::Regular).map_err(|error| {
+                if error == Error::XNfs4FileTypeUnsupportedException {
+                    error
+                } else {
+                    Error::CannotVerifyCopySource
+                }
+            })?;
             let share = writable(&tx, &target)?;
             let resolved = resolve(&tx, share.id, &path)?;
             let name = path.name().ok_or(Error::ResourceTypeMismatch)?;
@@ -908,18 +1062,15 @@ impl Store {
             let mut removed = 0;
             let mut node = match resolved.node {
                 Some(existing) if existing.directory => return Err(Error::ResourceTypeMismatch),
+                Some(existing) if is_symlink(&existing) => {
+                    return Err(Error::XNfs4FileTypeUnsupportedException);
+                }
                 Some(existing) => {
-                    lease::check_use(
-                        Kind::File,
-                        existing.lease.as_ref(),
-                        now,
-                        request.dest_lease.as_deref(),
-                        Use::Write,
-                    )?;
+                    check_file_lease(&existing, now, request.dest_lease.as_deref(), Use::Write)?;
                     if !request.ignore_readonly {
                         check_not_read_only(&existing)?;
                     }
-                    if existing.file_id == from.file_id && share.id == source_share.id {
+                    if existing.file_id == from.file_id && share.id == share_source.id {
                         return Err(Error::InvalidInput);
                     }
                     removed = content::load_map(&tx, share.id, existing.file_id, existing.length)?
@@ -932,8 +1083,12 @@ impl Store {
                     .map_err(db_error)?;
                     let mut node = blank(&parent, &existing.name, false, now);
                     node.file_id = existing.file_id;
+                    node.entry = existing.entry;
+                    node.links = existing.links;
                     node.lease = existing.lease;
-                    lease::after_write(Kind::File, &mut node.lease, now);
+                    if existing.nfs.is_none() {
+                        lease::after_write(Kind::File, &mut node.lease, now);
+                    }
                     node
                 }
                 None => blank(&parent, name, false, now),
@@ -945,8 +1100,14 @@ impl Store {
             node.creation = from.creation;
             node.last_write = from.last_write;
             node.permission_key = from.permission_key.clone();
-            if let Some(smb) = &request.smb {
-                apply_smb(&tx, &target, &mut node, smb, &parent.permission_key, now)?;
+            node.nfs = new_nfs(
+                &share,
+                FileKind::Regular,
+                copied_posix(&from, &request.nfs),
+                None,
+            );
+            if let Some(smb) = request.smb.map(|smb| for_share(&share, smb)) {
+                apply_smb(&tx, &target, &mut node, &smb, &parent.permission_key, now)?;
             } else {
                 touch(&mut node, now);
             }
@@ -963,7 +1124,7 @@ impl Store {
             } else {
                 save_node(&tx, share.id, &node)?;
             }
-            let from_map = content::load_map(&tx, source_share.id, from.file_id, from.length)?;
+            let from_map = content::load_map(&tx, share_source.id, from.file_id, from.length)?;
             check_quota(&tx, &share, from_map.allocated_bytes(), removed)?;
             content::save_map(
                 &tx,
@@ -998,6 +1159,124 @@ impl Store {
             // Copies complete synchronously, so none is ever pending.
             let _ = (node.copy, copy_id);
             Err(Error::NoPendingCopyOperation)
+        })
+        .await
+    }
+
+    /// Create Hard Link: another name for an existing regular file of an NFS share. The link
+    /// shares the inode, so content, properties and file id are the file's.
+    pub(crate) async fn create_hard_link(
+        &self,
+        target: ShareRef,
+        path: EntryPath,
+        source: EntryPath,
+    ) -> Result<NodeInfo> {
+        self.run(move |db, env| {
+            let now = env.clock.now_millis();
+            let tx = db.transaction().map_err(db_error)?;
+            let share = writable(&tx, &target)?;
+            if !is_nfs(&share) {
+                return Err(Error::InvalidQueryParameterValue);
+            }
+            let resolved = resolve(&tx, share.id, &path)?;
+            let name = path.name().ok_or(Error::ResourceAlreadyExists)?;
+            let parent = resolved.parent.ok_or(Error::ParentNotFound)?;
+            if resolved.node.is_some() {
+                return Err(Error::ResourceAlreadyExists);
+            }
+            let mut inode = find(&tx, &share, &source, Want::Any)?;
+            if inode.directory {
+                return Err(Error::InvalidHeaderValue);
+            }
+            if is_symlink(&inode) {
+                return Err(Error::XNfs4FileTypeUnsupportedException);
+            }
+            let entry: i64 = tx
+                .query_row(
+                    "SELECT COALESCE(MAX(entry_id), 0) + 1 FROM links WHERE share_id=?1",
+                    [share.id],
+                    |row| row.get(0),
+                )
+                .map_err(db_error)?;
+            tx.execute(
+                "INSERT INTO links (share_id, entry_id, file_id, parent_id, name, key)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    share.id,
+                    entry,
+                    inode.file_id,
+                    parent.file_id,
+                    name,
+                    fold(name)
+                ],
+            )
+            .map_err(db_error)?;
+            inode.change = now * TICKS_PER_MILLI;
+            touch(&mut inode, now);
+            save_node(&tx, share.id, &inode)?;
+            tx.commit().map_err(db_error)?;
+            inode.parent_id = Some(parent.file_id);
+            inode.name = name.to_owned();
+            inode.entry = Some(entry);
+            inode.links += 1;
+            Ok(inode)
+        })
+        .await
+    }
+
+    /// Create Symbolic Link: a node that holds `link_text` as given and nothing else.
+    pub(crate) async fn create_symlink(
+        &self,
+        target: ShareRef,
+        path: EntryPath,
+        link_text: String,
+        posix: Posix,
+        metadata: Metadata,
+        smb: SmbProperties,
+    ) -> Result<NodeInfo> {
+        self.run(move |db, env| {
+            let now = env.clock.now_millis();
+            let tx = db.transaction().map_err(db_error)?;
+            let share = writable(&tx, &target)?;
+            if !is_nfs(&share) {
+                return Err(Error::InvalidQueryParameterValue);
+            }
+            if link_text.is_empty() || link_text.len() > MAX_LINK_TEXT_BYTES {
+                return Err(Error::InvalidHeaderValue);
+            }
+            let resolved = resolve(&tx, share.id, &path)?;
+            let name = path.name().ok_or(Error::ResourceAlreadyExists)?;
+            let parent = resolved.parent.ok_or(Error::ParentNotFound)?;
+            if resolved.node.is_some() {
+                return Err(Error::ResourceAlreadyExists);
+            }
+            let mut node = blank(&parent, name, false, now);
+            node.length = link_text.len() as u64;
+            node.http = file_http(HttpProperties::default());
+            node.metadata = metadata;
+            node.nfs = Some(NfsProps::create(FileKind::SymLink, posix, Some(link_text)));
+            let smb = for_share(&share, smb);
+            apply_smb(&tx, &target, &mut node, &smb, &parent.permission_key, now)?;
+            insert_node(&tx, share.id, &mut node)?;
+            tx.commit().map_err(db_error)?;
+            Ok(node)
+        })
+        .await
+    }
+
+    /// Read Symbolic Link, on a live share or a snapshot.
+    pub(crate) async fn read_symlink(&self, target: ShareRef, path: EntryPath) -> Result<NodeInfo> {
+        self.run(move |db, _| {
+            let share = shares::load_share(db, &target)?;
+            if !is_nfs(&share) {
+                return Err(Error::InvalidQueryParameterValue);
+            }
+            let node = find(db, &share, &path, Want::File)?;
+            if is_symlink(&node) {
+                Ok(node)
+            } else {
+                Err(Error::XNfs4FileTypeUnsupportedException)
+            }
         })
         .await
     }

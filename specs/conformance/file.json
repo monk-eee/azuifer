@@ -24,11 +24,11 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Same-instance, same-account sources only, including a share snapshot source; the copy completes synchronously with x-ms-copy-status success and shares the source's extents. The host-style name {account}.file.* of a configured account is treated as local. Blob, external and cross-account sources return NotImplemented or CannotVerifyCopySource."
+      "notes": "Same-instance, same-account sources only, including a share snapshot source; the copy completes synchronously with x-ms-copy-status success and shares the source's extents. The host-style name {account}.file.* of a configured account is treated as local. Blob, external and cross-account sources return NotImplemented or CannotVerifyCopySource. NFS: NFS shares: x-ms-file-mode-copy-mode and x-ms-file-owner-copy-mode (source by default, an unverified default); a symbolic link as source or destination is 400 XNfs4FileTypeUnsupportedException (unverified). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Create Directory",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
@@ -36,11 +36,11 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Case-insensitive, case-preserving names with Azure's name, depth and length rules. File attributes, timestamps (now, preserve or ISO), permission, permission key and metadata are stored and returned with x-ms-file-id and x-ms-file-parent-id."
+      "notes": "Case-insensitive, case-preserving names with Azure's name, depth and length rules. File attributes, timestamps (now, preserve or ISO), permission, permission key and metadata are stored and returned with x-ms-file-id and x-ms-file-parent-id. NFS: On an NFS share: x-ms-mode (default 0755), x-ms-owner and x-ms-group (default 0); the response carries them and x-ms-file-file-type: Directory instead of the SMB attribute and permission headers. SMB-only request headers are ignored there. Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Create File",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
@@ -48,24 +48,28 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Requires x-ms-type: file and x-ms-content-length (up to 4 TiB); replaces an existing file as Azure does, honoring its lease and read-only attribute. Content type, encoding, language, disposition, cache control, content MD5, metadata and SMB properties are stored. Content is sparse and allocates no bytes."
+      "notes": "Requires x-ms-type: file and x-ms-content-length (up to 4 TiB); replaces an existing file as Azure does, honoring its lease and read-only attribute. Content type, encoding, language, disposition, cache control, content MD5, metadata and SMB properties are stored. Content is sparse and allocates no bytes. NFS: NFS shares: x-ms-mode (default 0644), x-ms-owner, x-ms-group, and x-ms-file-file-type which must be Regular. Replacing a symbolic link is 400 XNfs4FileTypeUnsupportedException (unverified); replacing a hard-linked name rewrites the shared inode. Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Create Hard Link",
-      "state": "unsupported",
-      "authorization": [],
-      "notes": "NFS-only operation; returns 501 NotImplemented."
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "Bearer"
+      ],
+      "notes": "PUT ?restype=hardlink with x-ms-type: file and x-ms-file-target-file (a path from the share root or a URL of this share). The link is another name for the same inode: content, properties and file id are shared and x-ms-link-count rises. Needs an NFS share and x-ms-version 2025-05-05 or later (below that, 400 InvalidQueryParameterValue); a directory target is 400 InvalidHeaderValue and a symbolic-link target 400 XNfs4FileTypeUnsupportedException; ParentNotFound, ResourceNotFound and ResourceAlreadyExists as documented; a share snapshot is 400 InvalidQueryParameterValue. Owner only (Shared Key or a bearer token), as Azure documents. Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Create Permission",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Stores an SDDL string per share and returns a stable key for it. SDDL is checked only for an owner and DACL shape; it is never evaluated."
+      "notes": "Stores an SDDL string per share and returns a stable key for it. SDDL is checked only for an owner and DACL shape; it is never evaluated. NFS: SMB-only: answers 403 XNfs4ShareDeniedException on an NFS share (ADR-0029; the status and code for this case are unverified). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Create Share",
@@ -76,13 +80,17 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Quota (1 to 102400 GiB), access tier (TransactionOptimized, Hot, Cool) and metadata are stored and returned. SMB only: other x-ms-enabled-protocols values return NotImplemented. Provisioned IOPS and bandwidth are not modeled."
+      "notes": "Quota (1 to 102400 GiB), access tier (TransactionOptimized, Hot, Cool) and metadata are stored and returned. SMB only: other x-ms-enabled-protocols values return NotImplemented. Provisioned IOPS and bandwidth are not modeled. NFS: x-ms-enabled-protocols SMB or NFS (NFS accepted on any account, where Azure needs a premium one), x-ms-root-squash and x-ms-enable-snapshot-virtual-directory-access on NFS shares only (stored, never enforced). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Create Symbolic Link",
-      "state": "unsupported",
-      "authorization": [],
-      "notes": "NFS-only operation; returns 501 NotImplemented."
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "Bearer"
+      ],
+      "notes": "PUT ?restype=symboliclink with x-ms-link-text kept as sent (at most 4096 bytes, never resolved), x-ms-owner, x-ms-group, metadata and timestamps; mode 0777 (unverified). Needs an NFS share and x-ms-version 2025-07-05 or later. ParentNotFound and ResourceAlreadyExists as documented. Owner only (Shared Key or a bearer token), as Azure documents. Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Delete Directory",
@@ -98,7 +106,7 @@
     },
     {
       "name": "Delete File",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
@@ -106,7 +114,7 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Requires the lease ID when leased and refuses read-only files with ReadOnlyAttribute. Extents are reclaimed once no file or snapshot references them."
+      "notes": "Requires the lease ID when leased and refuses read-only files with ReadOnlyAttribute. Extents are reclaimed once no file or snapshot references them. NFS: NFS shares: returns x-ms-link-count, the count after the delete; the last name frees the content, and deleting the first of several names keeps the inode under another. Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Delete Share",
@@ -129,11 +137,11 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Requires x-ms-handle-id and reports zero handles closed and zero failed."
+      "notes": "Requires x-ms-handle-id and reports zero handles closed and zero failed. NFS: SMB-only: answers 403 XNfs4ShareDeniedException on an NFS share (ADR-0029; the status and code for this case are unverified). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Get Directory Metadata",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
@@ -141,11 +149,11 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Returns the directory's metadata and SMB headers."
+      "notes": "Returns the directory's metadata and SMB headers. NFS: NFS shares: POSIX headers instead of SMB attributes. Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Get Directory Properties",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
@@ -153,11 +161,11 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Works on the share root and on share snapshots. A file at the path returns ResourceTypeMismatch."
+      "notes": "Works on the share root and on share snapshots. A file at the path returns ResourceTypeMismatch. NFS: NFS shares: POSIX headers instead of SMB attributes. Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Get File",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
@@ -165,11 +173,11 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Full and ranged reads (x-ms-range or Range), x-ms-range-get-content-md5 for ranges up to 4 MiB, holes read as zeros, SAS response-header overrides, share snapshots. A range starting at or after the end returns InvalidRange. Standard If-Match, If-None-Match, If-Modified-Since and If-Unmodified-Since are evaluated although Azure does not document them for Files."
+      "notes": "Full and ranged reads (x-ms-range or Range), x-ms-range-get-content-md5 for ranges up to 4 MiB, holes read as zeros, SAS response-header overrides, share snapshots. A range starting at or after the end returns InvalidRange. Standard If-Match, If-None-Match, If-Modified-Since and If-Unmodified-Since are evaluated although Azure does not document them for Files. NFS: NFS shares: POSIX headers and x-ms-link-count. A symbolic link is 400 XNfs4FileTypeUnsupportedException (unverified). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Get File Metadata",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
@@ -177,11 +185,11 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Returns the file's metadata."
+      "notes": "Returns the file's metadata. NFS: NFS shares: POSIX headers and x-ms-link-count. Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Get File Properties",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
@@ -189,7 +197,7 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "HEAD with the file's size, HTTP properties, SMB properties, lease state, copy properties and metadata."
+      "notes": "HEAD with the file's size, HTTP properties, SMB properties, lease state, copy properties and metadata. NFS: NFS shares: POSIX headers, x-ms-file-file-type (Regular or SymLink; Azure's pages disagree on the casing) and x-ms-link-count. Works on a symbolic link. Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Get File Service Properties",
@@ -204,47 +212,47 @@
     },
     {
       "name": "Get Permission",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Returns the stored SDDL for a key. Binary security descriptors (2024-11-04) are not supported."
+      "notes": "Returns the stored SDDL for a key. Binary security descriptors (2024-11-04) are not supported. NFS: SMB-only: answers 403 XNfs4ShareDeniedException on an NFS share (ADR-0029; the status and code for this case are unverified). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Get Share ACL",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Returns up to five stored access policies."
+      "notes": "Returns up to five stored access policies. NFS: SMB-only: answers 403 XNfs4ShareDeniedException on an NFS share (ADR-0029; the status and code for this case are unverified). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Get Share Metadata",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Returns the same headers as Get Share Properties."
+      "notes": "Returns the same headers as Get Share Properties. NFS: Same headers as Get Share Properties, including the NFS ones. Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Get Share Properties",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Returns quota, access tier, metadata, enabled protocols and lease headers; honors sharesnapshot. Conditional headers are not evaluated."
+      "notes": "Returns quota, access tier, metadata, enabled protocols and lease headers; honors sharesnapshot. Conditional headers are not evaluated. NFS: Reports x-ms-enabled-protocols, and for an NFS share x-ms-root-squash and x-ms-enable-snapshot-virtual-directory-access (not on snapshots). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Get Share Stats",
@@ -258,14 +266,8 @@
       "notes": "ShareUsageBytes is the allocated (written) bytes of the live share, so sparse files and cleared ranges do not count. Snapshots are not included."
     },
     {
-      "name": "Get Symbolic Link",
-      "state": "unsupported",
-      "authorization": [],
-      "notes": "NFS-only operation; returns 501 NotImplemented."
-    },
-    {
       "name": "Lease File",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
@@ -273,7 +275,7 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Acquire (infinite only), change, release and break (immediate) with the Available, Leased and Broken states; renew is rejected. Writes, deletes, copies onto the file and renames require the lease ID, and a broken lease clears on the next unleased write. Files in share snapshots cannot be leased."
+      "notes": "Acquire (infinite only), change, release and break (immediate) with the Available, Leased and Broken states; renew is rejected. Writes, deletes, copies onto the file and renames require the lease ID, and a broken lease clears on the next unleased write. Files in share snapshots cannot be leased. NFS: SMB-only: answers 403 XNfs4ShareDeniedException on an NFS share (ADR-0029; the status and code for this case are unverified). File leases do not exist on NFS shares. Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Lease Share",
@@ -288,7 +290,7 @@
     },
     {
       "name": "List Directories and Files",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
@@ -296,7 +298,7 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Single-level listing of files and directories sorted by upper-cased name, with prefix, marker, maxresults and include=Timestamps,ETag,Attributes,PermissionKey. Names containing U+FFFE or U+FFFF are not percent-encoded."
+      "notes": "Single-level listing of files and directories sorted by upper-cased name, with prefix, marker, maxresults and include=Timestamps,ETag,Attributes,PermissionKey. Names containing U+FFFE or U+FFFF are not percent-encoded. NFS: NFS shares list only FileId, Name and a file's Content-Length (symbolic links as files, hard links under every name with the inode's id); include is ignored. Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "List Handles",
@@ -308,11 +310,11 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Always returns an empty Entries list for existing directories and files because there is no SMB session to hold handles."
+      "notes": "Always returns an empty Entries list for existing directories and files because there is no SMB session to hold handles. NFS: SMB-only: answers 403 XNfs4ShareDeniedException on an NFS share (ADR-0029; the status and code for this case are unverified). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "List Ranges",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
@@ -320,22 +322,22 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Allocated ranges with adjacent ranges merged, an optional x-ms-range window, and prevsharesnapshot diffs reporting Range and ClearRange. Diffs return PreviousSnapshotNotFound, PreviousSnapshotCannotBeNewer and FileGenerationMismatch. A rewrite with identical bytes still counts as changed."
+      "notes": "Allocated ranges with adjacent ranges merged, an optional x-ms-range window, and prevsharesnapshot diffs reporting Range and ClearRange. Diffs return PreviousSnapshotNotFound, PreviousSnapshotCannotBeNewer and FileGenerationMismatch. A rewrite with identical bytes still counts as changed. NFS: NFS shares: a symbolic link is 400 XNfs4FileTypeUnsupportedException (unverified). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "List Shares",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Supports prefix, marker, maxresults, include=metadata and include=snapshots; markers are opaque local tokens. include=deleted is accepted and ignored because share soft delete is not modeled. include=deleted adds soft-deleted shares with Deleted, Version, DeletedTime and RemainingRetentionDays."
+      "notes": "Supports prefix, marker, maxresults, include=metadata and include=snapshots; markers are opaque local tokens. include=deleted is accepted and ignored because share soft delete is not modeled. include=deleted adds soft-deleted shares with Deleted, Version, DeletedTime and RemainingRetentionDays. NFS: Adds RootSquash and EnableSnapshotVirtualDirectoryAccess for NFS shares. Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Put Range",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
@@ -343,7 +345,7 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "x-ms-write update (1 byte to 4 MiB) writes a new immutable extent made durable before the metadata commits; clear deallocates the range without writing zeros. Content-MD5 and x-ms-content-crc64 are verified. A range beyond the file length returns InvalidRange. Share quota is enforced on allocated bytes and in-memory mode fails with 507 at the memory limit."
+      "notes": "x-ms-write update (1 byte to 4 MiB) writes a new immutable extent made durable before the metadata commits; clear deallocates the range without writing zeros. Content-MD5 and x-ms-content-crc64 are verified. A range beyond the file length returns InvalidRange. Share quota is enforced on allocated bytes and in-memory mode fails with 507 at the memory limit. NFS: NFS shares: a symbolic link is 400 XNfs4FileTypeUnsupportedException (unverified). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Put Range From URL",
@@ -355,11 +357,21 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Same-instance sources in the same account only, which is what AzCopy's file-to-file copy needs. Like Copy File, the source URL's SAS is not checked."
+      "notes": "Same-instance sources in the same account only, which is what AzCopy's file-to-file copy needs. Like Copy File, the source URL's SAS is not checked. NFS: NFS shares: a symbolic link as source or destination is 400 XNfs4FileTypeUnsupportedException (unverified). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
+    },
+    {
+      "name": "Read Symbolic Link",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "Bearer"
+      ],
+      "notes": "GET ?restype=symboliclink returns x-ms-link-text, on a live share or a snapshot. A node that is not a symbolic link is 400 XNfs4FileTypeUnsupportedException (unverified). Needs an NFS share and x-ms-version 2025-07-05 or later. Owner only (Shared Key or a bearer token), as Azure documents. Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Rename Directory",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
@@ -367,11 +379,11 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "One row update moves the whole subtree. The source is a same-share URL; other shares or accounts return RenameAcrossAccountsAndSharesNotSupported, a destination inside the source returns RenameCycle, and an existing destination returns ResourceAlreadyExists. Open-file conflicts do not occur because handles are not modeled."
+      "notes": "One row update moves the whole subtree. The source is a same-share URL; other shares or accounts return RenameAcrossAccountsAndSharesNotSupported, a destination inside the source returns RenameCycle, and an existing destination returns ResourceAlreadyExists. Open-file conflicts do not occur because handles are not modeled. NFS: SMB-only: answers 403 XNfs4ShareDeniedException on an NFS share (ADR-0029; the status and code for this case are unverified). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Rename File",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
@@ -379,7 +391,7 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Honors x-ms-file-rename-replace-if-exists, -ignore-readonly, source and destination lease IDs, content type, metadata and SMB property overrides. Cross-share renames and share snapshots are rejected."
+      "notes": "Honors x-ms-file-rename-replace-if-exists, -ignore-readonly, source and destination lease IDs, content type, metadata and SMB property overrides. Cross-share renames and share snapshots are rejected. NFS: SMB-only: answers 403 XNfs4ShareDeniedException on an NFS share (ADR-0029; the status and code for this case are unverified). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Restore Share",
@@ -406,7 +418,7 @@
     },
     {
       "name": "Set Directory Properties",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
@@ -414,7 +426,7 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Updates attributes, timestamps and permission; absent headers preserve current values."
+      "notes": "Updates attributes, timestamps and permission; absent headers preserve current values. NFS: NFS shares: x-ms-mode, x-ms-owner and x-ms-group; an omitted one keeps its value. Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Set File Metadata",
@@ -438,7 +450,7 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Resizes with x-ms-content-length and updates SMB properties. HTTP properties are replaced as a set only when at least one x-ms-content-* or cache-control header is sent; otherwise they are preserved, so a pure resize keeps the content type."
+      "notes": "Resizes with x-ms-content-length and updates SMB properties. HTTP properties are replaced as a set only when at least one x-ms-content-* or cache-control header is sent; otherwise they are preserved, so a pure resize keeps the content type. NFS: NFS shares: x-ms-mode, x-ms-owner, x-ms-group and x-ms-link-count in the response; resizing a symbolic link is 400 XNfs4FileTypeUnsupportedException (unverified). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Set File Service Properties",
@@ -453,14 +465,14 @@
     },
     {
       "name": "Set Share ACL",
-      "state": "compatible",
+      "state": "known-difference",
       "authorization": [
         "SharedKey",
         "SharedKeyLite",
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Validates the SignedIdentifiers document (five policies, unique IDs of 64 characters or fewer, rcwdl permissions, ISO times). Policies are honored by service SAS tokens that name them with si."
+      "notes": "Validates the SignedIdentifiers document (five policies, unique IDs of 64 characters or fewer, rcwdl permissions, ISO times). Policies are honored by service SAS tokens that name them with si. NFS: SMB-only: answers 403 XNfs4ShareDeniedException on an NFS share (ADR-0029; the status and code for this case are unverified). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Set Share Metadata",
@@ -482,7 +494,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Updates quota and access tier; requires the lease ID when the share is leased. Azure's quota-downgrade and tier-transition limits are not enforced."
+      "notes": "Updates quota and access tier; requires the lease ID when the share is leased. Azure's quota-downgrade and tier-transition limits are not enforced. NFS: x-ms-root-squash and x-ms-enable-snapshot-virtual-directory-access on NFS shares; on an SMB share they are 400 InvalidHeaderValue (unverified). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Snapshot Share",
@@ -493,7 +505,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Copies the share's rows and shares file content by extent reference. The 200-snapshot limit is not enforced. Snapshot IDs are millisecond timestamps rendered with seven fractional digits."
+      "notes": "Copies the share's rows and shares file content by extent reference. The 200-snapshot limit is not enforced. Snapshot IDs are millisecond timestamps rendered with seven fractional digits. NFS: An NFS share's snapshot keeps its hard links and symbolic links. Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     }
   ]
 }

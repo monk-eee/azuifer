@@ -6,10 +6,11 @@ use super::{
     error::{Error, Result},
     lease,
     model::{
-        self, Attributes, Conditions, HttpProperties, Metadata, PermissionSpec, SmbProperties,
-        TimeSpec,
+        self, Attributes, Conditions, HttpProperties, Metadata, PermissionSpec, Posix,
+        SmbProperties, TimeSpec,
     },
     name::{EntryPath, ShareName},
+    store::{CopyBy, NfsCopy},
     time,
 };
 use crate::{auth, domain::AccountName};
@@ -289,16 +290,8 @@ impl Operation {
             Self::RenameFile => "Rename File",
             Self::CreateHardLink => "Create Hard Link",
             Self::CreateSymbolicLink => "Create Symbolic Link",
-            Self::GetSymbolicLink => "Get Symbolic Link",
+            Self::GetSymbolicLink => "Read Symbolic Link",
         }
-    }
-
-    /// True for recognised operations that answer with `NotImplemented`.
-    pub(crate) fn is_unsupported(self) -> bool {
-        matches!(
-            self,
-            Self::CreateHardLink | Self::CreateSymbolicLink | Self::GetSymbolicLink
-        )
     }
 
     /// The SAS scope and permissions the operation requires.
@@ -456,18 +449,27 @@ pub(super) fn route(
             (Some("rename"), _, _, true, _) => Ok(O::RenameFile),
             (Some("listhandles"), true, _, _, _) => Ok(O::ListFileHandles),
             (Some("forceclosehandles"), _, _, true, _) => Ok(O::ForceCloseFileHandles),
-            (Some("hardlink"), _, _, true, _) => Ok(O::CreateHardLink),
-            (Some("symboliclink"), _, _, true, _) => Ok(O::CreateSymbolicLink),
-            (Some("symboliclink"), true, _, _, _) => Ok(O::GetSymbolicLink),
             (
                 None
                 | Some(
                     "properties" | "metadata" | "range" | "rangelist" | "copy" | "lease" | "rename"
-                    | "listhandles" | "forceclosehandles" | "hardlink" | "symboliclink",
+                    | "listhandles" | "forceclosehandles",
                 ),
                 ..,
             ) => wrong_verb,
             _ => Err(Error::InvalidQueryParameterValue),
+        },
+        Some("hardlink") if !target.path.is_root() && comp.is_none() => {
+            if put {
+                Ok(O::CreateHardLink)
+            } else {
+                wrong_verb
+            }
+        }
+        Some("symboliclink") if !target.path.is_root() && comp.is_none() => match (get, put) {
+            (_, true) => Ok(O::CreateSymbolicLink),
+            (true, _) => Ok(O::GetSymbolicLink),
+            _ => wrong_verb,
         },
         _ => Err(Error::InvalidQueryParameterValue),
     }
@@ -616,6 +618,63 @@ impl Headers<'_> {
             (None, None) => PermissionSpec::Preserve,
         };
         Ok(smb)
+    }
+
+    /// `x-ms-mode`, `x-ms-owner` and `x-ms-group`; each is optional.
+    pub(super) fn posix(&self) -> Result<Posix> {
+        let id = |name: &str| -> Result<Option<u32>> {
+            self.get(name)?
+                .map(|value| {
+                    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                        return Err(Error::InvalidHeaderValue);
+                    }
+                    value.parse().map_err(|_| Error::InvalidHeaderValue)
+                })
+                .transpose()
+        };
+        Ok(Posix {
+            mode: self.get("x-ms-mode")?.map(model::parse_mode).transpose()?,
+            owner: id("x-ms-owner")?,
+            group: id("x-ms-group")?,
+        })
+    }
+
+    /// A header that is a Boolean when present and unset when absent.
+    pub(super) fn optional_flag(&self, name: &str) -> Result<Option<bool>> {
+        self.get(name)?
+            .map(|value| match value.to_ascii_lowercase().as_str() {
+                "true" => Ok(true),
+                "false" => Ok(false),
+                _ => Err(Error::InvalidHeaderValue),
+            })
+            .transpose()
+    }
+
+    /// `x-ms-file-mode-copy-mode` and `x-ms-file-owner-copy-mode`, each `source` (the
+    /// default) or `override`, which requires the headers that carry the new values.
+    pub(super) fn nfs_copy(&self) -> Result<NfsCopy> {
+        let by = |name: &str| -> Result<CopyBy> {
+            match self.get(name)? {
+                None => Ok(CopyBy::Source),
+                Some(value) if value.eq_ignore_ascii_case("source") => Ok(CopyBy::Source),
+                Some(value) if value.eq_ignore_ascii_case("override") => Ok(CopyBy::Override),
+                Some(_) => Err(Error::InvalidHeaderValue),
+            }
+        };
+        let copy = NfsCopy {
+            mode: by("x-ms-file-mode-copy-mode")?,
+            owner: by("x-ms-file-owner-copy-mode")?,
+            posix: self.posix()?,
+        };
+        if copy.mode == CopyBy::Override && copy.posix.mode.is_none() {
+            return Err(Error::MissingRequiredHeader);
+        }
+        if copy.owner == CopyBy::Override
+            && (copy.posix.owner.is_none() || copy.posix.group.is_none())
+        {
+            return Err(Error::MissingRequiredHeader);
+        }
+        Ok(copy)
     }
 
     /// Standard HTTP preconditions for reads.
@@ -936,11 +995,10 @@ mod tests {
             entry["state"].as_str().unwrap().to_owned()
         };
         for operation in Operation::ALL {
-            let state = state_of(operation.name());
-            assert_eq!(
-                state == "unsupported",
-                operation.is_unsupported(),
-                "{}",
+            assert_ne!(
+                state_of(operation.name()),
+                "unsupported",
+                "{} is implemented",
                 operation.name()
             );
         }

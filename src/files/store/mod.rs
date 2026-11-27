@@ -15,14 +15,20 @@ mod soft_delete;
 mod tests;
 
 pub(crate) use nodes::{
-    CopyRequest, CopySource, Listing, NewFile, ReadOptions, ReadRange, RenameFlags, Want,
+    CopyBy, CopyRequest, CopySource, FilePatch, Listing, NewFile, NfsCopy, ReadOptions, ReadRange,
+    RenameFlags, Want,
 };
-pub(crate) use shares::{LeaseRequest, ListSharesRequest, ShareRef, SnapshotPolicy};
+pub(crate) use shares::{
+    LeaseRequest, ListSharesRequest, NfsShareSettings, ShareOptions, ShareRef, SnapshotPolicy,
+};
 
 use super::{
     error::{Error, Result},
     lease::Lease,
-    model::{Attributes, CopyState, HttpProperties, NodeInfo, ShareInfo},
+    model::{
+        Attributes, CopyState, FileKind, HttpProperties, NfsProps, NodeInfo, Protocol, RootSquash,
+        ShareInfo,
+    },
     name::EntryPath,
 };
 use crate::clock::Clock;
@@ -41,6 +47,8 @@ CREATE TABLE IF NOT EXISTS shares (
     etag TEXT NOT NULL, modified INTEGER NOT NULL, quota INTEGER NOT NULL,
     access_tier TEXT NOT NULL, access_tier_changed INTEGER NOT NULL,
     metadata TEXT NOT NULL, acl TEXT NOT NULL, lease TEXT, next_file_id INTEGER NOT NULL,
+    protocol TEXT NOT NULL DEFAULT 'SMB', root_squash TEXT,
+    snapshot_vda INTEGER NOT NULL DEFAULT 1,
     UNIQUE (account, name, snapshot)
 ) STRICT;
 CREATE TABLE IF NOT EXISTS nodes (
@@ -52,10 +60,20 @@ CREATE TABLE IF NOT EXISTS nodes (
     length INTEGER NOT NULL, content_type TEXT NOT NULL, content_encoding TEXT,
     content_language TEXT, content_disposition TEXT, cache_control TEXT, md5 TEXT,
     lease TEXT, copy TEXT,
+    mode INTEGER, owner INTEGER, grp INTEGER, file_type TEXT NOT NULL DEFAULT '',
+    link_text TEXT,
     PRIMARY KEY (share_id, file_id),
     UNIQUE (share_id, parent_id, key)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS nodes_by_parent ON nodes (share_id, parent_id, key);
+CREATE TABLE IF NOT EXISTS links (
+    share_id INTEGER NOT NULL, entry_id INTEGER NOT NULL, file_id INTEGER NOT NULL,
+    parent_id INTEGER NOT NULL, name TEXT NOT NULL, key TEXT NOT NULL,
+    PRIMARY KEY (share_id, entry_id),
+    UNIQUE (share_id, parent_id, key),
+    FOREIGN KEY (share_id, file_id) REFERENCES nodes (share_id, file_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX IF NOT EXISTS links_by_inode ON links (share_id, file_id);
 CREATE TABLE IF NOT EXISTS ranges (
     share_id INTEGER NOT NULL, file_id INTEGER NOT NULL, offset INTEGER NOT NULL,
     length INTEGER NOT NULL, extent TEXT NOT NULL, extent_offset INTEGER NOT NULL,
@@ -149,6 +167,7 @@ impl Store {
             )
         };
         db.pragma_update(None, "foreign_keys", true)?;
+        migrate(&db).context("could not upgrade the file metadata")?;
         db.execute_batch(SCHEMA)?;
         db.execute_batch(super::service::SCHEMA)?;
         db.execute_batch(soft_delete::SCHEMA)?;
@@ -181,6 +200,50 @@ impl Store {
         .await
         .map_err(|_| internal("metadata operation did not complete"))?
     }
+}
+
+/// Adds the columns a newer version introduced to tables an older version created. A table
+/// that does not exist yet is left to `SCHEMA`.
+fn migrate(db: &Connection) -> anyhow::Result<()> {
+    const ADDED: [(&str, &[(&str, &str)]); 2] = [
+        (
+            "shares",
+            &[
+                ("protocol", "TEXT NOT NULL DEFAULT 'SMB'"),
+                ("root_squash", "TEXT"),
+                ("snapshot_vda", "INTEGER NOT NULL DEFAULT 1"),
+            ],
+        ),
+        (
+            "nodes",
+            &[
+                ("mode", "INTEGER"),
+                ("owner", "INTEGER"),
+                ("grp", "INTEGER"),
+                ("file_type", "TEXT NOT NULL DEFAULT ''"),
+                ("link_text", "TEXT"),
+            ],
+        ),
+    ];
+    for (table, columns) in ADDED {
+        let mut info = db.prepare(&format!("PRAGMA table_info({table})"))?;
+        let present = info
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(info);
+        if present.is_empty() {
+            continue;
+        }
+        for (name, definition) in columns {
+            if !present.iter().any(|column| column == name) {
+                db.execute(
+                    &format!("ALTER TABLE {table} ADD COLUMN {name} {definition}"),
+                    [],
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn db_error(error: rusqlite::Error) -> Error {
@@ -237,11 +300,31 @@ pub(super) struct ShareRow {
 }
 
 pub(super) const SHARE_COLUMNS: &str = "id, name, snapshot, etag, modified, quota, access_tier, \
-     access_tier_changed, metadata, acl, lease";
+     access_tier_changed, metadata, acl, lease, protocol, root_squash, snapshot_vda";
 
 pub(super) fn share_row(row: &Row<'_>) -> rusqlite::Result<ShareRow> {
     let snapshot: i64 = row.get(2)?;
     let quota: i64 = row.get(5)?;
+    let protocol: String = row.get(11)?;
+    let protocol = Protocol::parse(&protocol).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            11,
+            rusqlite::types::Type::Text,
+            "protocol".into(),
+        )
+    })?;
+    let root_squash = row
+        .get::<_, Option<String>>(12)?
+        .map(|text| {
+            RootSquash::parse(&text).map_err(|_| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    12,
+                    rusqlite::types::Type::Text,
+                    "root squash".into(),
+                )
+            })
+        })
+        .transpose()?;
     Ok(ShareRow {
         id: row.get(0)?,
         info: ShareInfo {
@@ -256,19 +339,61 @@ pub(super) fn share_row(row: &Row<'_>) -> rusqlite::Result<ShareRow> {
             metadata: from_json(&row.get::<_, String>(8)?)?,
             lease: optional_json::<Lease>(row, 10)?,
             deleted: None,
+            protocol,
+            root_squash,
+            snapshot_virtual_directory_access: row.get::<_, i64>(13)? != 0,
         },
         acl: from_json(&row.get::<_, String>(9)?)?,
     })
 }
 
+/// The columns `node_row` reads, for a query over `nodes` itself. Column 26 counts the
+/// inode's names and column 27 is the `links` entry, absent for the first name.
 pub(super) const NODE_COLUMNS: &str = "file_id, parent_id, name, is_dir, etag, modified, \
      attributes, creation, last_write, change_time, permission_key, metadata, length, \
      content_type, content_encoding, content_language, content_disposition, cache_control, \
-     md5, lease, copy";
+     md5, lease, copy, mode, owner, grp, file_type, link_text, \
+     1 + (SELECT COUNT(*) FROM links WHERE links.share_id = nodes.share_id \
+          AND links.file_id = nodes.file_id), NULL";
+
+/// The same columns for a name that is a hard link: the inode's properties under the link's
+/// own parent and name. Selects `FROM links a JOIN nodes n`.
+pub(super) const LINK_COLUMNS: &str = "n.file_id, a.parent_id, a.name, n.is_dir, n.etag, \
+     n.modified, n.attributes, n.creation, n.last_write, n.change_time, n.permission_key, \
+     n.metadata, n.length, n.content_type, n.content_encoding, n.content_language, \
+     n.content_disposition, n.cache_control, n.md5, n.lease, n.copy, n.mode, n.owner, n.grp, \
+     n.file_type, n.link_text, \
+     1 + (SELECT COUNT(*) FROM links x WHERE x.share_id = n.share_id AND x.file_id = n.file_id), \
+     a.entry_id";
 
 pub(super) fn node_row(row: &Row<'_>) -> rusqlite::Result<NodeInfo> {
     let length: i64 = row.get(12)?;
     let bits: i64 = row.get(6)?;
+    let nfs = match row.get::<_, Option<i64>>(21)? {
+        None => None,
+        Some(mode) => {
+            let id = |index| -> rusqlite::Result<u32> {
+                let value: i64 = row.get(index)?;
+                u32::try_from(value)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+            };
+            let kind: String = row.get(24)?;
+            Some(NfsProps {
+                mode: u32::try_from(mode)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(21, mode))?,
+                owner: id(22)?,
+                group: id(23)?,
+                kind: FileKind::parse(&kind).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        24,
+                        rusqlite::types::Type::Text,
+                        "file type".into(),
+                    )
+                })?,
+                link_text: row.get(25)?,
+            })
+        }
+    };
     Ok(NodeInfo {
         file_id: row.get(0)?,
         parent_id: row.get(1)?,
@@ -296,6 +421,9 @@ pub(super) fn node_row(row: &Row<'_>) -> rusqlite::Result<NodeInfo> {
         },
         lease: optional_json::<Lease>(row, 19)?,
         copy: optional_json::<CopyState>(row, 20)?,
+        nfs,
+        links: row.get(26)?,
+        entry: row.get(27)?,
     })
 }
 
@@ -307,14 +435,32 @@ pub(super) struct Resolved {
     pub(super) parent: Option<NodeInfo>,
 }
 
+/// The entry of a directory with this folded name: an inode's first name, else a hard link.
 pub(super) fn child(
     db: &Connection,
     share_id: i64,
     parent_id: i64,
     key: &str,
 ) -> Result<Option<NodeInfo>> {
+    let first = db
+        .query_row(
+            &format!(
+                "SELECT {NODE_COLUMNS} FROM nodes WHERE share_id=?1 AND parent_id=?2 AND key=?3"
+            ),
+            params![share_id, parent_id, key],
+            node_row,
+        )
+        .optional()
+        .map_err(db_error)?;
+    if first.is_some() {
+        return Ok(first);
+    }
     db.query_row(
-        &format!("SELECT {NODE_COLUMNS} FROM nodes WHERE share_id=?1 AND parent_id=?2 AND key=?3"),
+        &format!(
+            "SELECT {LINK_COLUMNS} FROM links a JOIN nodes n
+             ON n.share_id = a.share_id AND n.file_id = a.file_id
+             WHERE a.share_id=?1 AND a.parent_id=?2 AND a.key=?3"
+        ),
         params![share_id, parent_id, key],
         node_row,
     )
@@ -357,13 +503,17 @@ pub(super) fn resolve(db: &Connection, share_id: i64, path: &EntryPath) -> Resul
     })
 }
 
-/// Writes every mutable column of an existing node.
+/// Writes every mutable column of an existing node. A node reached through a hard link
+/// keeps the name and parent of its own `links` row: only the inode's properties change.
 pub(super) fn save_node(db: &Connection, share_id: i64, node: &NodeInfo) -> Result<()> {
+    let nfs = node.nfs.as_ref();
     db.execute(
-        "UPDATE nodes SET parent_id=?3, name=?4, key=?5, etag=?6, modified=?7, attributes=?8,
+        "UPDATE nodes SET parent_id=IIF(?23, parent_id, ?3), name=IIF(?23, name, ?4),
+            key=IIF(?23, key, ?5), etag=?6, modified=?7, attributes=?8,
             creation=?9, last_write=?10, change_time=?11, permission_key=?12, metadata=?13,
             length=?14, content_type=?15, content_encoding=?16, content_language=?17,
-            content_disposition=?18, cache_control=?19, md5=?20, lease=?21, copy=?22
+            content_disposition=?18, cache_control=?19, md5=?20, lease=?21, copy=?22,
+            mode=?24, owner=?25, grp=?26, file_type=?27, link_text=?28
          WHERE share_id=?1 AND file_id=?2",
         params![
             share_id,
@@ -388,6 +538,12 @@ pub(super) fn save_node(db: &Connection, share_id: i64, node: &NodeInfo) -> Resu
             node.http.md5,
             node.lease.as_ref().map(json).transpose()?,
             node.copy.as_ref().map(json).transpose()?,
+            node.entry.is_some(),
+            nfs.map(|nfs| i64::from(nfs.mode)),
+            nfs.map(|nfs| i64::from(nfs.owner)),
+            nfs.map(|nfs| i64::from(nfs.group)),
+            nfs.map_or("", |nfs| nfs.kind.as_str()),
+            nfs.and_then(|nfs| nfs.link_text.as_deref()),
         ],
     )
     .map_err(db_error)?;
