@@ -90,6 +90,7 @@ pub(super) enum Media {
     OctetStream,
     AvroBinary,
     Xml,
+    OdataXml,
     JsonNoMetadata,
     JsonMinimalMetadata,
     Json,
@@ -135,6 +136,9 @@ pub(super) enum ErrorCode {
     ResourceNotFound,
     SourceConditionNotMet,
     NoPendingCopyOperation,
+    OutOfRangeQueryParameterValue,
+    RequestBodyTooLarge,
+    AtomFormatNotSupported,
     Other,
 }
 
@@ -177,6 +181,9 @@ impl ErrorCode {
             Some("ResourceNotFound") => Self::ResourceNotFound,
             Some("SourceConditionNotMet") => Self::SourceConditionNotMet,
             Some("NoPendingCopyOperation") => Self::NoPendingCopyOperation,
+            Some("OutOfRangeQueryParameterValue") => Self::OutOfRangeQueryParameterValue,
+            Some("RequestBodyTooLarge") => Self::RequestBodyTooLarge,
+            Some("AtomFormatNotSupported") => Self::AtomFormatNotSupported,
             Some(_) => Self::Other,
         }
     }
@@ -349,6 +356,7 @@ pub(super) fn media(headers: &HeaderMap) -> Media {
         Some("application/octet-stream") => Media::OctetStream,
         Some("avro/binary") => Media::AvroBinary,
         Some("application/xml" | "application/xml; charset=utf-8") => Media::Xml,
+        Some("application/xml;charset=utf-8") => Media::OdataXml,
         Some("application/json;odata=nometadata;streaming=true;charset=utf-8") => {
             Media::JsonNoMetadata
         }
@@ -477,6 +485,51 @@ pub(super) fn error_message<'a>(message: &'a str, request_id: Option<&str>) -> (
         _ => Header::Different,
     };
     (prefix, correlation)
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct OdataError {
+    pub(super) code: ErrorCode,
+    english: bool,
+    message_matches: bool,
+    correlation: Header,
+    extra_properties: bool,
+}
+
+impl OdataError {
+    pub(super) fn project(bytes: &[u8], request_id: Option<&str>, expected: &str) -> Result<Self> {
+        let envelope: serde_json::Value = serde_json::from_slice(bytes)
+            .map_err(|_| anyhow::anyhow!("invalid Table OData JSON error"))?;
+        let error = &envelope["odata.error"];
+        let message = &error["message"];
+        let (text, correlation) = error_message(
+            message["value"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing Table OData message"))?,
+            request_id,
+        );
+        let has_size = |value: &serde_json::Value, size| {
+            value.as_object().is_some_and(|map| map.len() == size)
+        };
+        Ok(Self {
+            code: ErrorCode::from_value(error["code"].as_str()),
+            english: message["lang"] == "en-US",
+            message_matches: text == expected,
+            correlation,
+            extra_properties: !(has_size(&envelope, 1)
+                && has_size(error, 2)
+                && has_size(message, 2)),
+        })
+    }
+
+    pub(super) fn matches(&self, code: ErrorCode) -> bool {
+        self.code == code
+            && self.english
+            && self.message_matches
+            && self.correlation == Header::Matches
+            && !self.extra_properties
+    }
 }
 
 pub(super) fn is_utc_timestamp(value: &str) -> bool {

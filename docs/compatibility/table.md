@@ -54,7 +54,8 @@ Table catalog operations omit the legacy `DataServiceVersion` response header. D
 - No 5 second query timeout, no short pages at partition boundaries, and no `$orderby`, `$skip`, `$expand`, `$count` or filter functions (these return 501 or 400).
 - Service properties, metrics and logging are stored and returned but never applied. CORS rules are validated when set and enforced: `OPTIONS` preflights are answered from them (400 `MissingRequiredHeader` without `Origin` and `Access-Control-Request-Method`, 403 `CorsPreflightFailure` without a matching rule), and responses to requests with an allowed `Origin` carry the `Access-Control-*` headers. The error bodies are Table's JSON form and have not been compared with Azure. Service stats are always `live`.
 - Batches parse and validate every operation before executing, so error index precedence can differ from Azure when several operations are invalid.
-- Atom payloads are rejected with 415 `AtomFormatNotSupported`.
+- Atom payloads are rejected with 415 `AtomFormatNotSupported`. An [Atom Accept header](../../tests/contracts/cassettes/table-atom-accept.json) or [Atom `$format` override](../../tests/contracts/cassettes/table-atom-format.json) gets an OData XML error. An [Atom request body with JSON Accept](../../tests/contracts/cassettes/table-atom-content.json) gets a negotiated OData JSON error. These recorded errors carry the code in the body, not in `x-ms-error-code`.
+- An [incomplete entity filter](../../tests/contracts/cassettes/table-incomplete-filter.json) returns 400 `InvalidInput` in negotiated OData JSON with the position and expression. That recording does not cover successful entity queries, filter functions, or entity authorization.
 - `x-ms-version` values at or below the baseline are accepted and echoed; newer values are accepted (and the baseline reported) only with `--skip-api-version-check`.
 
 ## Storage

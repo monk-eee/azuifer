@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "queue_visibility",
+  "api_version": "2023-11-03",
+  "response": {
+    "status": 400,
+    "request_id": "matches",
+    "api_version": "matches",
+    "header_code": "out_of_range_query_parameter_value",
+    "body": {
+      "kind": "queue_xml",
+      "error": {
+        "code": "out_of_range_query_parameter_value",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 4
+      },
+      "limit_details_match": true
+    }
+  }
+}

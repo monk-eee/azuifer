@@ -1,5 +1,6 @@
 //! Table service errors and their Azure wire shape.
 
+use super::edm::Metadata;
 use crate::{domain::Error, wire};
 use axum::http::StatusCode;
 
@@ -173,19 +174,39 @@ impl Kind {
 pub(super) struct TableError {
     kind: Kind,
     detail: Option<String>,
+    odata_format: Option<OdataErrorFormat>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OdataErrorFormat {
+    Json(Metadata),
+    Xml,
 }
 
 impl TableError {
     pub(super) fn new(kind: Kind) -> Self {
-        Self { kind, detail: None }
+        Self {
+            kind,
+            detail: None,
+            odata_format: None,
+        }
     }
 
     /// An error whose message carries request-specific detail in place of the generic text.
     pub(super) fn with(kind: Kind, detail: impl Into<String>) -> Self {
         Self {
-            kind,
             detail: Some(detail.into()),
+            ..Self::new(kind)
         }
+    }
+
+    pub(super) fn with_odata_format(mut self, format: OdataErrorFormat) -> Self {
+        self.odata_format = Some(format);
+        self
+    }
+
+    pub(super) fn odata_format(&self) -> Option<OdataErrorFormat> {
+        self.odata_format
     }
 
     pub(super) fn kind(&self) -> Kind {
@@ -203,12 +224,21 @@ impl TableError {
     /// The Azure error document. `index` prefixes the message with the failed batch
     /// operation, and the request id and time trail the text as Azure sends them.
     pub(super) fn body(&self, index: Option<usize>, request_id: &str, time: &str) -> String {
-        let text = self.detail.as_deref().unwrap_or(self.kind.message());
-        let prefix = index.map_or_else(String::new, |index| format!("{index}:"));
         wire::json_error_body(
             self.code(),
-            &format!("{prefix}{text}\nRequestId:{request_id}\nTime:{time}"),
+            &self.correlated_message(index, request_id, time),
         )
+    }
+
+    pub(super) fn correlated_message(
+        &self,
+        index: Option<usize>,
+        request_id: &str,
+        time: &str,
+    ) -> String {
+        let text = self.detail.as_deref().unwrap_or(self.kind.message());
+        let prefix = index.map_or_else(String::new, |index| format!("{index}:"));
+        format!("{prefix}{text}\nRequestId:{request_id}\nTime:{time}")
     }
 }
 

@@ -39,7 +39,7 @@ struct App {
 }
 
 #[derive(Clone, Copy)]
-struct CatalogResponse;
+struct OdataResponse;
 
 pub(crate) async fn router(
     config: Arc<Config>,
@@ -88,8 +88,8 @@ async fn dispatch(State(app): State<Arc<App>>, request: Request) -> Response {
         Err(error) => Err(error.clone()),
     };
     let mut response =
-        outcome.unwrap_or_else(|error| handlers::error_response(&error, None, &request_id, now));
-    let legacy_odata = response.extensions().get::<CatalogResponse>().is_none();
+        outcome.unwrap_or_else(|error| handlers::request_error_response(&error, &request_id, now));
+    let legacy_odata = response.extensions().get::<OdataResponse>().is_none();
     let version = version.unwrap_or_else(|_| app.config.api_version.as_str().to_owned());
     let client_request_id = parts
         .headers
@@ -217,6 +217,6 @@ async fn handle(
     }
     let mut response = result
         .unwrap_or_else(|error| handlers::catalog_error_response(error, level, request_id, now));
-    response.extensions_mut().insert(CatalogResponse);
+    response.extensions_mut().insert(OdataResponse);
     Ok(response)
 }

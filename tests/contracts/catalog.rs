@@ -1,7 +1,7 @@
 use super::{
     Service, VERSION,
     cassette::{
-        ApiVersion, ErrorCode, Header, Media, Source, echoed, error_message, header, header_text,
+        ApiVersion, ErrorCode, Header, Media, OdataError, Source, echoed, header, header_text,
         media, project_xml,
     },
     finish_cleanup, read_bounded, request,
@@ -43,6 +43,14 @@ impl Case {
         match self {
             Self::QueueLifecycle => "queue-lifecycle",
             Self::TableLifecycle => "table-lifecycle",
+        }
+    }
+
+    fn fresh_prefix(self) -> String {
+        let id = Uuid::new_v4().simple();
+        match self {
+            Self::QueueLifecycle => format!("azuifer-contract-{id}-"),
+            Self::TableLifecycle => format!("AzuiferContract{id}"),
         }
     }
 
@@ -128,13 +136,7 @@ enum Body {
         no_odata_metadata: bool,
     },
     XmlError(XmlError),
-    TableError {
-        code: ErrorCode,
-        english: bool,
-        message_matches: bool,
-        correlation: Header,
-        extra_properties: bool,
-    },
+    TableError(OdataError),
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -226,10 +228,10 @@ impl CatalogCassette {
                                 },
                         (Body::XmlError(error), Step::ReadMissing) =>
                             error.code == ErrorCode::QueueNotFound,
-                        (Body::TableError { code, .. }, Step::RepeatCreate) =>
-                            *code == ErrorCode::TableAlreadyExists,
-                        (Body::TableError { code, .. }, Step::ReadMissing | Step::RepeatDelete) =>
-                            *code == ErrorCode::ResourceNotFound,
+                        (Body::TableError(error), Step::RepeatCreate) =>
+                            error.code == ErrorCode::TableAlreadyExists,
+                        (Body::TableError(error), Step::ReadMissing | Step::RepeatDelete) =>
+                            error.code == ErrorCode::ResourceNotFound,
                         (
                             Body::TableCreated {
                                 empty, preference, ..
@@ -317,28 +319,12 @@ impl Reply {
     }
 
     fn table_error(&self, step: Step, expected: &str) -> Result<Exchange> {
-        let envelope = self.json()?;
-        let error = &envelope["odata.error"];
-        let message = &error["message"];
-        let (text, correlation) = error_message(
-            message["value"]
-                .as_str()
-                .context("missing Table OData message")?,
+        let error = OdataError::project(
+            &self.bytes,
             header_text(&self.headers, "x-ms-request-id"),
-        );
-        let has_size = |value: &Value, size| value.as_object().is_some_and(|map| map.len() == size);
-        Ok(self.exchange(
-            step,
-            Body::TableError {
-                code: ErrorCode::from_value(error["code"].as_str()),
-                english: message["lang"] == "en-US",
-                message_matches: text == expected,
-                correlation,
-                extra_properties: !(has_size(&envelope, 1)
-                    && has_size(error, 2)
-                    && has_size(message, 2)),
-            },
-        ))
+            expected,
+        )?;
+        Ok(self.exchange(step, Body::TableError(error)))
     }
 
     fn json(&self) -> Result<Value> {
@@ -584,6 +570,32 @@ impl Probe<'_> {
     }
 }
 
+pub(super) fn with_fresh_resource<T>(
+    client: &Client,
+    endpoint: &Url,
+    bearer: &str,
+    case: Case,
+    observe: impl FnOnce(&str) -> Result<T>,
+) -> Result<T> {
+    let probe = Probe {
+        client,
+        endpoint,
+        bearer,
+        case,
+    };
+    let name = format!("{}a", case.fresh_prefix());
+    require_status(
+        &probe.create(&name, false)?,
+        case.steps()[0].1,
+        "create validation probe resource",
+    )?;
+    let outcome = observe(&name);
+    let cleanup = probe
+        .delete(&name)
+        .and_then(|response| require_status(&response, 204, "clean up validation probe resource"));
+    finish_cleanup(outcome, cleanup)
+}
+
 pub(super) fn observe(
     client: &Client,
     endpoint: &Url,
@@ -597,10 +609,10 @@ pub(super) fn observe(
         bearer,
         case,
     };
-    let id = Uuid::new_v4().simple();
-    let (prefix, suffixes) = match case {
-        Case::QueueLifecycle => (format!("azuifer-contract-{id}-"), ["a", "b"]),
-        Case::TableLifecycle => (format!("AzuiferContract{id}"), ["A", "B"]),
+    let prefix = case.fresh_prefix();
+    let suffixes = match case {
+        Case::QueueLifecycle => ["a", "b"],
+        Case::TableLifecycle => ["A", "B"],
     };
     let (first, second) = (
         format!("{prefix}{}", suffixes[0]),

@@ -4,7 +4,7 @@ use super::{
     auth::Access,
     batch::{self, Batch},
     edm::{self, Metadata, Select},
-    error::{Kind, Result, TableError},
+    error::{Kind, OdataErrorFormat, Result, TableError},
     filter::{self, Expr},
     model::{EntityKey, KeyValue, Precondition, Properties, TableName},
     service::{self, AccessPolicy},
@@ -311,11 +311,15 @@ fn level_from_media(value: &str) -> Option<Metadata> {
     })
 }
 
+fn atom_not_supported(format: OdataErrorFormat) -> TableError {
+    TableError::new(Kind::AtomFormatNotSupported).with_odata_format(format)
+}
+
 fn negotiate(accept: Option<&str>, format: Option<&str>) -> Result<Metadata> {
     if let Some(format) = format {
         return match format.trim().to_ascii_lowercase().as_str() {
             "json" => Ok(Metadata::Minimal),
-            "atom" | "xml" => Err(TableError::new(Kind::AtomFormatNotSupported)),
+            "atom" | "xml" => Err(atom_not_supported(OdataErrorFormat::Xml)),
             _ => level_from_media(format)
                 .ok_or_else(|| TableError::new(Kind::JsonFormatNotSupported)),
         };
@@ -335,11 +339,11 @@ fn negotiate(accept: Option<&str>, format: Option<&str>) -> Result<Metadata> {
             .to_ascii_lowercase();
         matches!(media.as_str(), "application/atom+xml" | "application/xml")
     });
-    Err(TableError::new(if atom {
-        Kind::AtomFormatNotSupported
+    Err(if atom {
+        atom_not_supported(OdataErrorFormat::Xml)
     } else {
-        Kind::JsonFormatNotSupported
-    }))
+        TableError::new(Kind::JsonFormatNotSupported)
+    })
 }
 
 fn format(headers: &HeaderMap, query: &Query) -> Result<Format> {
@@ -355,7 +359,7 @@ fn format(headers: &HeaderMap, query: &Query) -> Result<Format> {
     })
 }
 
-fn require_json(headers: &HeaderMap) -> Result<()> {
+fn require_json(headers: &HeaderMap, level: Metadata) -> Result<()> {
     let content_type = header(headers, "content-type")?.unwrap_or_default();
     let media = content_type
         .split(';')
@@ -366,7 +370,7 @@ fn require_json(headers: &HeaderMap) -> Result<()> {
     match media.as_str() {
         "" | "application/json" => Ok(()),
         "application/atom+xml" | "application/xml" => {
-            Err(TableError::new(Kind::AtomFormatNotSupported))
+            Err(atom_not_supported(OdataErrorFormat::Json(level)))
         }
         _ => Err(TableError::new(Kind::JsonFormatNotSupported)),
     }
@@ -423,10 +427,13 @@ fn reject_unsupported_options(query: &Query) -> Result<()> {
     Ok(())
 }
 
-fn parse_filter(query: &Query) -> Result<Option<Expr>> {
+fn parse_filter(query: &Query, level: Metadata) -> Result<Option<Expr>> {
     query
         .get("$filter")
-        .map(|text| filter::parse(text))
+        .map(|text| {
+            filter::parse(text)
+                .map_err(|error| error.with_odata_format(OdataErrorFormat::Json(level)))
+        })
         .transpose()
 }
 
@@ -473,13 +480,13 @@ pub(super) fn build(
             Method::GET => {
                 reject_unsupported_options(query)?;
                 Operation::QueryTables(TableQuery {
-                    filter: parse_filter(query)?,
+                    filter: parse_filter(query, format.level)?,
                     top: top(query)?,
                     after: query.get("nexttablename").cloned(),
                 })
             }
             Method::POST => {
-                require_json(headers)?;
+                require_json(headers, format.level)?;
                 Operation::CreateTable(edm::parse_table_name(body)?)
             }
             _ => return Err(not_allowed()),
@@ -497,7 +504,7 @@ pub(super) fn build(
             (&Method::GET, Some("acl")) => Operation::GetAcl(table),
             (&Method::PUT, Some("acl")) => Operation::SetAcl(table, service::parse_acl(body)?),
             (&Method::POST, None) => {
-                require_json(headers)?;
+                require_json(headers, format.level)?;
                 let entity = edm::parse_entity(body)?;
                 let (Some(partition), Some(row)) = (entity.partition, entity.row) else {
                     return Err(TableError::new(Kind::PropertiesNeedValue));
@@ -526,7 +533,7 @@ pub(super) fn build(
                 Operation::QueryEntities(
                     table,
                     EntityQuery {
-                        filter: parse_filter(query)?,
+                        filter: parse_filter(query, format.level)?,
                         select: query
                             .get("$select")
                             .map(|s| Select::parse(s))
@@ -560,7 +567,7 @@ pub(super) fn build(
                 write(table, WriteKind::Delete, key, Properties::new(), condition)
             }
             "PUT" | "MERGE" | "PATCH" => {
-                require_json(headers)?;
+                require_json(headers, format.level)?;
                 let condition = precondition(headers)?;
                 let entity = edm::parse_entity(body)?;
                 let mismatch = entity

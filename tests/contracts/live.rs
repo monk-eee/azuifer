@@ -470,7 +470,7 @@ fn check_live_blob_account_reads() -> Result<()> {
 
 fn check_live_rejection(case: request_errors::Case) -> Result<()> {
     run_live(
-        Service::Blob,
+        case.service(),
         || request_errors::reviewed(case),
         |client, _, endpoint, bearer| {
             request_errors::observe(client, endpoint, bearer, Source::Azure, case)
@@ -482,6 +482,27 @@ fn check_live_rejection(case: request_errors::Case) -> Result<()> {
             save_azure(Record::RequestRejection(azure))
         },
     )
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_wave_2_queue_put_limits() -> Result<()> {
+    check_live_rejection(request_errors::Case::QueueVisibility)?;
+    check_live_rejection(request_errors::Case::QueueMessageTooLarge)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_wave_2_table_atom_boundary() -> Result<()> {
+    check_live_rejection(request_errors::Case::TableAtomAccept)?;
+    check_live_rejection(request_errors::Case::TableAtomFormat)?;
+    check_live_rejection(request_errors::Case::TableAtomContent)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_wave_2_table_incomplete_filter() -> Result<()> {
+    check_live_rejection(request_errors::Case::TableIncompleteFilter)
 }
 
 #[test]

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "table_incomplete_filter",
+  "api_version": "2023-11-03",
+  "response": {
+    "status": 400,
+    "request_id": "matches",
+    "api_version": "matches",
+    "header_code": "missing",
+    "dataserviceversion": "missing",
+    "body": {
+      "kind": "table_json",
+      "media": "json_no_metadata",
+      "error": {
+        "code": "invalid_input",
+        "english": true,
+        "message_matches": true,
+        "correlation": "matches",
+        "extra_properties": false
+      }
+    }
+  }
+}

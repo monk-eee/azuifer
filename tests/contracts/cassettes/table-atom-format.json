@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "table_atom_format",
+  "api_version": "2023-11-03",
+  "response": {
+    "status": 415,
+    "request_id": "matches",
+    "api_version": "matches",
+    "header_code": "missing",
+    "dataserviceversion": "missing",
+    "body": {
+      "kind": "table_xml",
+      "code": "atom_format_not_supported",
+      "namespace_matches": true,
+      "english": true,
+      "message_matches": true,
+      "correlation": "matches"
+    }
+  }
+}
