@@ -5,15 +5,16 @@ use super::{
     auth::Overrides,
     error::{Error, Result},
     lease::{self, Kind, Outcome},
-    model::{AccessPolicy, Metadata, TimeSpec},
+    model::{AccessPolicy, Metadata, Posix, Protocol, RootSquash, TimeSpec},
     request::{ByteRange, Headers, Operation, Query, Target, file_length},
     response::{
         self, EntryDetail, ListEntriesView, ListSharesView, decode_marker, empty, etag_headers,
         http_property_headers, node_headers, property_headers, set, share_headers,
     },
     store::{
-        CopyRequest, CopySource, LeaseRequest, ListSharesRequest, NewFile, ReadOptions, ReadRange,
-        RenameFlags, ShareRef, SnapshotPolicy, Want,
+        CopyRequest, CopySource, FilePatch, LeaseRequest, ListSharesRequest, NewFile,
+        NfsShareSettings, ReadOptions, ReadRange, RenameFlags, ShareOptions, ShareRef,
+        SnapshotPolicy, Want,
     },
     time, xml,
 };
@@ -33,6 +34,8 @@ const TIERS: [&str; 3] = ["TransactionOptimized", "Hot", "Cool"];
 
 pub(super) struct Context<'a> {
     pub(super) app: &'a Arc<App>,
+    /// The `x-ms-version` the request names (or its SAS `sv`, or the baseline).
+    pub(super) version: String,
     pub(super) operation: Operation,
     pub(super) target: Target,
     /// The `Host` the client addressed, when it used host-style addressing.
@@ -42,7 +45,57 @@ pub(super) struct Context<'a> {
     pub(super) overrides: Overrides,
 }
 
+/// First versions of the NFS link operations: hard links with NFS over REST, symbolic links
+/// two versions later.
+const HARD_LINK_VERSION: &str = "2025-05-05";
+const SYMBOLIC_LINK_VERSION: &str = "2025-07-05";
+
 impl Context<'_> {
+    /// Operations that exist only from a given version answer as a service that does not
+    /// know the `restype` would.
+    fn require_version(&self, minimum: &str) -> Result<()> {
+        if self.version.as_str() < minimum {
+            return Err(Error::InvalidQueryParameterValue);
+        }
+        Ok(())
+    }
+
+    /// SMB-only operations are refused on an NFS share.
+    async fn deny_on_nfs(&self) -> Result<()> {
+        let share = self.app.store.share(self.share()?).await?;
+        if share.protocol == Protocol::Nfs {
+            return Err(Error::XNfs4ShareDeniedException);
+        }
+        Ok(())
+    }
+
+    /// The path named by `x-ms-file-target-file`: a path from the share root, or the URL of
+    /// a file of this share. Parsed as a URL path is, so percent-encoding applies.
+    fn share_path(&self, value: &str) -> Result<super::name::EntryPath> {
+        if value.len() > 2048 || value.is_empty() {
+            return Err(Error::InvalidHeaderValue);
+        }
+        if value.starts_with("http://") || value.starts_with("https://") {
+            let (source, _) = local_source(self, value)?;
+            if source.account != self.target.account || source.share != self.target.share {
+                return Err(Error::InvalidHeaderValue);
+            }
+            return Ok(source.path);
+        }
+        let share = self.target.share.as_ref().ok_or(Error::InvalidUri)?;
+        Target::parse(
+            &format!(
+                "/{}/{}/{}",
+                self.target.account.as_str(),
+                share.as_str(),
+                value.trim_start_matches('/')
+            ),
+            self.headers.flag("x-ms-allow-trailing-dot")?,
+        )
+        .map(|target| target.path)
+        .map_err(|_| Error::InvalidHeaderValue)
+    }
+
     fn share(&self) -> Result<ShareRef> {
         Ok(ShareRef {
             account: self.target.account.clone(),
@@ -128,12 +181,14 @@ pub(super) async fn execute(ctx: Context<'_>, body: Body) -> Result<Response> {
             Ok(empty(StatusCode::ACCEPTED))
         }
         O::GetShareAcl => {
+            ctx.deny_on_nfs().await?;
             let (share, policies) = ctx.app.store.share_acl(ctx.live()?).await?;
             let mut reply = response::access_policies(&policies);
             etag_headers(reply.headers_mut(), &share.etag, share.modified)?;
             Ok(reply)
         }
         O::SetShareAcl => {
+            ctx.deny_on_nfs().await?;
             let bytes = read_small(&ctx, body).await?;
             let policies = xml::parse_access_policies(&bytes)?;
             let share = ctx
@@ -170,6 +225,7 @@ pub(super) async fn execute(ctx: Context<'_>, body: Body) -> Result<Response> {
             Ok(reply)
         }
         O::CreatePermission => {
+            ctx.deny_on_nfs().await?;
             let bytes = read_small(&ctx, body).await?;
             let key = ctx
                 .app
@@ -181,6 +237,7 @@ pub(super) async fn execute(ctx: Context<'_>, body: Body) -> Result<Response> {
             Ok(reply)
         }
         O::GetPermission => {
+            ctx.deny_on_nfs().await?;
             let key = ctx.headers.required("x-ms-file-permission-key")?.to_owned();
             let sddl = ctx.app.store.permission(ctx.live()?, key).await?;
             Ok(response::json(
@@ -197,6 +254,7 @@ pub(super) async fn execute(ctx: Context<'_>, body: Body) -> Result<Response> {
                     ctx.target.path.clone(),
                     ctx.headers.smb(true)?,
                     ctx.headers.metadata()?,
+                    ctx.headers.posix()?,
                 )
                 .await?;
             with_node(StatusCode::CREATED, &node)
@@ -225,6 +283,7 @@ pub(super) async fn execute(ctx: Context<'_>, body: Body) -> Result<Response> {
                     ctx.live()?,
                     ctx.target.path.clone(),
                     ctx.headers.smb(false)?,
+                    ctx.headers.posix()?,
                 )
                 .await?;
             with_node(StatusCode::OK, &node)
@@ -285,7 +344,6 @@ pub(super) async fn execute(ctx: Context<'_>, body: Body) -> Result<Response> {
         O::CreateFile => create_file(&ctx).await,
         O::GetFile | O::GetFileProperties => get_file(&ctx).await,
         O::SetFileProperties => {
-            let length = file_length(&ctx.headers, "x-ms-content-length")?;
             let node = ctx
                 .app
                 .store
@@ -293,19 +351,31 @@ pub(super) async fn execute(ctx: Context<'_>, body: Body) -> Result<Response> {
                     ctx.live()?,
                     ctx.target.path.clone(),
                     ctx.lease_id()?,
-                    length,
-                    ctx.headers.http_properties()?,
-                    ctx.headers.smb(false)?,
+                    FilePatch {
+                        length: file_length(&ctx.headers, "x-ms-content-length")?,
+                        http: ctx.headers.http_properties()?,
+                        smb: ctx.headers.smb(false)?,
+                        posix: ctx.headers.posix()?,
+                    },
                 )
                 .await?;
-            with_node(StatusCode::OK, &node)
+            let mut reply = with_node(StatusCode::OK, &node)?;
+            if node.nfs.is_some() {
+                response::link_count_header(reply.headers_mut(), node.links)?;
+            }
+            Ok(reply)
         }
         O::DeleteFile => {
-            ctx.app
+            let links = ctx
+                .app
                 .store
                 .delete_file(ctx.live()?, ctx.target.path.clone(), ctx.lease_id()?)
                 .await?;
-            Ok(empty(StatusCode::ACCEPTED))
+            let mut reply = empty(StatusCode::ACCEPTED);
+            if let Some(links) = links {
+                response::link_count_header(reply.headers_mut(), links)?;
+            }
+            Ok(reply)
         }
         O::PutRange => put_range(&ctx, body).await,
         O::PutRangeFromUrl => put_range_from_url(&ctx).await,
@@ -332,6 +402,7 @@ pub(super) async fn execute(ctx: Context<'_>, body: Body) -> Result<Response> {
             Ok(empty(StatusCode::NO_CONTENT))
         }
         O::LeaseFile => {
+            ctx.deny_on_nfs().await?;
             let request = lease_request(&ctx.headers)?;
             let (node, outcome) = ctx
                 .app
@@ -378,10 +449,78 @@ pub(super) async fn execute(ctx: Context<'_>, body: Body) -> Result<Response> {
                 .await?;
             with_etag(StatusCode::CREATED, &share.etag, share.modified)
         }
-        O::CreateHardLink | O::CreateSymbolicLink | O::GetSymbolicLink => {
-            Err(Error::NotImplemented)
-        }
+        O::CreateHardLink => create_hard_link(&ctx).await,
+        O::CreateSymbolicLink => create_symbolic_link(&ctx).await,
+        O::GetSymbolicLink => read_symbolic_link(&ctx).await,
     }
+}
+
+/// A share snapshot is read-only; the link operations that write refuse one.
+fn refuse_snapshot(ctx: &Context<'_>) -> Result<()> {
+    if ctx.query.get("sharesnapshot").is_some() {
+        return Err(Error::InvalidQueryParameterValue);
+    }
+    Ok(())
+}
+
+async fn create_hard_link(ctx: &Context<'_>) -> Result<Response> {
+    ctx.require_version(HARD_LINK_VERSION)?;
+    refuse_snapshot(ctx)?;
+    match ctx.headers.required("x-ms-type")? {
+        value if value.eq_ignore_ascii_case("file") => {}
+        _ => return Err(Error::InvalidHeaderValue),
+    }
+    let source = ctx.share_path(ctx.headers.required("x-ms-file-target-file")?)?;
+    let node = ctx
+        .app
+        .store
+        .create_hard_link(ctx.live()?, ctx.target.path.clone(), source)
+        .await?;
+    let mut reply = with_node(StatusCode::CREATED, &node)?;
+    response::link_count_header(reply.headers_mut(), node.links)?;
+    Ok(reply)
+}
+
+async fn create_symbolic_link(ctx: &Context<'_>) -> Result<Response> {
+    ctx.require_version(SYMBOLIC_LINK_VERSION)?;
+    refuse_snapshot(ctx)?;
+    let text = ctx.headers.required("x-ms-link-text")?.to_owned();
+    let mut smb = ctx.headers.smb(true)?;
+    // Only the two times a symbolic link can set; the rest is the share's business.
+    smb.attributes = None;
+    let node = ctx
+        .app
+        .store
+        .create_symlink(
+            ctx.live()?,
+            ctx.target.path.clone(),
+            text,
+            Posix {
+                mode: None,
+                ..ctx.headers.posix()?
+            },
+            ctx.headers.metadata()?,
+            smb,
+        )
+        .await?;
+    with_node(StatusCode::CREATED, &node)
+}
+
+async fn read_symbolic_link(ctx: &Context<'_>) -> Result<Response> {
+    ctx.require_version(SYMBOLIC_LINK_VERSION)?;
+    let node = ctx
+        .app
+        .store
+        .read_symlink(ctx.share()?, ctx.target.path.clone())
+        .await?;
+    let mut reply = with_etag(StatusCode::OK, &node.etag, node.modified)?;
+    let text = node
+        .nfs
+        .as_ref()
+        .and_then(|nfs| nfs.link_text.as_deref())
+        .unwrap_or_default();
+    set(reply.headers_mut(), "x-ms-link-text", text)?;
+    Ok(reply)
 }
 
 async fn read_small(ctx: &Context<'_>, body: Body) -> Result<Bytes> {
@@ -469,13 +608,29 @@ async fn list_shares(ctx: &Context<'_>) -> Result<Response> {
 }
 
 async fn create_share(ctx: &Context<'_>) -> Result<Response> {
-    if ctx
+    let protocol = ctx
         .headers
         .get("x-ms-enabled-protocols")?
-        .is_some_and(|protocols| !protocols.eq_ignore_ascii_case("SMB"))
-    {
-        return Err(Error::NotImplemented);
+        .map(Protocol::parse)
+        .transpose()?
+        .unwrap_or_default();
+    let squash = ctx
+        .headers
+        .get("x-ms-root-squash")?
+        .map(RootSquash::parse)
+        .transpose()?;
+    let access = ctx
+        .headers
+        .optional_flag("x-ms-enable-snapshot-virtual-directory-access")?;
+    // Root squash and snapshot directory access are NFS settings.
+    if protocol != Protocol::Nfs && (squash.is_some() || access.is_some()) {
+        return Err(Error::InvalidHeaderValue);
     }
+    let options = ShareOptions {
+        protocol,
+        root_squash: (protocol == Protocol::Nfs).then(|| squash.unwrap_or_default()),
+        snapshot_virtual_directory_access: access.unwrap_or(true),
+    };
     let share = ctx
         .app
         .store
@@ -484,12 +639,23 @@ async fn create_share(ctx: &Context<'_>) -> Result<Response> {
             quota(&ctx.headers)?,
             tier(&ctx.headers)?,
             ctx.headers.metadata()?,
+            options,
         )
         .await?;
     with_etag(StatusCode::CREATED, &share.etag, share.modified)
 }
 
 async fn set_share_properties(ctx: &Context<'_>) -> Result<Response> {
+    let nfs = NfsShareSettings {
+        root_squash: ctx
+            .headers
+            .get("x-ms-root-squash")?
+            .map(RootSquash::parse)
+            .transpose()?,
+        snapshot_virtual_directory_access: ctx
+            .headers
+            .optional_flag("x-ms-enable-snapshot-virtual-directory-access")?,
+    };
     let share = ctx
         .app
         .store
@@ -498,6 +664,7 @@ async fn set_share_properties(ctx: &Context<'_>) -> Result<Response> {
             ctx.lease_id()?,
             quota(&ctx.headers)?,
             tier(&ctx.headers)?,
+            nfs,
         )
         .await?;
     with_etag(StatusCode::OK, &share.etag, share.modified)
@@ -631,6 +798,7 @@ fn local_source(ctx: &Context<'_>, url: &str) -> Result<(Target, Query)> {
 }
 
 async fn rename(ctx: &Context<'_>) -> Result<Response> {
+    ctx.deny_on_nfs().await?;
     let url = ctx.headers.required("x-ms-file-rename-source")?;
     let (source, query) = local_source(ctx, url)?;
     if query.get("sharesnapshot").is_some() {
@@ -670,6 +838,7 @@ async fn rename(ctx: &Context<'_>) -> Result<Response> {
 
 /// Handles are recorded metadata only: there is no SMB session, so none are ever open.
 async fn handles(ctx: &Context<'_>) -> Result<Response> {
+    ctx.deny_on_nfs().await?;
     let (want, close) = match ctx.operation {
         Operation::ListDirectoryHandles => (Want::Directory, false),
         Operation::ForceCloseDirectoryHandles => (Want::Directory, true),
@@ -701,6 +870,11 @@ async fn create_file(ctx: &Context<'_>) -> Result<Response> {
         value if value.eq_ignore_ascii_case("file") => {}
         _ => return Err(Error::InvalidHeaderValue),
     }
+    if let Some(kind) = ctx.headers.get("x-ms-file-file-type")?
+        && !kind.eq_ignore_ascii_case("Regular")
+    {
+        return Err(Error::InvalidHeaderValue);
+    }
     let length =
         file_length(&ctx.headers, "x-ms-content-length")?.ok_or(Error::MissingRequiredHeader)?;
     let node = ctx
@@ -714,6 +888,7 @@ async fn create_file(ctx: &Context<'_>) -> Result<Response> {
                 http: ctx.headers.http_properties()?.unwrap_or_default(),
                 smb: ctx.headers.smb(true)?,
                 metadata: ctx.headers.metadata()?,
+                posix: ctx.headers.posix()?,
             },
             ctx.lease_id()?,
         )
@@ -1031,6 +1206,7 @@ async fn copy_file(ctx: &Context<'_>) -> Result<Response> {
         smb: copy_mode_override
             .then(|| ctx.headers.smb(true))
             .transpose()?,
+        nfs: ctx.headers.nfs_copy()?,
     };
     let clean_url = url.split('?').next().unwrap_or(url).to_owned();
     let (node, copy_id) = ctx

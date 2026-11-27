@@ -94,6 +94,7 @@ jobs:
           stop
           python3 tests/table_sdk.py --skip-az --binary "$binary"
           python3 tests/files_sdk.py --skip-cli --binary "$binary"
+          python3 tests/files_nfs_sdk.py --binary "$binary"
           python3 tests/dfs_sdk.py --skip-az --binary "$binary"
           python3 tests/addressing_sdk.py --binary "$binary"
           python3 tests/tls_auth_sdk.py --binary "$binary"

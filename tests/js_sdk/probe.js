@@ -140,6 +140,38 @@ async function toBuf(stream) { const c = []; for await (const x of stream) c.pus
     await sh.delete();
   });
 
+  await step("files nfs: share, posix properties, hard and symbolic links", async () => {
+    const sh = fsvc.getShareClient("jsn" + sfx);
+    await sh.create({ protocols: { nfsEnabled: true }, rootSquash: "RootSquash" });
+    const share = await sh.getProperties();
+    check(share.protocols && share.protocols.nfsEnabled && !share.protocols.smbEnabled, "nfs protocol");
+    check(share.rootSquash === "RootSquash", "root squash");
+    const rw = (read, write) => ({ read, write, execute: false });
+    const mode = { owner: rw(true, true), group: rw(true, false), other: rw(true, false), effectiveUserIdentity: false, effectiveGroupIdentity: false, stickyBit: false };
+    const dir = sh.getDirectoryClient("d"); await dir.create({ posixProperties: { owner: "3", group: "4" } });
+    const dprops = (await dir.getProperties()).posixProperties;
+    check(dprops.owner === "3" && dprops.group === "4" && dprops.fileType === "Directory", "directory posix");
+    const f = dir.getFileClient("f.txt");
+    await f.create(5, { posixProperties: { owner: "7", group: "8", fileMode: mode } });
+    await f.uploadRange(Buffer.from("hello"), 0, 5);
+    const posix = (await f.getProperties()).posixProperties;
+    check(posix.owner === "7" && posix.group === "8" && posix.linkCount === 1 && posix.fileType === "Regular", "file posix");
+    check(posix.fileMode.owner.write && posix.fileMode.group.read && !posix.fileMode.group.write, "file mode");
+    const l = dir.getFileClient("l.txt"); await l.createHardLink("d/f.txt");
+    check((await l.getProperties()).posixProperties.linkCount === 2, "link count 2");
+    check((await l.downloadToBuffer()).toString() === "hello", "link bytes");
+    const s = sh.rootDirectoryClient.getFileClient("sym"); await s.createSymbolicLink("d/f.txt", { owner: "9" });
+    check((await s.getSymbolicLink()).linkText === "d/f.txt", "symlink text");
+    const sp = (await s.getProperties()).posixProperties;
+    check(sp.fileType === "SymLink" && sp.owner === "9", "symlink posix");
+    let refused = ""; try { await s.downloadToBuffer(); } catch (e) { refused = e.details && e.details.errorCode || e.code || String(e.message); }
+    check(String(refused).includes("XNfs4FileTypeUnsupportedException"), "symlink bytes refused: " + refused);
+    await f.delete();
+    check((await l.getProperties()).posixProperties.linkCount === 1, "count after delete");
+    check((await l.downloadToBuffer()).toString() === "hello", "bytes after first name deleted");
+    await sh.delete();
+  });
+
   await step("files: service properties round trip", async () => {
     const props = await fsvc.getProperties();
     check(props.hourMetrics && props.hourMetrics.enabled, "default hour metrics");

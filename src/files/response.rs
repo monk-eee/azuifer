@@ -3,7 +3,7 @@
 use super::{
     error::{Error, Result},
     lease::{self, Lease},
-    model::{AccessPolicy, NodeInfo, ShareInfo},
+    model::{self, AccessPolicy, NfsProps, NodeInfo, Protocol, ShareInfo},
     store::{Listing, ShareRef},
     time,
 };
@@ -91,20 +91,49 @@ pub(super) fn share_headers(headers: &mut HeaderMap, share: &ShareInfo, now: i64
         "x-ms-access-tier-change-time",
         &time::http_date(share.access_tier_changed),
     )?;
-    set(headers, "x-ms-enabled-protocols", "SMB")?;
+    set(headers, "x-ms-enabled-protocols", share.protocol.as_str())?;
+    if share.protocol == Protocol::Nfs && share.snapshot.is_none() {
+        if let Some(squash) = share.root_squash {
+            set(headers, "x-ms-root-squash", squash.as_str())?;
+        }
+        set(
+            headers,
+            "x-ms-enable-snapshot-virtual-directory-access",
+            &share.snapshot_virtual_directory_access.to_string(),
+        )?;
+    }
     lease_headers(headers, share.lease.as_ref(), now)
 }
 
-/// The SMB-flavoured headers every file and directory response carries.
+/// `x-ms-mode`, `x-ms-owner`, `x-ms-group` and `x-ms-file-file-type` of an NFS node.
+fn posix_headers(headers: &mut HeaderMap, nfs: &NfsProps) -> Result<()> {
+    set(headers, "x-ms-mode", &model::mode_text(nfs.mode))?;
+    set(headers, "x-ms-owner", &nfs.owner.to_string())?;
+    set(headers, "x-ms-group", &nfs.group.to_string())?;
+    set(headers, "x-ms-file-file-type", nfs.kind.as_str())
+}
+
+/// `x-ms-link-count`: the names the node's inode has.
+pub(super) fn link_count_header(headers: &mut HeaderMap, links: u32) -> Result<()> {
+    set(headers, "x-ms-link-count", &links.to_string())
+}
+
+/// The headers every file and directory response carries: SMB-flavoured on an SMB share,
+/// POSIX-flavoured on an NFS share.
 pub(super) fn node_headers(headers: &mut HeaderMap, node: &NodeInfo) -> Result<()> {
     etag_headers(headers, &node.etag, node.modified)?;
     set(headers, "x-ms-request-server-encrypted", "true")?;
-    set(headers, "x-ms-file-permission-key", &node.permission_key)?;
-    set(
-        headers,
-        "x-ms-file-attributes",
-        &node.attributes.to_string(),
-    )?;
+    match &node.nfs {
+        Some(nfs) => posix_headers(headers, nfs)?,
+        None => {
+            set(headers, "x-ms-file-permission-key", &node.permission_key)?;
+            set(
+                headers,
+                "x-ms-file-attributes",
+                &node.attributes.to_string(),
+            )?;
+        }
+    }
     set(
         headers,
         "x-ms-file-creation-time",
@@ -136,6 +165,9 @@ pub(super) fn property_headers(headers: &mut HeaderMap, node: &NodeInfo, now: i6
         return Ok(());
     }
     set(headers, "x-ms-type", "File")?;
+    if node.nfs.is_some() {
+        link_count_header(headers, node.links)?;
+    }
     lease_headers(headers, node.lease.as_ref(), now)?;
     if let Some(copy) = &node.copy {
         set(headers, "x-ms-copy-id", &copy.id)?;
@@ -218,7 +250,16 @@ pub(super) fn list_shares(
         if let Some(duration) = summary.duration {
             xml.element("LeaseDuration", duration);
         }
-        xml.element("EnabledProtocols", "SMB");
+        xml.element("EnabledProtocols", share.protocol.as_str());
+        if share.protocol == Protocol::Nfs {
+            if let Some(squash) = share.root_squash {
+                xml.element("RootSquash", squash.as_str());
+            }
+            xml.element(
+                "EnableSnapshotVirtualDirectoryAccess",
+                &share.snapshot_virtual_directory_access.to_string(),
+            );
+        }
         if let Some(deleted) = &share.deleted {
             xml.element("DeletedTime", &time::http_date(deleted.deleted_at));
             xml.element(
@@ -303,6 +344,16 @@ pub(super) fn list_entries(view: &ListEntriesView<'_>, listing: &Listing) -> Res
         xml.open(tag);
         xml.element("FileId", &node.file_id.to_string());
         xml.element("Name", &node.name);
+        if node.nfs.is_some() {
+            // An NFS share lists only the id, the name and a file's length.
+            if !node.directory {
+                xml.open("Properties");
+                xml.element("Content-Length", &node.length.to_string());
+                xml.close("Properties");
+            }
+            xml.close(tag);
+            continue;
+        }
         let properties = true;
         if properties {
             xml.open("Properties");

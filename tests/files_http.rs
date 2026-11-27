@@ -1969,10 +1969,11 @@ fn a_deleted_share_is_listed_and_restorable_when_retention_is_on() {
     assert!(!after.text().contains("<Deleted>"));
 }
 #[test]
-fn unsupported_operations_return_a_stable_error() {
+fn unknown_routes_and_verbs_return_stable_errors() {
     let emulator = Emulator::start(None, &[]);
     share(&emulator, "later");
     file(&emulator, "later", "f.txt", 1);
+    // Azure routes the link operations on restype; the old comp spelling is not one.
     expect_error(
         emulator.send(
             "PUT",
@@ -1980,8 +1981,8 @@ fn unsupported_operations_return_a_stable_error() {
             &[],
             b"",
         ),
-        501,
-        "NotImplemented",
+        400,
+        "InvalidQueryParameterValue",
     );
     expect_error(
         emulator.send("POST", &format!("/{ACCOUNT}/later/f.txt"), &[], b""),
@@ -1991,12 +1992,12 @@ fn unsupported_operations_return_a_stable_error() {
     expect_error(
         emulator.send(
             "PUT",
-            &format!("/{ACCOUNT}/nfs?restype=share"),
-            &[("x-ms-enabled-protocols", "NFS")],
+            &format!("/{ACCOUNT}/other?restype=share"),
+            &[("x-ms-enabled-protocols", "ext4")],
             b"",
         ),
-        501,
-        "NotImplemented",
+        400,
+        "InvalidHeaderValue",
     );
 }
 

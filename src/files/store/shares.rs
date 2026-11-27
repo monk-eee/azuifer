@@ -9,7 +9,10 @@ use crate::{
     files::{
         error::{Error, Result},
         lease::{self, Action, Kind, Outcome, State, Use},
-        model::{AccessPolicy, Attributes, Metadata, NodeInfo, ShareInfo},
+        model::{
+            AccessPolicy, Attributes, FileKind, Metadata, NfsProps, NodeInfo, Posix, Protocol,
+            RootSquash, ShareInfo,
+        },
         name::ShareName,
         time::TICKS_PER_MILLI,
     },
@@ -19,6 +22,31 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 pub(crate) const DEFAULT_QUOTA_GIB: u64 = 5120;
 pub(crate) const DEFAULT_TIER: &str = "TransactionOptimized";
 const ROOT_SDDL: &str = "O:SYG:SYD:(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;S-1-5-21-2127521184-1604012920-1887927527-72713)";
+
+/// What Create Share fixes about a share's protocol.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ShareOptions {
+    pub(crate) protocol: Protocol,
+    pub(crate) root_squash: Option<RootSquash>,
+    pub(crate) snapshot_virtual_directory_access: bool,
+}
+
+impl Default for ShareOptions {
+    fn default() -> Self {
+        Self {
+            protocol: Protocol::Smb,
+            root_squash: None,
+            snapshot_virtual_directory_access: true,
+        }
+    }
+}
+
+/// The NFS settings Set Share Properties may change.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct NfsShareSettings {
+    pub(crate) root_squash: Option<RootSquash>,
+    pub(crate) snapshot_virtual_directory_access: Option<bool>,
+}
 
 /// A share (or one of its snapshots) in an account.
 #[derive(Clone)]
@@ -96,7 +124,8 @@ pub(super) fn load_writable(db: &Connection, target: &ShareRef) -> Result<ShareR
 fn save_share(db: &Connection, row: &ShareRow) -> Result<()> {
     db.execute(
         "UPDATE shares SET etag=?2, modified=?3, quota=?4, access_tier=?5,
-            access_tier_changed=?6, metadata=?7, acl=?8, lease=?9 WHERE id=?1",
+            access_tier_changed=?6, metadata=?7, acl=?8, lease=?9, root_squash=?10,
+            snapshot_vda=?11 WHERE id=?1",
         params![
             row.id,
             row.info.etag,
@@ -107,6 +136,8 @@ fn save_share(db: &Connection, row: &ShareRow) -> Result<()> {
             json(&row.info.metadata)?,
             json(&row.acl)?,
             row.info.lease.as_ref().map(json).transpose()?,
+            row.info.root_squash.map(RootSquash::as_str),
+            row.info.snapshot_virtual_directory_access,
         ],
     )
     .map_err(db_error)?;
@@ -224,6 +255,7 @@ impl Store {
         quota: Option<u64>,
         tier: Option<String>,
         metadata: Metadata,
+        options: ShareOptions,
     ) -> Result<ShareInfo> {
         self.run(move |db, env| {
             let now = env.clock.now_millis();
@@ -232,8 +264,9 @@ impl Store {
             let changed = tx
                 .execute(
                     "INSERT INTO shares (account, name, snapshot, etag, modified, quota,
-                        access_tier, access_tier_changed, metadata, acl, lease, next_file_id)
-                     VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6, ?4, ?7, '[]', NULL, 1)
+                        access_tier, access_tier_changed, metadata, acl, lease, next_file_id,
+                        protocol, root_squash, snapshot_vda)
+                     VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6, ?4, ?7, '[]', NULL, 1, ?8, ?9, ?10)
                      ON CONFLICT (account, name, snapshot) DO NOTHING",
                     params![
                         target.account.as_str(),
@@ -243,6 +276,9 @@ impl Store {
                         to_sql(quota.unwrap_or(DEFAULT_QUOTA_GIB))?,
                         tier,
                         json(&metadata)?,
+                        options.protocol.as_str(),
+                        options.root_squash.map(RootSquash::as_str),
+                        options.snapshot_virtual_directory_access,
                     ],
                 )
                 .map_err(db_error)?;
@@ -268,6 +304,10 @@ impl Store {
                 http: Default::default(),
                 lease: None,
                 copy: None,
+                nfs: (options.protocol == Protocol::Nfs)
+                    .then(|| NfsProps::create(FileKind::Directory, Posix::default(), None)),
+                links: 1,
+                entry: None,
             };
             tx.execute(
                 "INSERT INTO nodes (share_id, file_id, parent_id, name, key, is_dir, etag,
@@ -312,6 +352,7 @@ impl Store {
         lease_id: Option<String>,
         quota: Option<u64>,
         tier: Option<String>,
+        nfs: NfsShareSettings,
     ) -> Result<ShareInfo> {
         self.run(move |db, env| {
             let now = env.clock.now_millis();
@@ -323,6 +364,9 @@ impl Store {
                 lease_id.as_deref(),
                 Use::Write,
             )?;
+            if row.info.protocol != Protocol::Nfs && nfs != NfsShareSettings::default() {
+                return Err(Error::InvalidHeaderValue);
+            }
             if let Some(quota) = quota {
                 row.info.quota = quota;
             }
@@ -331,6 +375,12 @@ impl Store {
                     row.info.access_tier_changed = now;
                 }
                 row.info.access_tier = tier;
+            }
+            if let Some(squash) = nfs.root_squash {
+                row.info.root_squash = Some(squash);
+            }
+            if let Some(access) = nfs.snapshot_virtual_directory_access {
+                row.info.snapshot_virtual_directory_access = access;
             }
             touch(&mut row, now);
             save_share(db, &row)?;
@@ -529,9 +579,11 @@ impl Store {
             }
             tx.execute(
                 "INSERT INTO shares (account, name, snapshot, etag, modified, quota, access_tier,
-                    access_tier_changed, metadata, acl, lease, next_file_id)
+                    access_tier_changed, metadata, acl, lease, next_file_id, protocol,
+                    root_squash, snapshot_vda)
                  SELECT account, name, ?2, etag, modified, quota, access_tier,
-                    access_tier_changed, ?3, acl, NULL, next_file_id FROM shares WHERE id=?1",
+                    access_tier_changed, ?3, acl, NULL, next_file_id, protocol,
+                    root_squash, snapshot_vda FROM shares WHERE id=?1",
                 params![
                     live.id,
                     snapshot,
@@ -541,10 +593,22 @@ impl Store {
             .map_err(db_error)?;
             let copy = tx.last_insert_rowid();
             tx.execute(
-                "INSERT INTO nodes SELECT ?2, file_id, parent_id, name, key, is_dir, etag, modified,
+                "INSERT INTO nodes (share_id, file_id, parent_id, name, key, is_dir, etag,
+                    modified, attributes, creation, last_write, change_time, permission_key,
+                    metadata, length, content_type, content_encoding, content_language,
+                    content_disposition, cache_control, md5, lease, copy, mode, owner, grp,
+                    file_type, link_text)
+                 SELECT ?2, file_id, parent_id, name, key, is_dir, etag, modified,
                     attributes, creation, last_write, change_time, permission_key, metadata,
                     length, content_type, content_encoding, content_language, content_disposition,
-                    cache_control, md5, NULL, copy FROM nodes WHERE share_id=?1",
+                    cache_control, md5, NULL, copy, mode, owner, grp, file_type, link_text
+                 FROM nodes WHERE share_id=?1",
+                params![live.id, copy],
+            )
+            .map_err(db_error)?;
+            tx.execute(
+                "INSERT INTO links (share_id, entry_id, file_id, parent_id, name, key)
+                 SELECT ?2, entry_id, file_id, parent_id, name, key FROM links WHERE share_id=?1",
                 params![live.id, copy],
             )
             .map_err(db_error)?;
