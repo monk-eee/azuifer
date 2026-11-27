@@ -108,14 +108,15 @@ fn validate(policy: &AccessPolicy, earlier: &[AccessPolicy]) -> Result<()> {
     Ok(())
 }
 
-/// Reads the SDDL from a Create Permission body: `{"permission": "..."}`.
-pub(super) fn parse_permission(body: &[u8]) -> Result<String> {
+/// Reads a Create Permission body: `{"permission": "...", "format": "sddl" | "binary"}`.
+pub(super) fn parse_permission(body: &[u8]) -> Result<(String, Option<String>)> {
     #[derive(serde::Deserialize)]
     struct Body {
         permission: String,
+        format: Option<String>,
     }
     serde_json::from_slice::<Body>(body)
-        .map(|body| body.permission)
+        .map(|body| (body.permission, body.format))
         .map_err(|_| Error::InvalidInput)
 }
 
@@ -178,7 +179,11 @@ mod tests {
     fn permission_body_is_json() {
         assert_eq!(
             parse_permission(br#"{"permission":"O:SYG:SYD:"}"#).unwrap(),
-            "O:SYG:SYD:"
+            ("O:SYG:SYD:".to_owned(), None)
+        );
+        assert_eq!(
+            parse_permission(br#"{"format":"binary","permission":"AQ=="}"#).unwrap(),
+            ("AQ==".to_owned(), Some("binary".to_owned()))
         );
         assert_eq!(parse_permission(b"nope"), Err(Error::InvalidInput));
     }

@@ -4,15 +4,21 @@ use super::{Context, local_source, with_etag};
 use crate::{
     checksum::Checksum,
     files::{
+        auth::{Signed, verify_sas},
         error::{Error, Result},
         model::{Metadata, NodeInfo, TimeSpec},
-        request::ByteRange,
+        name::ShareName,
+        request::{ByteRange, Operation, Query, Target},
         response::{self, empty, etag_headers, set},
         store::{CopyRequest, CopySource, ReadOptions, ReadRange, ShareRef},
-        time,
+        stored_policy, time,
     },
 };
-use axum::{body::Body, http::StatusCode, response::Response};
+use axum::{
+    body::Body,
+    http::{HeaderMap, Method, StatusCode},
+    response::Response,
+};
 use base64::{Engine as _, engine::general_purpose::STANDARD as STANDARD_MD5};
 use futures_util::StreamExt as _;
 
@@ -119,6 +125,39 @@ async fn write_range(
     )
 }
 
+/// A SAS on a same-account source URL must itself allow reading that file, whatever the
+/// request is signed with; a source URL without one is read with the request's own
+/// credentials, as Learn describes for a source in the same account (ADR-0032).
+async fn verify_source_sas(ctx: &Context<'_>, source: &Target, query: &Query) -> Result<()> {
+    if query.get("sig").is_none() {
+        return Ok(());
+    }
+    let refused = |_| Error::CopySourceNotAuthorized;
+    let keys = ctx
+        .app
+        .config
+        .accounts
+        .get(&source.account)
+        .ok_or(Error::CopySourceNotAuthorized)?;
+    let policy = stored_policy(ctx.app, source, query)
+        .await
+        .map_err(refused)?;
+    let signed = Signed {
+        account: &source.account,
+        keys,
+        method: &Method::GET,
+        raw_path: "",
+        query,
+        headers: &HeaderMap::new(),
+        now: ctx.app.clock.now(),
+        share: source.share.as_ref().map(ShareName::as_str),
+        path: &source.decoded,
+    };
+    verify_sas(&signed, policy.as_ref())
+        .and_then(|grant| grant.authorize(&Operation::GetFile.needs()))
+        .map_err(refused)
+}
+
 /// Put Range From URL: writes a range read from a file on this instance and account.
 pub(super) async fn put_range_from_url(ctx: &Context<'_>) -> Result<Response> {
     let (offset, length) = ctx
@@ -139,6 +178,7 @@ pub(super) async fn put_range_from_url(ctx: &Context<'_>) -> Result<Response> {
     if source.account != ctx.target.account {
         return Err(Error::CannotVerifyCopySource);
     }
+    verify_source_sas(ctx, &source, &query).await?;
     let from = ShareRef {
         account: source.account.clone(),
         share: source.share.clone().ok_or(Error::InvalidHeaderValue)?,
@@ -235,6 +275,7 @@ pub(super) async fn copy_file(ctx: &Context<'_>) -> Result<Response> {
     if source.account != ctx.target.account {
         return Err(Error::CannotVerifyCopySource);
     }
+    verify_source_sas(ctx, &source, &query).await?;
     let from = ShareRef {
         account: source.account.clone(),
         share: source.share.clone().ok_or(Error::InvalidHeaderValue)?,
@@ -257,7 +298,7 @@ pub(super) async fn copy_file(ctx: &Context<'_>) -> Result<Response> {
         ignore_readonly,
         metadata,
         smb: copy_mode_override
-            .then(|| ctx.headers.smb(true))
+            .then(|| ctx.headers.smb(true, &ctx.version))
             .transpose()?,
         nfs: ctx.headers.nfs_copy()?,
     };

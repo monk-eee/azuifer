@@ -43,7 +43,7 @@ pub(super) async fn create_symbolic_link(ctx: &Context<'_>) -> Result<Response> 
     ctx.require_version(SYMBOLIC_LINK_VERSION)?;
     refuse_snapshot(ctx)?;
     let text = ctx.headers.required("x-ms-link-text")?.to_owned();
-    let mut smb = ctx.headers.smb(true)?;
+    let mut smb = ctx.headers.smb(true, &ctx.version)?;
     // Only the two times a symbolic link can set; the rest is the share's business.
     smb.attributes = None;
     let node = ctx

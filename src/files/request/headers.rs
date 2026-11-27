@@ -8,6 +8,7 @@ use crate::files::{
         self, Attributes, Conditions, HttpProperties, Metadata, PermissionSpec, Posix,
         SmbProperties, TimeSpec,
     },
+    sd,
     store::{CopyBy, NfsCopy},
     time,
 };
@@ -15,6 +16,9 @@ use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024 * 1024 * 1024;
+
+/// The most base64 text of a binary security descriptor a header may carry, like SDDL's 8 KiB.
+const MAX_BINARY_PERMISSION: usize = 8 * 1024;
 
 /// Typed access to request headers.
 pub(in crate::files) struct Headers<'a>(pub(in crate::files) &'a HeaderMap);
@@ -124,7 +128,7 @@ impl Headers<'_> {
     }
 
     /// SMB attributes, timestamps, and permission, defaulting per create or update.
-    pub(in crate::files) fn smb(&self, create: bool) -> Result<SmbProperties> {
+    pub(in crate::files) fn smb(&self, create: bool, version: &str) -> Result<SmbProperties> {
         let mut smb = if create {
             SmbProperties::for_create()
         } else {
@@ -148,11 +152,21 @@ impl Headers<'_> {
             (Some(_), Some(_)) => return Err(Error::InvalidHeaderValue),
             (Some("inherit"), None) => PermissionSpec::Inherit,
             (Some("preserve"), None) => PermissionSpec::Preserve,
-            (Some(sddl), None) => {
-                if self.get("x-ms-file-permission-format")? == Some("binary") {
-                    return Err(Error::NotImplemented);
+            (Some(text), None) => {
+                // The format header exists from 2025-01-05; before that it is ignored.
+                let format = if version >= "2025-01-05" {
+                    self.get("x-ms-file-permission-format")?
+                } else {
+                    None
+                };
+                match format {
+                    None | Some("sddl") => PermissionSpec::Sddl(text.to_owned()),
+                    Some("binary") if text.len() <= MAX_BINARY_PERMISSION => {
+                        PermissionSpec::Sddl(sd::sddl_from_binary(text)?)
+                    }
+                    Some("binary") => return Err(Error::FileInvalidPermission),
+                    Some(_) => return Err(Error::InvalidHeaderValue),
                 }
-                PermissionSpec::Sddl(sddl.to_owned())
             }
             (None, Some(key)) => PermissionSpec::Key(key.to_owned()),
             (None, None) if create => PermissionSpec::Inherit,

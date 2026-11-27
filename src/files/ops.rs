@@ -48,6 +48,11 @@ pub(super) struct Context<'a> {
 }
 
 impl Context<'_> {
+    /// Whether the request's `x-ms-version` is at least `minimum` (dates compare as text).
+    fn at_least(&self, minimum: &str) -> bool {
+        self.version.as_str() >= minimum
+    }
+
     /// Operations that exist only from a given version answer as a service that does not
     /// know the `restype` would.
     fn require_version(&self, minimum: &str) -> Result<()> {
@@ -221,27 +226,8 @@ pub(super) async fn execute(ctx: Context<'_>, body: Body) -> Result<Response> {
             }
             Ok(reply)
         }
-        O::CreatePermission => {
-            ctx.deny_on_nfs().await?;
-            let bytes = read_small(&ctx, body).await?;
-            let key = ctx
-                .app
-                .store
-                .create_permission(ctx.live()?, xml::parse_permission(&bytes)?)
-                .await?;
-            let mut reply = empty(StatusCode::CREATED);
-            set(reply.headers_mut(), "x-ms-file-permission-key", &key)?;
-            Ok(reply)
-        }
-        O::GetPermission => {
-            ctx.deny_on_nfs().await?;
-            let key = ctx.headers.required("x-ms-file-permission-key")?.to_owned();
-            let sddl = ctx.app.store.permission(ctx.live()?, key).await?;
-            Ok(response::json(
-                StatusCode::OK,
-                &serde_json::json!({ "permission": sddl }),
-            ))
-        }
+        O::CreatePermission => shares::create_permission(&ctx, body).await,
+        O::GetPermission => shares::get_permission(&ctx).await,
         O::CreateDirectory => {
             let node = ctx
                 .app
@@ -249,7 +235,7 @@ pub(super) async fn execute(ctx: Context<'_>, body: Body) -> Result<Response> {
                 .create_directory(
                     ctx.live()?,
                     ctx.target.path.clone(),
-                    ctx.headers.smb(true)?,
+                    ctx.headers.smb(true, &ctx.version)?,
                     ctx.headers.metadata()?,
                     ctx.headers.posix()?,
                 )
@@ -279,7 +265,7 @@ pub(super) async fn execute(ctx: Context<'_>, body: Body) -> Result<Response> {
                 .set_directory_properties(
                     ctx.live()?,
                     ctx.target.path.clone(),
-                    ctx.headers.smb(false)?,
+                    ctx.headers.smb(false, &ctx.version)?,
                     ctx.headers.posix()?,
                 )
                 .await?;
@@ -351,7 +337,7 @@ pub(super) async fn execute(ctx: Context<'_>, body: Body) -> Result<Response> {
                     FilePatch {
                         length: file_length(&ctx.headers, "x-ms-content-length")?,
                         http: ctx.headers.http_properties()?,
-                        smb: ctx.headers.smb(false)?,
+                        smb: ctx.headers.smb(false, &ctx.version)?,
                         posix: ctx.headers.posix()?,
                     },
                 )
@@ -626,7 +612,7 @@ async fn rename(ctx: &Context<'_>) -> Result<Response> {
             .has_metadata()
             .then(|| ctx.headers.metadata())
             .transpose()?,
-        smb: ctx.headers.smb(false)?,
+        smb: ctx.headers.smb(false, &ctx.version)?,
     };
     let node = ctx
         .app
@@ -686,7 +672,7 @@ async fn create_file(ctx: &Context<'_>) -> Result<Response> {
             NewFile {
                 length,
                 http: ctx.headers.http_properties()?.unwrap_or_default(),
-                smb: ctx.headers.smb(true)?,
+                smb: ctx.headers.smb(true, &ctx.version)?,
                 metadata: ctx.headers.metadata()?,
                 posix: ctx.headers.posix()?,
             },

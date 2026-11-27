@@ -1,14 +1,16 @@
-//! Share operations: list, create, and set properties.
+//! Share operations: list, create, set properties, and the share's permissions.
 
-use super::{Context, with_etag};
+use super::{Context, read_small, with_etag};
 use crate::files::{
     error::{Error, Result},
     model::{Protocol, RootSquash},
     request::Headers,
-    response::{self, ListSharesView, decode_marker},
+    response::{self, ListSharesView, decode_marker, empty, set},
+    sd,
     store::{ListSharesRequest, NfsShareSettings, ShareOptions},
+    xml,
 };
-use axum::{http::StatusCode, response::Response};
+use axum::{body::Body, http::StatusCode, response::Response};
 
 const MAX_QUOTA_GIB: u64 = 102_400;
 const TIERS: [&str; 3] = ["TransactionOptimized", "Hot", "Cool"];
@@ -140,4 +142,46 @@ pub(super) async fn set_share_properties(ctx: &Context<'_>) -> Result<Response> 
         )
         .await?;
     with_etag(StatusCode::OK, &share.etag, share.modified)
+}
+
+/// Create Permission. From 2024-11-04 the body may name `format` `sddl` or `binary`; an
+/// older version ignores it, as it ignores any field it does not know (ADR-0032).
+pub(super) async fn create_permission(ctx: &Context<'_>, body: Body) -> Result<Response> {
+    ctx.deny_on_nfs().await?;
+    let bytes = read_small(ctx, body).await?;
+    let (permission, format) = xml::parse_permission(&bytes)?;
+    let sddl = match format.as_deref().filter(|_| ctx.at_least("2024-11-04")) {
+        None | Some("sddl") => permission,
+        Some("binary") => sd::sddl_from_binary(&permission)?,
+        Some(_) => return Err(Error::InvalidInput),
+    };
+    let key = ctx.app.store.create_permission(ctx.live()?, sddl).await?;
+    let mut reply = empty(StatusCode::CREATED);
+    set(reply.headers_mut(), "x-ms-file-permission-key", &key)?;
+    Ok(reply)
+}
+
+/// Get Permission. From 2024-11-04 the answer names its `format`, and
+/// `x-ms-file-permission-format: binary` asks for the base64 binary descriptor.
+pub(super) async fn get_permission(ctx: &Context<'_>) -> Result<Response> {
+    ctx.deny_on_nfs().await?;
+    let key = ctx.headers.required("x-ms-file-permission-key")?.to_owned();
+    let versioned = ctx.at_least("2024-11-04");
+    let format = if versioned {
+        ctx.headers.get("x-ms-file-permission-format")?
+    } else {
+        None
+    };
+    let sddl = ctx.app.store.permission(ctx.live()?, key).await?;
+    let body = match format {
+        None | Some("sddl") if versioned => {
+            serde_json::json!({ "format": "sddl", "permission": sddl })
+        }
+        None | Some("sddl") => serde_json::json!({ "permission": sddl }),
+        Some("binary") => {
+            serde_json::json!({ "format": "binary", "permission": sd::binary_from_sddl(&sddl)? })
+        }
+        Some(_) => return Err(Error::InvalidHeaderValue),
+    };
+    Ok(response::json(StatusCode::OK, &body))
 }
