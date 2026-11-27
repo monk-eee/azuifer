@@ -430,6 +430,122 @@
         }
       ],
       "status": "observed"
+    },
+    {
+      "id": "WD-024",
+      "service": "queue",
+      "operation": "Put Message",
+      "category": "live_vs_docs",
+      "summary": "Put Message with 65537 bytes of message text returns 413, not 400.",
+      "expected_by_docs_or_sdk": "Learn says a too-large message returns 400 Bad Request.",
+      "observed_behavior": "At 2023-11-03 a request with 65537 ASCII bytes in MessageText returns 413 RequestBodyTooLarge. Its correlated XML includes MaxLimit=65536.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/fc0a79856adbcb26181c74086226eb507a022aa6/docs-ref-conceptual/storageservices/Put-Message.md#remarks",
+          "detail": "Remarks specify 400 for a message that is too large."
+        },
+        {
+          "kind": "live",
+          "reference": "2c4aae5d8944d0f69e2933f67657323cf70aa5cd:tests/contracts/cassettes/queue-put-message-size-limit.json#response",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=413 and header_code=request_body_too_large; limit_details_match confirms MaxLimit in the XML."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-025",
+      "service": "queue",
+      "operation": "Put Message",
+      "category": "undocumented_live",
+      "summary": "A visibility timeout over seven days echoes the rejected value and valid bounds.",
+      "expected_by_docs_or_sdk": "Learn gives the 0-to-seven-day range without specifying the detailed error payload for exceeding it.",
+      "observed_behavior": "With visibilitytimeout=604801, Azure returns 400 OutOfRangeQueryParameterValue. Its XML echoes the parameter name and value and gives MinimumAllowed=0 and MaximumAllowed=604800.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/fc0a79856adbcb26181c74086226eb507a022aa6/docs-ref-conceptual/storageservices/Put-Message.md#uri-parameters",
+          "detail": "The visibilitytimeout parameter row specifies the valid range, not the over-limit response fields."
+        },
+        {
+          "kind": "live",
+          "reference": "2c4aae5d8944d0f69e2933f67657323cf70aa5cd:tests/contracts/cassettes/queue-put-visibility-limit.json#response",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=400 and header_code=out_of_range_query_parameter_value; the four additional XML elements match the request and valid bounds."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-026",
+      "service": "table",
+      "operation": "Query Entities / Insert Entity",
+      "category": "undocumented_live",
+      "summary": "Atom rejections use OData XML or JSON depending on the requested response format.",
+      "expected_by_docs_or_sdk": "Learn requires JSON payloads from 2015-12-11 onward and describes the precedence of $format over Accept, but does not specify how these 415 errors are serialized.",
+      "observed_behavior": "Atom Accept and $format=atom produce 415 AtomFormatNotSupported in OData XML. An Atom request body with JSON Accept produces the same status and code in OData JSON. The recorded errors omit x-ms-error-code and DataServiceVersion.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/ede20618bc9a933eedfaa72d22c76ef581326087/docs-ref-conceptual/storageservices/Payload-Format-for-Table-Service-Operations.md",
+          "detail": "Payload version restrictions and $format precedence, but no 415 response body examples."
+        },
+        {
+          "kind": "live",
+          "reference": "2c4aae5d8944d0f69e2933f67657323cf70aa5cd:tests/contracts/cassettes/table-atom-accept.json#response",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=415; body.kind=table_xml with the OData metadata namespace, language and correlation."
+        },
+        {
+          "kind": "live",
+          "reference": "2c4aae5d8944d0f69e2933f67657323cf70aa5cd:tests/contracts/cassettes/table-atom-format.json#response",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "$format=atom suppresses the JSON requested by Accept and the recorded 415 is OData XML."
+        },
+        {
+          "kind": "live",
+          "reference": "2c4aae5d8944d0f69e2933f67657323cf70aa5cd:tests/contracts/cassettes/table-atom-content.json#response",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=415 with body.kind=table_json and media=json_no_metadata, as requested by Accept."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-027",
+      "service": "table",
+      "operation": "Query Entities",
+      "category": "undocumented_live",
+      "summary": "An incomplete filter returns InvalidInput with the position and decoded expression in the message.",
+      "expected_by_docs_or_sdk": "Learn documents OData $filter, but does not specify the error for a comparison missing its right operand.",
+      "observed_behavior": "For $filter=PartitionKey eq, Azure returns 400 with a correlated OData JSON message: Expression expected at position 15 in 'PartitionKey eq'.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/ede20618bc9a933eedfaa72d22c76ef581326087/docs-ref-conceptual/storageservices/Query-Entities.md",
+          "detail": "Documents query and response formats, but not the missing-operand error."
+        },
+        {
+          "kind": "live",
+          "reference": "2c4aae5d8944d0f69e2933f67657323cf70aa5cd:tests/contracts/cassettes/table-incomplete-filter.json#response",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=400, media=json_no_metadata, code=invalid_input; the message and request correlation match."
+        }
+      ],
+      "status": "observed"
     }
   ],
   "observations": [
