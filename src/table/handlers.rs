@@ -1,12 +1,12 @@
 //! Executes typed Table operations against the store and shapes the Azure responses.
 
 use super::{
-    App,
+    App, OdataResponse,
     auth::Credential,
     batch::{self, Batch},
     datetime::Ticks,
     edm::{self, Metadata, Urls},
-    error::{Kind, Result, TableError},
+    error::{Kind, OdataErrorFormat, Result, TableError},
     model::{EntityKey, TableName},
     protocol::{self, Format, Operation, Request},
     service,
@@ -77,6 +77,42 @@ pub(super) fn catalog_error_response(
         error
     };
     odata_error_response(&error, None, request_id, now, level)
+}
+
+pub(super) fn request_error_response(
+    error: &TableError,
+    request_id: &str,
+    now: SystemTime,
+) -> Response {
+    let mut response = match error.odata_format() {
+        Some(OdataErrorFormat::Json(level)) => {
+            odata_error_response(error, None, request_id, now, level)
+        }
+        Some(OdataErrorFormat::Xml) => odata_xml_error_response(error, request_id, now),
+        None => return error_response(error, None, request_id, now),
+    };
+    response.extensions_mut().insert(OdataResponse);
+    response
+}
+
+fn odata_xml_error_response(error: &TableError, request_id: &str, now: SystemTime) -> Response {
+    let message = error.correlated_message(None, request_id, &Ticks::from_system(now).format());
+    let body = format!(
+        concat!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>",
+            "<error xmlns=\"http://schemas.microsoft.com/ado/2007/08/dataservices/metadata\">",
+            "<code>{}</code><message xml:lang=\"en-US\">{}</message></error>"
+        ),
+        error.code(),
+        quick_xml::escape::escape(message),
+    );
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = error.status();
+    response.headers_mut().insert(
+        "content-type",
+        HeaderValue::from_static("application/xml;charset=utf-8"),
+    );
+    response
 }
 
 fn odata_error_response(

@@ -6,7 +6,7 @@
       "name": "Atom payloads",
       "state": "unsupported",
       "authorization": [],
-      "notes": "application/atom+xml requests and Accept headers return 415 AtomFormatNotSupported; only the JSON formats that versions 2015-12-11 and later require are served."
+      "notes": "Atom is not served. At 2023-11-03, recorded Atom Accept and $format=atom requests return 415 AtomFormatNotSupported in OData XML; an Atom request body with JSON Accept returns the same status and code in negotiated OData JSON. Only JSON payloads are supported for Table catalog and entity operations."
     },
     {
       "name": "Bearer token authorization",
@@ -160,7 +160,7 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "GET /{table}() and GET /{table}(PartitionKey='p',RowKey='r') with $filter (eq ne gt ge lt le and or not, parentheses, at most 15 comparisons, string/Int32/Int64/Double/Boolean/DateTime/Guid/Binary literals), $select (absent properties are null), $top (maximum 1000) and NextPartitionKey/NextRowKey continuation. Differences: comparisons require identical Edm types (an Int64 property never equals an Int32 literal), keys sort by UTF-8 bytes rather than UTF-16, a missing property matches only ne, there is no 5 second query timeout or partition-boundary short page, and $orderby, $skip, $expand, $count and filter functions return 501 or 400. A service SAS with spk/epk limits results to its range."
+      "notes": "GET /{table}() and GET /{table}(PartitionKey='p',RowKey='r') with $filter (eq ne gt ge lt le and or not, parentheses, at most 15 comparisons, string/Int32/Int64/Double/Boolean/DateTime/Guid/Binary literals), $select (absent properties are null), $top (maximum 1000) and NextPartitionKey/NextRowKey continuation. The incomplete-filter Azure recording checks 400 InvalidInput in negotiated OData JSON with the missing operand's position. Successful entity queries and filter functions are not recorded. Differences: comparisons require identical Edm types (an Int64 property never equals an Int32 literal), keys sort by UTF-8 bytes rather than UTF-16, a missing property matches only ne, there is no 5 second query timeout or partition-boundary short page, and $orderby, $skip, $expand, $count and filter functions return 501 or 400. A service SAS with spk/epk limits results to its range."
     },
     {
       "name": "Query Tables",

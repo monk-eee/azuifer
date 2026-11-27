@@ -168,7 +168,8 @@ enum Operand {
     Literal(Value),
 }
 
-struct Parser {
+struct Parser<'a> {
+    text: &'a str,
     tokens: Vec<Token>,
     at: usize,
     comparisons: usize,
@@ -177,6 +178,7 @@ struct Parser {
 /// Parses a `$filter` expression.
 pub(super) fn parse(text: &str) -> Result<Expr> {
     let mut parser = Parser {
+        text,
         tokens: lex(text)?,
         at: 0,
         comparisons: 0,
@@ -188,7 +190,7 @@ pub(super) fn parse(text: &str) -> Result<Expr> {
     Ok(expr)
 }
 
-impl Parser {
+impl Parser<'_> {
     fn peek_word(&self) -> Option<&str> {
         match self.tokens.get(self.at) {
             Some(Token::Word(word)) => Some(word),
@@ -273,10 +275,16 @@ impl Parser {
     }
 
     fn operand(&mut self) -> Result<Operand> {
-        let token = self
-            .tokens
-            .get(self.at)
-            .ok_or_else(|| invalid("unexpected end"))?;
+        let token = self.tokens.get(self.at).ok_or_else(|| {
+            let position = self.text.encode_utf16().count();
+            TableError::with(
+                Kind::InvalidInput,
+                format!(
+                    "Expression expected at position {position} in '{}'.",
+                    self.text
+                ),
+            )
+        })?;
         self.at += 1;
         let literal = match token {
             Token::Str(text) => Value::String(text.clone()),

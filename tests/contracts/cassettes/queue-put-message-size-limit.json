@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "queue_message_too_large",
+  "api_version": "2023-11-03",
+  "response": {
+    "status": 413,
+    "request_id": "matches",
+    "api_version": "matches",
+    "header_code": "request_body_too_large",
+    "body": {
+      "kind": "queue_xml",
+      "error": {
+        "code": "request_body_too_large",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 1
+      },
+      "limit_details_match": true
+    }
+  }
+}

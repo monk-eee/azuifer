@@ -425,10 +425,8 @@ fn table_lifecycle_naming_prefer_and_paging() {
     );
     assert_eq!(server.get("/Tables('beta')").status, 404);
     let atom = server.send(Call::new("GET", "/Tables").header("accept", "application/atom+xml"));
-    assert_eq!(
-        (atom.status, atom.error_code().as_str()),
-        (415, "AtomFormatNotSupported")
-    );
+    assert_eq!(atom.status, 415);
+    assert!(atom.text.contains("<code>AtomFormatNotSupported</code>"));
     server.stop();
 }
 

@@ -10,8 +10,8 @@ The target is the five Azure Storage REST services, using the operations and aut
 | DFS | 18 | 106 | 0 | 108 | 86 | 194 |
 | FileREST | 44 | 197 | 0 | 131 | 153 | 284 |
 | Queue | 17 | 72 | 0 | 43 | 53 | 96 |
-| Table | 19 | 72 | 1 | 57 | 53 | 110 |
-| **Total** | **153** | **750** | **2** | **594** | **589** | **1,183** |
+| Table | 19 | 72 | 1 | 60 | 53 | 113 |
+| **Total** | **153** | **750** | **2** | **597** | **589** | **1,186** |
 
 This is a finite coverage target, not a claim that every possible input is covered. It tests each advertised operation/auth pair once and adds separate exchanges for meaningful branches: conditions, checksums and limits, continuations, post-mutation state, failure atomicity, expiry, feature switches, and shared Blob/DFS state. It does not multiply every branch by every credential. Add a row when an API version, profile, or new variant changes contract behavior. Keep newer-version evidence separate until that version is adopted; a client reaching the emulator through version fallback is not evidence for the newer version. SMB and NFS wire exchanges, control-plane APIs, infrastructure performance, and emulator-only fault injection are out of scope.
 
@@ -42,7 +42,7 @@ manifest pairs + journeys -> select safe target -> record Azure candidate
 | `copy` | Fresh owned source and destination; use a same-account source first, then an explicitly approved separate source for URL/cross-account behavior. Never fetch existing or arbitrary resources. |
 | `geo` | Approved read-access geo-redundant account with healthy secondary endpoints and documented replication state. |
 | `files` | Approved pre-provisioned disposable share or account-level control where the operation needs it; FileREST backup-intent permissions where required. `files-history`, `files-handles`, and `files-nfs` additionally require retention/snapshot settings, a disposable source of open handles, or an NFS-capable target, respectively. Do not rely on SMB/NFS wire parity. |
-| `queue`, `table` | Approved data-plane scopes for fresh synthetic resources, such as Storage Queue Data Contributor and Storage Table Data Contributor on dedicated targets. Account settings and multirole tests use dedicated accounts/identities. |
+| `queue`, `table` | Approved data-plane scopes for fresh synthetic resources, such as Storage Queue Data Contributor and Storage Table Data Contributor on dedicated targets. Queue/table lifecycle and request rejection do not establish message/entity permissions. Account settings and multirole tests use dedicated accounts/identities. |
 
 The current target supports `flat` and Queue/Table lifecycle operations. Same-account Blob `copy` requires an authorized synthetic source. Queue message writes, Table entity writes, and FileREST backup writes were denied on this target. It has no Shared Key, anonymous access, HNS, versioning, or soft delete. Rows requiring those permissions or settings need a separate approved scope or target. This ledger never authorizes granting access or changing settings.
 
@@ -164,10 +164,12 @@ is not evidence that the newer Azure version is implemented.
 | Q-01 | queue | Bearer | `Create Queue`; repeat create with identical metadata; `Set Queue Metadata`; `Get Queue Metadata`; `List Queues` with prefix, metadata and page limit; resume to a queue with empty metadata; `Delete Queue`; read missing | 8 | [fixture](../../tests/contracts/cassettes/queue-lifecycle.json) |
 | Q-02 | queue | Bearer | `Put Message`; `Peek Messages` without receipt; `Get Messages` with receipt and dequeue count; peek hides inflight; `Update Message` rotates receipt; reject stale receipt; `Delete Message` with current receipt; get empty | 8 | pending |
 | Q-03 | queue | Bearer | Put delayed message; peek before visibility; get after visibility; get after visibility timeout; verify incremented dequeue count; reject pre-redelivery receipt | 6 | pending |
-| Q-04 | queue | Bearer | Put short-TTL message; read while live; read after expiry; reject body over limit; reject invalid visibility; `Clear Messages`; verify queue empty | 7 | pending |
+| Q-04 | queue | Bearer | Put short-TTL message; read while live; read after expiry; `Clear Messages`; verify queue empty | 5 | pending |
 | Q-05 | queue + keys | Mixed | `Set Queue ACL@SharedKey`; `Get Queue ACL@SharedKey`; `Put Message@ServiceSAS` with add scope; `Peek Messages@ServiceSAS` with read scope; deny dequeue with read-only scope; delete ACL policy; policy SAS denied | 7 | pending |
 | Q-06 | queue + config | Mixed | `Get Queue Service Properties@Bearer`; `Set Queue Service Properties@Bearer`; `Preflight Queue Request@Anonymous` allowed; denied origin; restore settings; verify restored | 6 | pending |
 | Q-07 | queue + geo | Bearer | `Get Queue Service Stats` on readable secondary | 1 | pending |
+| Q-08 | queue | Bearer | Reject a Put Message visibility timeout of 604801 seconds and verify echoed bounds | 1 | [fixture](../../tests/contracts/cassettes/queue-put-visibility-limit.json) |
+| Q-09 | queue | Bearer | Reject Put Message with 65537 UTF-8 bytes of message text and verify the size limit in the error | 1 | [fixture](../../tests/contracts/cassettes/queue-put-message-size-limit.json) |
 
 ### Table
 
@@ -176,13 +178,16 @@ is not evidence that the newer Azure version is implemented.
 | T-01 | table | Bearer | `Create Table` with return-no-content; reject duplicate create; `Query Tables` first filtered page; continue with the same filter; `Delete Table`; read missing; reject repeat delete | 7 | [fixture](../../tests/contracts/cassettes/table-lifecycle.json) |
 | T-02 | table | Bearer | `Insert Entity` with generated ETag; duplicate insert; `Query Entities` key lookup; `Merge Entity` with current ETag; read merged; reject stale replace; `Update Entity` replace; read omitted property removed; `Delete Entity` with current ETag; read missing | 10 | pending |
 | T-03 | table | Bearer | `Insert Or Merge Entity` missing; merge existing; query retained fields; `Insert Or Replace Entity` missing; replace existing; query dropped field; conditional delete rejects stale | 7 | pending |
-| T-04 | table | Bearer | Query typed and null values; select projection; filter PartitionKey and RowKey; OData string escaping; query first page; follow continuation headers; empty result; reject unsupported expression | 8 | pending |
+| T-04 | table | Bearer | Query typed and null values; select projection; filter PartitionKey and RowKey; OData string escaping; query first page; follow continuation headers; empty result; reject a syntactically valid unsupported filter function | 8 | pending |
 | T-05 | table | Bearer | `Entity Group Transactions` atomic success; read first committed entity; read second committed entity; submit batch with stale ETag; confirm rollback of earlier operation; reject mixed partitions; verify untouched | 7 | pending |
 | T-06 | table + keys | Mixed | `Set Table ACL@SharedKey`; `Get Table ACL@SharedKey`; `Query Entities@ServiceSAS` within signed key range; deny another synthetic key outside range; revoke test policy; deny read with revoked policy | 6 | pending |
 | T-07 | table | Bearer | `Bearer token authorization` read through a scoped reader; reject write by reader; read unchanged; write by approved contributor | 4 | pending |
 | T-08 | table + config | Mixed | `Get Table Service Properties@Bearer`; `Set Table Service Properties@Bearer`; `Preflight Table Request@Anonymous` allowed; denied origin; restore settings; verify restored | 6 | pending |
 | T-09 | table + geo | Bearer | `Get Table Service Stats` on readable secondary | 1 | pending |
-| T-10 | table | Bearer | !`Atom payloads` legacy media boundary at the pinned version | 1 | pending |
+| T-10 | table | Bearer | !`Atom payloads` reject Query Entities with an Atom Accept header and check the OData XML error | 1 | [fixture](../../tests/contracts/cassettes/table-atom-accept.json) |
+| T-11 | table | Bearer | Reject an incomplete Query Entities filter and verify the expression position in the OData JSON error | 1 | [fixture](../../tests/contracts/cassettes/table-incomplete-filter.json) |
+| T-12 | table | Bearer | Reject an Atom Insert Entity request body with JSON Accept and check the OData JSON error | 1 | [fixture](../../tests/contracts/cassettes/table-atom-content.json) |
+| T-13 | table | Bearer | Reject a Query Entities Atom format override despite JSON Accept and check the OData XML error | 1 | [fixture](../../tests/contracts/cassettes/table-atom-format.json) |
 
 ## Collection sequence
 
