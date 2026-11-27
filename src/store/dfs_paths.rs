@@ -7,27 +7,31 @@
 //! tables, so a rename carries them and a Blob-created path simply has the defaults.
 
 use super::{
-    Content, ContentSource, Mode, PathRead, Store, Uploaded, UploadedData, blob, blob_params,
+    ContentSource, Mode, PathRead, Store, Uploaded, UploadedData,
     blobs::{guard_write, read_row, touch},
-    container, db_error, dfs_data, entity_row, io_error, namespace, pages, remove_staged,
-    require_blob, save_blob, snapshots, staging_file, write_lease,
+    container, db_error, entity_row, io_error, namespace, require_blob, snapshots, staging_file,
 };
 use crate::{
     blob_expiry::ExpiryOption,
-    blob_lifecycle::Lifecycle,
-    blob_tags::Tags,
     checksum::Hasher,
     conditions::Guard,
     domain::{
-        BlobKey, BlobPath, BlobRead, BlobWrite, ContainerKey, ContentHeaders, ContentLength,
-        Entity, Error, Metadata, Result,
+        BlobKey, BlobPath, BlobRead, ContainerKey, ContentHeaders, ContentLength, Entity, Error,
+        Metadata, Result,
     },
     lease::{LeaseAction, LeaseDuration, LeaseId},
-    posix::{Attributes, Creation, Entry, Mode as Permissions, PathKind, Perms, Subject},
+    posix::{Attributes, Creation, Entry, Mode as Permissions, PathKind},
     store::LeaseResult,
 };
 use rusqlite::{Connection, OptionalExtension as _, Row, params};
-use uuid::Uuid;
+
+mod access;
+mod create;
+
+pub(crate) use access::{Caller, Need};
+pub(super) use access::{ancestors, check_access};
+use create::create_directory;
+pub(super) use create::create_file;
 
 /// Version 5 (ADR-0015, ADR-0020): POSIX owner, group, ACL (`x-ms-acl` text, access
 /// entries then `default:` entries; empty means the defaults for the path kind) and
@@ -100,62 +104,6 @@ impl From<Error> for PathError {
 }
 
 pub(crate) type PathResult<T> = std::result::Result<T, PathError>;
-
-/// Who is asking, for the POSIX access check.
-#[derive(Clone, Debug)]
-pub(crate) enum Caller {
-    /// Shared Key, account and service SAS, and bearer tokens with a data role: no ACL check.
-    Superuser,
-    /// A principal whose rights come from the ACLs; `None` has no object id.
-    Principal(Option<String>),
-}
-
-impl Caller {
-    pub(crate) fn oid(&self) -> Option<&str> {
-        match self {
-            Self::Superuser => None,
-            Self::Principal(oid) => oid.as_deref(),
-        }
-    }
-}
-
-/// The POSIX rights an operation needs: `leaf` on the path itself (when it exists) and
-/// `parent` on its directory. Execute on every ancestor is always needed.
-#[derive(Clone, Copy)]
-pub(crate) struct Need {
-    pub(crate) leaf: Perms,
-    pub(crate) parent: Perms,
-}
-
-impl Need {
-    pub(crate) const TRAVERSE: Self = Self {
-        leaf: Perms::NONE,
-        parent: Perms::NONE,
-    };
-    pub(crate) const READ: Self = Self {
-        leaf: Perms::READ,
-        parent: Perms::NONE,
-    };
-    pub(crate) const WRITE: Self = Self {
-        leaf: Perms::WRITE,
-        parent: Perms::NONE,
-    };
-    /// Create or delete a child: write and search the directory.
-    pub(crate) const CHANGE_PARENT: Self = Self {
-        leaf: Perms::NONE,
-        parent: Perms::WRITE.union(Perms::EXECUTE),
-    };
-    /// Overwrite an existing file or add a new one.
-    pub(crate) const REPLACE: Self = Self {
-        leaf: Perms::WRITE,
-        parent: Perms::WRITE.union(Perms::EXECUTE),
-    };
-    /// List a directory: read and search it.
-    pub(crate) const LIST: Self = Self {
-        leaf: Perms::READ.union(Perms::EXECUTE),
-        parent: Perms::NONE,
-    };
-}
 
 const ATTRIBUTE_COLUMNS: &str = "posix_owner, posix_group, posix_acl, posix_sticky";
 
@@ -259,97 +207,6 @@ pub(super) fn save_attributes(
     };
     db.execute(sql, values).map_err(db_error)?;
     Ok(())
-}
-
-/// The names whose directories must be searched to reach `path`: the root (empty)
-/// and every ancestor directory, outermost first.
-pub(super) fn ancestors(path: &str) -> Vec<&str> {
-    let mut names = vec![""];
-    names.extend(path.match_indices('/').map(|(index, _)| &path[..index]));
-    names
-}
-
-/// Checks the POSIX rights of a bearer caller (ADR-0020). Missing parents are
-/// ignored here: the operation itself answers 404, or creates them, and the
-/// rights of the deepest existing directory apply.
-pub(super) fn check_access(
-    db: &Connection,
-    caller: &Caller,
-    key: &ContainerKey,
-    path: Option<&str>,
-    need: Need,
-) -> PathResult<()> {
-    let Caller::Principal(oid) = caller else {
-        return Ok(());
-    };
-    container(db, key)?;
-    let subject = Subject {
-        oid: oid.as_deref(),
-        groups: &[],
-    };
-    let allow = |attributes: &Attributes, wanted: Perms| {
-        if attributes.permits(&subject, wanted) {
-            Ok(())
-        } else {
-            Err(PathError::Shared(Error::PermissionMismatch))
-        }
-    };
-    let Some(path) = path else {
-        let root = located(db, key, "")?.ok_or(Error::ContainerMissing)?;
-        return allow(&root.attributes, need.leaf);
-    };
-    let mut deepest: Option<Attributes> = None;
-    for name in ancestors(path) {
-        match located(db, key, name)? {
-            Some(directory) if directory.kind == PathKind::Directory => {
-                allow(&directory.attributes, Perms::EXECUTE)?;
-                deepest = Some(directory.attributes);
-            }
-            _ => break,
-        }
-    }
-    if let Some(parent) = &deepest {
-        allow(parent, need.parent)?;
-    }
-    if let Some(leaf) = located(db, key, path)?
-        && need.leaf != Perms::NONE
-    {
-        allow(&leaf.attributes, need.leaf)?;
-    }
-    Ok(())
-}
-
-/// Creates the missing ancestors of `key` as directories with inherited attributes and
-/// returns the attributes of its immediate parent.
-fn ensure_parents(
-    db: &Connection,
-    key: &BlobKey,
-    owner: Option<&str>,
-    now: i64,
-) -> PathResult<Attributes> {
-    let path = key.path.as_str();
-    let root = located(db, &key.container, "")?.ok_or(Error::ContainerMissing)?;
-    let mut parent = root.attributes;
-    let creation = Creation {
-        owner: owner.map(str::to_owned),
-        ..Creation::default()
-    };
-    for (separator, _) in path.match_indices('/') {
-        let name = &path[..separator];
-        if namespace::file_exists(db, &key.container, name)? {
-            return Err(Error::PathConflict.into());
-        }
-        match located(db, &key.container, name)? {
-            Some(directory) => parent = directory.attributes,
-            None => {
-                let attributes = Attributes::inherit(&parent, PathKind::Directory, &creation)?;
-                namespace::write_directory(db, &key.container, name, now)?;
-                save_attributes(db, &key.container, name, PathKind::Directory, &attributes)?;
-                parent = attributes;
-            }
-        }
-    }
-    Ok(parent)
 }
 
 fn touch_directory(db: &Connection, key: &ContainerKey, name: &str, now: i64) -> Result<Entity> {
@@ -715,192 +572,4 @@ impl Store {
         }
         Ok(self.lease_blob(key, action, conditions).await?)
     }
-}
-
-fn create_directory(tx: &Connection, request: CreatePath, now: i64) -> PathResult<Created> {
-    let CreatePath {
-        key,
-        guard,
-        properties,
-        creation,
-        lease,
-        default_owner,
-        ..
-    } = request;
-    container(tx, &key.container)?;
-    let name = key.path.as_str();
-    if blob(tx, &key, now)?.is_some() {
-        return Err(Error::PathConflict.into());
-    }
-    if lease.is_some() {
-        return Err(PathError::ResourceTypeMismatch);
-    }
-    let existing = located(tx, &key.container, name)?;
-    if existing.is_some() && guard.lease.is_some() {
-        return Err(Error::LeaseNotPresentBlob.into());
-    }
-    if existing.is_some() && guard.conditions.requires_absence() {
-        return Err(Error::BlobAlreadyExists.into());
-    }
-    guard
-        .conditions
-        .check(existing.as_ref().map(|found| found.entity), false)?;
-    let parent = ensure_parents(tx, &key, default_owner.as_deref(), now)?;
-    let attributes = match existing {
-        Some(found) => explicit(found.attributes, &creation, PathKind::Directory),
-        None => Attributes::inherit(
-            &parent,
-            PathKind::Directory,
-            &new_path_rights(&creation, default_owner),
-        )?,
-    };
-    let entity = namespace::write_directory(tx, &key.container, name, now)?;
-    save_attributes(tx, &key.container, name, PathKind::Directory, &attributes)?;
-    let metadata = serde_json::to_string(&properties)
-        .map_err(|_| super::internal("could not encode metadata"))?;
-    tx.execute(
-        "UPDATE directories SET metadata=?1 WHERE account=?2 AND container=?3 AND name=?4",
-        params![
-            metadata,
-            key.container.account.as_str(),
-            key.container.name.as_str(),
-            name
-        ],
-    )
-    .map_err(db_error)?;
-    Ok(Created {
-        entity,
-        lease: None,
-    })
-}
-
-/// The rights of a new path: what the request names, owned by the caller unless it says otherwise.
-fn new_path_rights(creation: &Creation, default_owner: Option<String>) -> Creation {
-    Creation {
-        owner: creation.owner.clone().or(default_owner),
-        ..creation.clone()
-    }
-}
-
-/// Applies the attributes a request names to the ones a path already has.
-fn explicit(mut attributes: Attributes, creation: &Creation, kind: PathKind) -> Attributes {
-    if let Some(owner) = &creation.owner {
-        attributes.owner.clone_from(owner);
-    }
-    if let Some(group) = &creation.group {
-        attributes.group.clone_from(group);
-    }
-    if let Some(mode) = creation.permissions {
-        attributes.set_mode(mode);
-    }
-    if let Some(acl) = &creation.acl {
-        attributes.replace_acl(acl, kind);
-    }
-    attributes
-}
-
-pub(super) fn create_file(
-    tx: &Connection,
-    mode: &Mode,
-    request: CreatePath,
-    now: i64,
-    pending: bool,
-) -> PathResult<(Created, Vec<Uuid>)> {
-    let CreatePath {
-        key,
-        guard,
-        headers,
-        properties,
-        creation,
-        lease,
-        default_owner,
-        expiry,
-        ..
-    } = request;
-    // A new file has no creation time to measure from, so only `now` matters here.
-    let deadline = expiry
-        .map(|option| option.deadline(u64::try_from(now / 1000).unwrap_or(0), now))
-        .transpose()?
-        .flatten();
-    container(tx, &key.container)?;
-    let name = key.path.as_str();
-    if namespace::directory(tx, &key.container, name)?.is_some() {
-        return Err(Error::PathConflict.into());
-    }
-    let parent = ensure_parents(tx, &key, default_owner.as_deref(), now)?;
-    let old = blob(tx, &key, now)?;
-    guard_write(&guard, old.as_ref(), true, now)?;
-    let mut discard = remove_staged(tx, &key)?;
-    if let Some(old) = &old {
-        discard.extend(pages::retire(tx, mode, &key, old.info.kind)?);
-        discard.extend(dfs_data::drop_staged(tx, mode, &key)?);
-        discard.push(old.info.entity.id);
-    }
-    let attributes = match located(tx, &key.container, name)? {
-        Some(found) => explicit(found.attributes, &creation, PathKind::File),
-        None => Attributes::inherit(
-            &parent,
-            PathKind::File,
-            &new_path_rights(&creation, default_owner),
-        )?,
-    };
-    let options = BlobWrite {
-        headers,
-        metadata: properties,
-        guard: Guard::default(),
-        tier: None,
-        copy: None,
-        md5: None,
-        tags: Tags::new(),
-    };
-    let content = Content {
-        length: ContentLength(0),
-        data: empty_upload(mode)?.data,
-        computed_md5: None,
-    };
-    let version = snapshots::begin_write(
-        tx,
-        mode,
-        &key,
-        old.as_ref(),
-        snapshots::Change::Content,
-        now,
-    )?;
-    super::check_memory_quota(
-        tx,
-        mode,
-        old.as_ref().map_or(0, |row| pages::block_length(&row.info)),
-        0,
-    )?;
-    let entity = save_blob(tx, mode, &key, &options, content, now)?;
-    let entity = snapshots::finish_write(tx, &key, entity, version, Some(&options.tags))?;
-    save_attributes(tx, &key.container, name, PathKind::File, &attributes)?;
-    if deadline.is_some() {
-        let lifecycle = Lifecycle {
-            expires: deadline,
-            ..Lifecycle::default()
-        };
-        super::expiry::write(tx, &key, &lifecycle)?;
-    }
-    if pending {
-        tx.execute(
-            "UPDATE blobs SET dfs_pending=id WHERE account=?1 AND container=?2 AND name=?3",
-            blob_params(&key),
-        )
-        .map_err(db_error)?;
-    }
-    let mut lease_id = None;
-    if let Some((duration, proposed)) = lease {
-        let current = old.as_ref().map(|row| row.lease).unwrap_or_default();
-        let outcome = current.apply(LeaseAction::Acquire { duration, proposed }, now)?;
-        write_lease(tx, "blobs", &blob_params(&key), &outcome.lease)?;
-        lease_id = outcome.id;
-    }
-    Ok((
-        Created {
-            entity,
-            lease: lease_id,
-        },
-        discard,
-    ))
 }
