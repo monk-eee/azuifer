@@ -518,9 +518,9 @@ impl Xml {
 }
 
 /// The Azure status, error code, and message for a domain error.
-fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
+fn describe(error: Error) -> (StatusCode, &'static str, &'static str) {
     use StatusCode as S;
-    Some(match error {
+    match error {
         Error::AuthenticationFailed => (
             S::FORBIDDEN,
             "AuthenticationFailed",
@@ -636,8 +636,12 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
             "ResourceNotFound",
             "The specified resource does not exist.",
         ),
-        Error::ConditionNotMet => (
-            S::PRECONDITION_FAILED,
+        Error::ConditionNotMet | Error::NotModified => (
+            if error == Error::NotModified {
+                S::NOT_MODIFIED
+            } else {
+                S::PRECONDITION_FAILED
+            },
             "ConditionNotMet",
             "The condition specified using HTTP conditional header(s) is not met.",
         ),
@@ -646,7 +650,16 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
             "SourceConditionNotMet",
             "The source condition specified using HTTP conditional header(s) is not met.",
         ),
-        Error::NotModified | Error::InvalidRange(_) => return None,
+        Error::InvalidRange(_) => (
+            S::RANGE_NOT_SATISFIABLE,
+            "InvalidRange",
+            "The range specified is invalid for the current size of the resource.",
+        ),
+        Error::ConflictingRangeChecksums => (
+            S::BAD_REQUEST,
+            "BothCrc64AndMd5RangeHeaderPresent",
+            "Both x-ms-range-get-content-crc64 header and x-ms-range-get-content-md5 header are present.",
+        ),
         Error::QuotaExceeded => (
             S::INSUFFICIENT_STORAGE,
             "InsufficientStorage",
@@ -819,7 +832,7 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
         ),
         Error::Page(error) => error.describe(),
         Error::Ext(error) => error.describe(),
-    })
+    }
 }
 
 pub(crate) fn error_response(error: Error) -> Response {
@@ -834,6 +847,8 @@ pub(crate) fn request_error_response(error: Error, request_id: &str, now: System
             | Error::ConditionNotMet
             | Error::BlobMissing
             | Error::InvalidBlockList
+            | Error::InvalidRange(_)
+            | Error::ConflictingRangeChecksums
             | Error::LeaseIdMissingBlob
             | Error::LeaseMismatchBlob
             | Error::SnapshotsPresent
@@ -846,34 +861,31 @@ pub(crate) fn request_error_response(error: Error, request_id: &str, now: System
 }
 
 fn render_error(error: Error, correlation: Option<(&str, SystemTime)>) -> Response {
-    let Some((status, code, message)) = describe(error) else {
-        return match error {
-            Error::InvalidRange(length) => {
-                let mut response = xml_error(
-                    StatusCode::RANGE_NOT_SATISFIABLE,
-                    "InvalidRange",
-                    "The range is outside the blob.",
-                );
-                if set(
-                    response.headers_mut(),
-                    "content-range",
-                    &format!("bytes */{length}"),
-                )
-                .is_err()
-                {
-                    return error_response(Error::Internal);
-                }
-                response
-            }
-            _ => empty(StatusCode::NOT_MODIFIED),
-        };
-    };
-    match correlation {
+    let (status, code, message) = describe(error);
+    if status == StatusCode::NOT_MODIFIED {
+        let mut response = empty(status);
+        response
+            .headers_mut()
+            .insert("x-ms-error-code", HeaderValue::from_static(code));
+        return response;
+    }
+    let mut response = match correlation {
         Some((request_id, now)) => xml_error(
             status,
             code,
             &correlated_error_message(message, request_id, now),
         ),
         None => xml_error(status, code, message),
+    };
+    if let Error::InvalidRange(length) = error
+        && set(
+            response.headers_mut(),
+            "content-range",
+            &format!("bytes */{length}"),
+        )
+        .is_err()
+    {
+        return error_response(Error::Internal);
     }
+    response
 }

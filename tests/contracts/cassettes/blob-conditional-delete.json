@@ -1,0 +1,131 @@
+{
+  "schema_version": 2,
+  "source": "azure",
+  "case": "blob-conditional-delete",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "delete_current",
+      "request": {
+        "method": "delete",
+        "operation": "blob",
+        "body_bytes": 0,
+        "if_match": "matches"
+      },
+      "status": 202,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      },
+      "details": {
+        "kind": "deletion",
+        "permanent": "matches"
+      }
+    },
+    {
+      "step": "read_deleted",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 404,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "blob_not_found",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "blob_not_found",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "delete_missing",
+      "request": {
+        "method": "delete",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 404,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "blob_not_found",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "blob_not_found",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "recreate",
+      "request": {
+        "method": "put",
+        "operation": "put_block_blob",
+        "body_bytes": 28,
+        "if_none_match_star": "matches"
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "changed",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "reject_stale_delete",
+      "request": {
+        "method": "delete",
+        "operation": "blob",
+        "body_bytes": 0,
+        "if_match": "different"
+      },
+      "status": 412,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "condition_not_met",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "condition_not_met",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "read_replacement",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 28,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      }
+    }
+  ]
+}

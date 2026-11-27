@@ -379,6 +379,30 @@ fn check_live_blob_mutation_sparse_page_writes() -> Result<()> {
 }
 
 #[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_mutation_range_checksums() -> Result<()> {
+    live_mutation(mutations::Case::RangeChecksums)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_mutation_metadata_properties() -> Result<()> {
+    live_mutation(mutations::Case::MetadataProperties)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_mutation_conditional_reads() -> Result<()> {
+    live_mutation(mutations::Case::ConditionalReads)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_mutation_conditional_delete() -> Result<()> {
+    live_mutation(mutations::Case::ConditionalDelete)
+}
+
+#[test]
 fn live_drift_is_reported_even_when_both_services_change_together() -> Result<()> {
     let baseline = reviewed_sas()?;
     let actual = |drift| {

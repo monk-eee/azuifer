@@ -2,6 +2,8 @@
 
 The [Rust harness](../../tests/contracts/mod.rs) runs the same requests against Azure and the built Azuifer binary over HTTPS. Each case pins API version `2023-11-03`. The reviewed Azure cassette is the baseline. A live check compares each service with it independently: Azure drift, Azuifer drift, or both can fail the check. Matching each other is not enough.
 
+The [recording plan](azure-recording-plan.md) counts the exchange target, lists concrete pathways across all five services, and tracks which target or permissions each still needs.
+
 | Case | What it compares |
 | --- | --- |
 | [Get User Delegation Key](../../tests/contracts/cassettes/blob-get-user-delegation-key.json) | HTTP status, selected headers, the XML fields, the requested validity window, and the decoded key length. The cassette omits the key and identifiers. |
@@ -15,8 +17,12 @@ The [Rust harness](../../tests/contracts/mod.rs) runs the same requests against 
 | [Snapshot recovery](../../tests/contracts/cassettes/blob-snapshot-recovery.json) | A base blob with a snapshot rejects DELETE without a snapshots option. An overwrite leaves the snapshot's bytes, metadata and ETag intact. A conditional PUT restores the snapshot bytes and metadata to the base blob; this tests client-driven recovery, not Copy Blob. |
 | [Append position](../../tests/contracts/cassettes/blob-append-position.json) | The stale-position append is rejected without changing bytes or ETag. Valid appends report their offsets and committed block counts and preserve byte order. |
 | [Sparse page writes](../../tests/contracts/cassettes/blob-sparse-page-writes.json) | A write to the second 512-byte page leaves zeroes in the first. A failed sequence guard preserves the bytes and ETag. Clearing the written page returns it to zeroes without changing the blob length or sequence number. |
+| [Blob range checksums](../../tests/contracts/cassettes/blob-range-checksums.json) | Validates MD5, CRC64, `x-ms-range` precedence, open-ended reads, the conflicting-checksums error and the out-of-range response. A final full read checks the original bytes, MD5, metadata and ETag. |
+| [Blob metadata and properties](../../tests/contracts/cassettes/blob-metadata-properties.json) | Conditional metadata replacement removes omitted entries and rejects stale updates. A properties update clears omitted headers while preserving content and the newly set metadata. |
+| [Conditional Blob reads](../../tests/contracts/cassettes/blob-conditional-reads.json) | Distinguishes empty 304 `ConditionNotMet` responses from 412 XML errors for ETag and date conditions, including mixed preconditions. A valid ETag-conditioned range read returns 206. |
+| [Conditional Blob deletion](../../tests/contracts/cassettes/blob-conditional-delete.json) | Deletion with the current ETag is permanent on the flat profile. A read and repeat delete return 404. After recreation, the old ETag cannot delete the replacement. |
 
-The six mutation cases use Entra bearer authentication. Their cassettes record the request method, operation, payload length and selected guards alongside the observed response. ETags and lease IDs are represented by their relationship to the scenario, never by their value.
+The mutation cases use Entra bearer authentication. Their cassettes record the request method, operation, payload length and selected guards alongside the observed response. ETags, lease IDs and conditional dates are represented by their relationship to the scenario, never by their value.
 
 ## Replay without Azure
 

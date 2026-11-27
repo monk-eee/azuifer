@@ -57,6 +57,7 @@ pub(super) enum Header {
 pub(super) enum Media {
     Missing,
     TextPlain,
+    OctetStream,
     Xml,
     Other,
 }
@@ -79,6 +80,9 @@ pub(super) enum ErrorCode {
     SequenceNumberConditionNotMet,
     ContainerNotFound,
     InvalidInput,
+    InvalidHeaderValue,
+    InvalidRange,
+    BothCrc64AndMd5RangeHeaderPresent,
     InvalidXmlDocument,
     InvalidXmlNodeValue,
     Other,
@@ -102,6 +106,9 @@ impl ErrorCode {
             Some("SequenceNumberConditionNotMet") => Self::SequenceNumberConditionNotMet,
             Some("ContainerNotFound") => Self::ContainerNotFound,
             Some("InvalidInput") => Self::InvalidInput,
+            Some("InvalidHeaderValue") => Self::InvalidHeaderValue,
+            Some("InvalidRange") => Self::InvalidRange,
+            Some("BothCrc64AndMd5RangeHeaderPresent") => Self::BothCrc64AndMd5RangeHeaderPresent,
             Some("InvalidXmlDocument") => Self::InvalidXmlDocument,
             Some("InvalidXmlNodeValue") => Self::InvalidXmlNodeValue,
             Some(_) => Self::Other,
@@ -256,6 +263,7 @@ pub(super) fn header(
 pub(super) fn media(headers: &HeaderMap) -> Media {
     match header_text(headers, "content-type") {
         Some("text/plain") => Media::TextPlain,
+        Some("application/octet-stream") => Media::OctetStream,
         Some("application/xml" | "application/xml; charset=utf-8") => Media::Xml,
         None if !headers.contains_key("content-type") => Media::Missing,
         _ => Media::Other,

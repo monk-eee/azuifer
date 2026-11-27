@@ -10,10 +10,12 @@ use anyhow::{Context as _, Result, ensure};
 use reqwest::{
     Method, Url,
     blocking::{Client, RequestBuilder},
+    header::HeaderMap,
 };
 use serde::{Deserialize, Serialize};
-use std::{fs::File, path::Path};
+use std::{fs::File, path::Path, time::SystemTime};
 
+mod expanded;
 mod input;
 mod lifecycle;
 
@@ -39,6 +41,14 @@ pub(super) enum Case {
     AppendPosition,
     #[serde(rename = "blob-sparse-page-writes")]
     SparsePageWrites,
+    #[serde(rename = "blob-range-checksums")]
+    RangeChecksums,
+    #[serde(rename = "blob-metadata-properties")]
+    MetadataProperties,
+    #[serde(rename = "blob-conditional-reads")]
+    ConditionalReads,
+    #[serde(rename = "blob-conditional-delete")]
+    ConditionalDelete,
 }
 
 impl Case {
@@ -50,6 +60,10 @@ impl Case {
             Self::SnapshotRecovery => "blob-snapshot-recovery",
             Self::AppendPosition => "blob-append-position",
             Self::SparsePageWrites => "blob-sparse-page-writes",
+            Self::RangeChecksums => "blob-range-checksums",
+            Self::MetadataProperties => "blob-metadata-properties",
+            Self::ConditionalReads => "blob-conditional-reads",
+            Self::ConditionalDelete => "blob-conditional-delete",
         }
     }
 
@@ -111,6 +125,41 @@ impl Case {
                 ClearPage,
                 ReadClearedPages,
             ],
+            Self::RangeChecksums => &[
+                Seed,
+                RangeMd5,
+                RangeCrc64Precedence,
+                RangeTail,
+                RejectBothChecksums,
+                RejectPastEnd,
+                ReadOriginalWithChecksum,
+            ],
+            Self::MetadataProperties => &[
+                Seed,
+                SetMetadata,
+                ReadMetadata,
+                RejectStaleMetadata,
+                ReadMetadataAfterRejection,
+                SetProperties,
+                HeadProperties,
+                ReadUpdatedProperties,
+            ],
+            Self::ConditionalReads => &[
+                HeadNotModified,
+                RejectStaleRead,
+                GetNotModified,
+                RejectOldUnmodifiedSince,
+                ReadMatchingRange,
+                MixedNotModified,
+            ],
+            Self::ConditionalDelete => &[
+                DeleteCurrent,
+                ReadDeleted,
+                DeleteMissing,
+                Recreate,
+                RejectStaleDelete,
+                ReadReplacement,
+            ],
         }
     }
 }
@@ -156,15 +205,44 @@ enum Step {
     ReadPagesAfterRejection,
     ClearPage,
     ReadClearedPages,
+    RangeMd5,
+    RangeCrc64Precedence,
+    RangeTail,
+    RejectBothChecksums,
+    RejectPastEnd,
+    ReadOriginalWithChecksum,
+    SetMetadata,
+    ReadMetadata,
+    RejectStaleMetadata,
+    ReadMetadataAfterRejection,
+    SetProperties,
+    HeadProperties,
+    ReadUpdatedProperties,
+    HeadNotModified,
+    RejectStaleRead,
+    GetNotModified,
+    RejectOldUnmodifiedSince,
+    ReadMatchingRange,
+    MixedNotModified,
+    DeleteCurrent,
+    ReadDeleted,
+    DeleteMissing,
+    Recreate,
+    RejectStaleDelete,
 }
 
 impl Step {
     fn expected_blob(self) -> Option<(&'static [u8], &'static str, &'static str)> {
+        if let Some((start, end)) = expanded::range_bounds(self) {
+            return Some((&INITIAL[start..=end], "initial", "BlockBlob"));
+        }
         match self {
             Self::ReadOriginal
             | Self::ReadLeasedOriginal
             | Self::ReadSnapshot
+            | Self::ReadOriginalWithChecksum
             | Self::ReadRestored => Some((INITIAL, "initial", "BlockBlob")),
+            Self::ReadUpdatedProperties => Some((INITIAL, expanded::UPDATED, "BlockBlob")),
             Self::ReadReplacement | Self::ReadLeasedReplacement | Self::ReadReleased => {
                 Some((REPLACEMENT, "replacement", "BlockBlob"))
             }
@@ -193,23 +271,54 @@ impl Step {
                 | Self::RejectDeleteWithSnapshots
                 | Self::RejectAppendPosition
                 | Self::RejectPageSequence
+                | Self::RejectBothChecksums
+                | Self::RejectPastEnd
+                | Self::RejectStaleMetadata
+                | Self::RejectStaleRead
+                | Self::RejectOldUnmodifiedSince
+                | Self::ReadDeleted
+                | Self::DeleteMissing
+                | Self::RejectStaleDelete
         )
     }
 
-    fn expected_write(self) -> Option<(u16, Tag)> {
+    fn expected_empty(self) -> Option<(u16, Option<Tag>)> {
         Some(match self {
-            Self::Seed | Self::Commit | Self::CreateAppend | Self::CreatePage => (201, Tag::Valid),
-            Self::StageFirst | Self::StageSecond => (201, Tag::Missing),
+            Self::Seed | Self::Commit | Self::CreateAppend | Self::CreatePage => {
+                (201, Some(Tag::Valid))
+            }
+            Self::StageFirst | Self::StageSecond => (201, Some(Tag::Missing)),
             Self::Overwrite
             | Self::RestoreSnapshot
             | Self::AppendFirst
             | Self::AppendSecond
             | Self::WritePage
-            | Self::ClearPage => (201, Tag::Changed),
-            Self::AcquireLease | Self::CreateSnapshot => (201, Tag::Matches),
-            Self::ReleaseLease => (200, Tag::Matches),
+            | Self::ClearPage
+            | Self::Recreate => (201, Some(Tag::Changed)),
+            Self::AcquireLease | Self::CreateSnapshot => (201, Some(Tag::Matches)),
+            Self::SetMetadata | Self::SetProperties => (200, Some(Tag::Changed)),
+            Self::ReleaseLease
+            | Self::HeadProperties
+            | Self::ReadMetadata
+            | Self::ReadMetadataAfterRejection => (200, Some(Tag::Matches)),
+            Self::HeadNotModified | Self::GetNotModified | Self::MixedNotModified => (304, None),
+            Self::DeleteCurrent => (202, None),
             _ => return None,
         })
+    }
+
+    fn read_shape(self) -> (u16, Media) {
+        let status = if expanded::range_bounds(self).is_some() {
+            206
+        } else {
+            200
+        };
+        let media = if self == Self::ReadUpdatedProperties {
+            Media::OctetStream
+        } else {
+            Media::TextPlain
+        };
+        (status, media)
     }
 }
 
@@ -245,6 +354,49 @@ enum Body {
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum Details {
+    LeaseId {
+        id: Header,
+    },
+    LeaseState {
+        status: Header,
+        state: Header,
+        duration: Header,
+    },
+    Snapshot {
+        timestamp: Header,
+    },
+    Append {
+        offset: Option<u64>,
+        blocks: Option<u64>,
+    },
+    Sequence {
+        number: Option<u64>,
+    },
+    Range {
+        content_range: Header,
+        md5: Header,
+        crc64: Header,
+    },
+    Metadata {
+        purpose: Header,
+        removed: Header,
+    },
+    Properties {
+        purpose: Header,
+        removed: Header,
+        content_type: Header,
+        cache_control: Header,
+        language: Header,
+        length: Option<u64>,
+    },
+    Deletion {
+        permanent: Header,
+    },
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Response {
     step: Step,
@@ -256,7 +408,7 @@ struct Response {
     error_header: ErrorCode,
     body: Body,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    details: Option<lifecycle::Details>,
+    details: Option<Details>,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -293,20 +445,23 @@ impl MutationCassette {
                 (400..500).contains(&r.status)
                     && matches!(&r.body, Body::XmlError { code, media: Media::Xml, .. }
                         if *code == r.error_header && !matches!(code, ErrorCode::Missing | ErrorCode::Other))
-            } else if let Some((status, tag)) = r.step.expected_write() {
-                r.status == status && r.etag == tag && r.body == (Body::Empty {})
+            } else if let Some((status, tag)) = r.step.expected_empty() {
+                r.status == status
+                    && tag.is_none_or(|tag| r.etag == tag)
+                    && r.body == (Body::Empty {})
             } else {
                 r.step.expected_blob().is_some_and(|(bytes, _, _)| {
-                    r.status == 200
+                    let (status, media) = r.step.read_shape();
+                    r.status == status
                         && r.etag == Tag::Matches
                         && matches!(&r.body, Body::Blob {
-                            bytes_match: true, length: Some(length), media: Media::TextPlain,
+                            bytes_match: true, length: Some(length), media: observed_media,
                             blob_type: Header::Matches, metadata: Header::Matches
-                        } if *length == bytes.len() as u64)
+                        } if *length == bytes.len() as u64 && *observed_media == media)
                 })
             };
             ensure!(
-                valid,
+                valid && expanded::matches_fixture(r),
                 "{:?}: did not produce the expected Blob state: {r:#?}",
                 r.step
             );
@@ -346,6 +501,17 @@ struct Observed {
     etag: Option<String>,
     snapshot: Option<String>,
     bytes: Vec<u8>,
+}
+
+fn usable_etag(headers: &HeaderMap) -> Option<&str> {
+    header_text(headers, "etag").filter(|value| {
+        value
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .is_some_and(|inner| {
+                !inner.is_empty() && inner.bytes().all(|b| b.is_ascii_graphic() && b != b'"')
+            })
+    })
 }
 
 impl Probe<'_> {
@@ -389,25 +555,28 @@ impl Probe<'_> {
         wire: RequestBuilder,
         reference: Option<&str>,
     ) -> Result<Observed> {
+        self.record_conditional(step, wire, reference, None)
+    }
+
+    fn record_conditional(
+        &mut self,
+        step: Step,
+        wire: RequestBuilder,
+        reference: Option<&str>,
+        modified: Option<SystemTime>,
+    ) -> Result<Observed> {
         let wire = wire
             .build()
             .map_err(|_| anyhow::anyhow!("{step:?}: could not build Blob probe request"))?;
-        let request =
-            input::Input::observe(&wire, reference).with_context(|| format!("{step:?}"))?;
+        let request = input::Input::observe(&wire, reference, modified)
+            .with_context(|| format!("{step:?}"))?;
         let response = sent(self.client.execute(wire), "send Blob mutation probe")
             .with_context(|| format!("{step:?}"))?;
         let status = response.status().as_u16();
         let headers = response.headers().clone();
         let bytes = read_bounded(response).with_context(|| format!("{step:?}"))?;
         let text = |name| header_text(&headers, name);
-        let tag = text("etag").filter(|value| {
-            value
-                .strip_prefix('"')
-                .and_then(|rest| rest.strip_suffix('"'))
-                .is_some_and(|inner| {
-                    !inner.is_empty() && inner.bytes().all(|b| b.is_ascii_graphic() && b != b'"')
-                })
-        });
+        let tag = usable_etag(&headers);
         let etag = match (tag, reference) {
             (None, _) if headers.contains_key("etag") => Tag::Malformed,
             (None, _) => Tag::Missing,
@@ -416,7 +585,9 @@ impl Probe<'_> {
             (Some(_), Some(_)) => Tag::Changed,
         };
         let error_header = ErrorCode::from_value(text("x-ms-error-code"));
-        let body = if let (200, Some((expected, metadata, kind))) = (status, step.expected_blob()) {
+        let body = if let (200 | 206, Some((expected, metadata, kind))) =
+            (status, step.expected_blob())
+        {
             Body::Blob {
                 bytes_match: bytes == expected,
                 length: text("content-length").and_then(|value| value.parse().ok()),
@@ -446,6 +617,9 @@ impl Probe<'_> {
                         ErrorCode::SnapshotsPresent => "This operation is not permitted because the blob has snapshots.",
                         ErrorCode::AppendPositionConditionNotMet => "The append position condition specified was not met.",
                         ErrorCode::SequenceNumberConditionNotMet => "The sequence number condition specified was not met.",
+                        ErrorCode::InvalidHeaderValue => "The value for one of the HTTP headers is not in the correct format.",
+                        ErrorCode::InvalidRange => "The range specified is invalid for the current size of the resource.",
+                        ErrorCode::BothCrc64AndMd5RangeHeaderPresent => "Both x-ms-range-get-content-crc64 header and x-ms-range-get-content-md5 header are present.",
                         _ => return None,
                     };
                     Some(Body::XmlError {
@@ -468,7 +642,8 @@ impl Probe<'_> {
             etag,
             body,
             error_header,
-            details: lifecycle::details(step, &headers),
+            details: lifecycle::details(step, &headers)
+                .or_else(|| expanded::details(step, &headers)),
             api_version: header(&headers, "x-ms-version", |value| value == VERSION),
             request_id: header(&headers, "x-ms-request-id", |id| {
                 uuid::Uuid::parse_str(id).is_ok()
@@ -574,6 +749,10 @@ pub(super) fn observe(
             Case::SnapshotRecovery => probe.snapshot_recovery()?,
             Case::AppendPosition => probe.append_position()?,
             Case::SparsePageWrites => probe.sparse_page_writes()?,
+            Case::RangeChecksums => probe.range_checksums()?,
+            Case::MetadataProperties => probe.metadata_properties()?,
+            Case::ConditionalReads => probe.conditional_reads()?,
+            Case::ConditionalDelete => probe.conditional_delete()?,
         }
         Ok(MutationCassette {
             schema_version: SCHEMA_VERSION,
@@ -643,6 +822,26 @@ fn replay_blob_mutation_append_position() -> Result<()> {
 #[test]
 fn replay_blob_mutation_sparse_page_writes() -> Result<()> {
     replay(Case::SparsePageWrites)
+}
+
+#[test]
+fn replay_blob_mutation_range_checksums() -> Result<()> {
+    replay(Case::RangeChecksums)
+}
+
+#[test]
+fn replay_blob_mutation_metadata_properties() -> Result<()> {
+    replay(Case::MetadataProperties)
+}
+
+#[test]
+fn replay_blob_mutation_conditional_reads() -> Result<()> {
+    replay(Case::ConditionalReads)
+}
+
+#[test]
+fn replay_blob_mutation_conditional_delete() -> Result<()> {
+    replay(Case::ConditionalDelete)
 }
 
 #[test]

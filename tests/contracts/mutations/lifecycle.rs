@@ -1,10 +1,10 @@
 use super::{
-    FIRST_BLOCK, INITIAL, Probe, REJECTED, REPLACEMENT, SECOND_BLOCK, Step, header, header_text,
+    Details, FIRST_BLOCK, INITIAL, Probe, REJECTED, REPLACEMENT, SECOND_BLOCK, Step, header,
+    header_text,
 };
-use crate::contracts::cassette::{Header, is_utc_timestamp};
+use crate::contracts::cassette::is_utc_timestamp;
 use anyhow::{Context as _, Result, ensure};
 use reqwest::{Method, blocking::RequestBuilder, header::HeaderMap};
-use serde::{Deserialize, Serialize};
 
 pub(super) const LEASE_ID: &str = "00000000-0000-4000-8000-000000000001";
 pub(super) const WRONG_LEASE_ID: &str = "00000000-0000-4000-8000-000000000002";
@@ -18,29 +18,6 @@ pub(super) const SPARSE_PAGES: [u8; 2 * PAGE_SIZE] = {
     pages
 };
 const SEQUENCE: u64 = 3;
-
-#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum Details {
-    LeaseId {
-        id: Header,
-    },
-    LeaseState {
-        status: Header,
-        state: Header,
-        duration: Header,
-    },
-    Snapshot {
-        timestamp: Header,
-    },
-    Append {
-        offset: Option<u64>,
-        blocks: Option<u64>,
-    },
-    Sequence {
-        number: Option<u64>,
-    },
-}
 
 pub(super) fn details(step: Step, headers: &HeaderMap) -> Option<Details> {
     use Step::*;

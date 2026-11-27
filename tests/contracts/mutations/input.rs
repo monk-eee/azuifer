@@ -3,11 +3,13 @@ use crate::contracts::cassette::Header;
 use anyhow::{Context as _, Result, bail};
 use reqwest::{Method, blocking::Request};
 use serde::{Deserialize, Serialize};
+use std::time::SystemTime;
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Verb {
     Get,
+    Head,
     Put,
     Delete,
 }
@@ -28,6 +30,24 @@ enum Operation {
     AppendBlock,
     UpdatePage,
     ClearPage,
+    BlobMetadata,
+    SetBlobProperties,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Range {
+    start: u64,
+    end: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DateRelation {
+    Earlier,
+    Same,
+    Later,
+    Other,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -54,10 +74,28 @@ pub(super) struct Input {
     sequence: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sequence_equal: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    range: Option<Range>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    storage_range: Option<Range>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    range_md5: Option<Header>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    range_crc64: Option<Header>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    if_none_match_etag: Option<Header>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    if_modified_since: Option<DateRelation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    if_unmodified_since: Option<DateRelation>,
 }
 
 impl Input {
-    pub(super) fn observe(wire: &Request, reference: Option<&str>) -> Result<Self> {
+    pub(super) fn observe(
+        wire: &Request,
+        reference: Option<&str>,
+        modified: Option<SystemTime>,
+    ) -> Result<Self> {
         let query = |name| {
             wire.url()
                 .query_pairs()
@@ -68,6 +106,7 @@ impl Input {
         let text = |name| header_text(headers, name);
         let method = match *wire.method() {
             Method::GET => Verb::Get,
+            Method::HEAD => Verb::Head,
             Method::PUT => Verb::Put,
             Method::DELETE => Verb::Delete,
             _ => bail!("unexpected Blob probe method"),
@@ -85,6 +124,8 @@ impl Input {
             Some("blocklist") => Operation::CommitBlockList,
             Some("snapshot") => Operation::CreateSnapshot,
             Some("appendblock") => Operation::AppendBlock,
+            Some("metadata") => Operation::BlobMetadata,
+            Some("properties") => Operation::SetBlobProperties,
             Some("lease") => match text("x-ms-lease-action") {
                 Some("acquire") => Operation::AcquireLease,
                 Some("release") => Operation::ReleaseLease,
@@ -111,24 +152,57 @@ impl Input {
             Header::Missing => None,
             _ => Some(seen),
         };
-        let page_range = text("x-ms-range")
-            .map(|range| -> Result<_> {
-                let (start, end) = range
-                    .strip_prefix("bytes=")
-                    .and_then(|value| value.split_once('-'))
-                    .context("invalid range in page probe")?;
-                Ok([start.parse()?, end.parse()?])
+        let parse_range = |name| -> Result<Option<Range>> {
+            text(name)
+                .map(|range| -> Result<_> {
+                    let (start, end) = range
+                        .strip_prefix("bytes=")
+                        .and_then(|value| value.split_once('-'))
+                        .context("invalid range in Blob probe")?;
+                    Ok(Range {
+                        start: start.parse().context("invalid range start in Blob probe")?,
+                        end: (!end.is_empty())
+                            .then(|| end.parse())
+                            .transpose()
+                            .context("invalid range end in Blob probe")?,
+                    })
+                })
+                .transpose()
+        };
+        let mut storage_range = parse_range("x-ms-range")?;
+        let page_range = if matches!(operation, Operation::UpdatePage | Operation::ClearPage) {
+            let range = storage_range
+                .take()
+                .context("missing page range in probe")?;
+            Some([range.start, range.end.context("missing page end in probe")?])
+        } else {
+            None
+        };
+        let date_relation = |name| {
+            text(name).map(|value| match (httpdate::parse_http_date(value), modified) {
+                (Ok(date), Some(expected)) if date < expected => DateRelation::Earlier,
+                (Ok(date), Some(expected)) if date == expected => DateRelation::Same,
+                (Ok(_), Some(_)) => DateRelation::Later,
+                _ => DateRelation::Other,
             })
-            .transpose()?;
+        };
+        let requested_flag = |name| observe_header(header(headers, name, |value| value == "true"));
         Ok(Self {
             method,
             body_bytes,
             if_match: observe_header(header(headers, "if-match", |value| {
                 Some(value) == reference
             })),
-            if_none_match_star: observe_header(header(headers, "if-none-match", |value| {
-                value == "*"
-            })),
+            if_none_match_star: (text("if-none-match") == Some("*")).then_some(Header::Matches),
+            if_none_match_etag: text("if-none-match")
+                .filter(|value| *value != "*")
+                .map(|value| {
+                    if Some(value) == reference {
+                        Header::Matches
+                    } else {
+                        Header::Different
+                    }
+                }),
             lease_id: observe_header(header(
                 headers,
                 if operation == Operation::AcquireLease {
@@ -144,6 +218,12 @@ impl Input {
             page_range,
             sequence: number("x-ms-blob-sequence-number")?,
             sequence_equal: number("x-ms-if-sequence-number-eq")?,
+            range: parse_range("range")?,
+            storage_range,
+            range_md5: requested_flag("x-ms-range-get-content-md5"),
+            range_crc64: requested_flag("x-ms-range-get-content-crc64"),
+            if_modified_since: date_relation("if-modified-since"),
+            if_unmodified_since: date_relation("if-unmodified-since"),
             operation,
         })
     }
@@ -156,7 +236,7 @@ fn projection_omits_request_credentials_selectors_and_body() -> Result<()> {
         .bearer_auth("SECRET-TOKEN")
         .body("PRIVATE-BODY")
         .build()?;
-    let input = Input::observe(&wire, None)?;
+    let input = Input::observe(&wire, None, None)?;
     let json = serde_json::to_value(&input)?;
     assert_eq!(
         json,

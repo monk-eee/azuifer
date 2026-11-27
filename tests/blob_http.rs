@@ -3101,7 +3101,7 @@ fn range_reads_can_return_a_checksum_of_the_range() {
             b"",
         ),
         400,
-        "InvalidHeaderValue",
+        "BothCrc64AndMd5RangeHeaderPresent",
     );
 }
 

@@ -1,0 +1,214 @@
+{
+  "schema_version": 2,
+  "source": "azure",
+  "case": "blob-range-checksums",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "seed",
+      "request": {
+        "method": "put",
+        "operation": "put_block_blob",
+        "body_bytes": 25
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "valid",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "range_md5",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0,
+        "range": {
+          "start": 0,
+          "end": 4
+        },
+        "range_md5": "matches"
+      },
+      "status": 206,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 5,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      },
+      "details": {
+        "kind": "range",
+        "content_range": "matches",
+        "md5": "matches",
+        "crc64": "missing"
+      }
+    },
+    {
+      "step": "range_crc64_precedence",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0,
+        "range": {
+          "start": 0,
+          "end": 4
+        },
+        "storage_range": {
+          "start": 5,
+          "end": 11
+        },
+        "range_crc64": "matches"
+      },
+      "status": 206,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 7,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      },
+      "details": {
+        "kind": "range",
+        "content_range": "matches",
+        "md5": "missing",
+        "crc64": "matches"
+      }
+    },
+    {
+      "step": "range_tail",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0,
+        "range": {
+          "start": 12,
+          "end": null
+        }
+      },
+      "status": 206,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 13,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      },
+      "details": {
+        "kind": "range",
+        "content_range": "matches",
+        "md5": "missing",
+        "crc64": "missing"
+      }
+    },
+    {
+      "step": "reject_both_checksums",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0,
+        "range": {
+          "start": 0,
+          "end": 4
+        },
+        "range_md5": "matches",
+        "range_crc64": "matches"
+      },
+      "status": 400,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "both_crc64_and_md5_range_header_present",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "both_crc64_and_md5_range_header_present",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      },
+      "details": {
+        "kind": "range",
+        "content_range": "missing",
+        "md5": "missing",
+        "crc64": "missing"
+      }
+    },
+    {
+      "step": "reject_past_end",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0,
+        "range": {
+          "start": 26,
+          "end": null
+        }
+      },
+      "status": 416,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "invalid_range",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "invalid_range",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      },
+      "details": {
+        "kind": "range",
+        "content_range": "matches",
+        "md5": "missing",
+        "crc64": "missing"
+      }
+    },
+    {
+      "step": "read_original_with_checksum",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 25,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      },
+      "details": {
+        "kind": "range",
+        "content_range": "missing",
+        "md5": "matches",
+        "crc64": "missing"
+      }
+    }
+  ]
+}

@@ -1003,7 +1003,7 @@ fn range_checksum(headers: &HeaderMap) -> Result<Option<RangeChecksum>> {
         flag("x-ms-range-get-content-md5")?,
         flag("x-ms-range-get-content-crc64")?,
     ) {
-        (true, true) => Err(Error::InvalidHeader),
+        (true, true) => Err(Error::ConflictingRangeChecksums),
         (true, false) => Ok(Some(RangeChecksum::Md5)),
         (false, true) => Ok(Some(RangeChecksum::Crc64)),
         (false, false) => Ok(None),

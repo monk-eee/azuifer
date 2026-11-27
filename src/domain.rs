@@ -23,6 +23,7 @@ pub(crate) enum Error {
     TooLarge,
     Md5Mismatch,
     Crc64Mismatch,
+    ConflictingRangeChecksums,
     InvalidBlockId,
     InvalidBlockList,
     InvalidXml,
