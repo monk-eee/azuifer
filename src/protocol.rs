@@ -234,6 +234,23 @@ pub(crate) fn parse_target(path: &str) -> Result<Target> {
     })
 }
 
+/// A single path segment without `restype=container` names a blob in the `$root` container, as
+/// in `https://account.blob.core.windows.net/blob.txt`; this rewrites it to the explicit form.
+fn root_container_path(logical: String, query: &Query) -> String {
+    let mut segments = logical.strip_prefix('/').unwrap_or("").split('/');
+    let (Some(account), Some(name), None) = (segments.next(), segments.next(), segments.next())
+    else {
+        return logical;
+    };
+    if name.is_empty()
+        || query.get("restype").map(String::as_str) == Some("container")
+        || name.starts_with('$')
+    {
+        return logical;
+    }
+    format!("/{account}/$root/{name}")
+}
+
 struct Request<'a> {
     method: &'a Method,
     query: &'a Query,
@@ -287,6 +304,7 @@ fn parse_with(
     let mut query = parse_query(parts.uri.query())?;
     let host_account = address::host_account_or_secondary("blob", host(parts));
     let logical = address::logical_path(host_account.as_ref(), parts.uri.path());
+    let logical = root_container_path(logical, &query);
     let target = parse_target(&logical)?;
     let keys = config
         .accounts

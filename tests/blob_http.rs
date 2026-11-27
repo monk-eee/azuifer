@@ -5310,3 +5310,83 @@ fn the_web_host_serves_the_web_container_as_a_static_website() {
     assert_eq!(off.status(), 404);
     assert_eq!(off.headers()["x-ms-error-code"], "WebContentNotFound");
 }
+
+#[test]
+fn root_and_logs_containers_are_ordinary_and_the_root_has_an_implicit_path() {
+    let server = Emulator::start(None, &[]);
+    for name in ["$root", "$logs"] {
+        let path = format!("/testaccount/{name}?restype=container");
+        assert_eq!(server.request(Method::PUT, &path, &[], b"").status(), 201);
+        assert_eq!(server.request(Method::HEAD, &path, &[], b"").status(), 200);
+    }
+    // A blob written under the explicit name is readable at the short path, and the reverse.
+    assert_eq!(
+        server.put("/testaccount/$root/a.txt", &[], b"one").status(),
+        201
+    );
+    assert_eq!(
+        server
+            .request(Method::GET, "/testaccount/a.txt", &[], b"")
+            .bytes()
+            .unwrap()
+            .as_ref(),
+        b"one"
+    );
+    assert_eq!(server.put("/testaccount/B.txt", &[], b"two").status(), 201);
+    assert_eq!(
+        server
+            .request(Method::GET, "/testaccount/$root/B.txt", &[], b"")
+            .bytes()
+            .unwrap()
+            .as_ref(),
+        b"two"
+    );
+    let listing = server
+        .request(
+            Method::GET,
+            "/testaccount/$root?restype=container&comp=list",
+            &[],
+            b"",
+        )
+        .text()
+        .unwrap();
+    assert!(listing.contains("<Name>a.txt</Name>") && listing.contains("<Name>B.txt</Name>"));
+    assert_eq!(
+        server
+            .request(Method::DELETE, "/testaccount/B.txt", &[], b"")
+            .status(),
+        202
+    );
+    error(
+        server.request(Method::GET, "/testaccount/$root/B.txt", &[], b""),
+        404,
+        "BlobNotFound",
+    );
+    // Containers named with restype=container are never mistaken for root blobs.
+    error(
+        server.request(
+            Method::GET,
+            "/testaccount/absent?restype=container",
+            &[],
+            b"",
+        ),
+        404,
+        "ContainerNotFound",
+    );
+    let account = server
+        .request(Method::GET, "/testaccount?comp=list", &[], b"")
+        .text()
+        .unwrap();
+    assert!(account.contains("<Name>$root</Name>") && account.contains("<Name>$logs</Name>"));
+    assert_eq!(
+        server
+            .request(
+                Method::DELETE,
+                "/testaccount/$logs?restype=container",
+                &[],
+                b""
+            )
+            .status(),
+        202
+    );
+}
