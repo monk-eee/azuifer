@@ -70,7 +70,7 @@
         "SharedKeyLite",
         "Bearer"
       ],
-      "notes": "GET /{table}?comp=acl returns the stored access policies as XML. Policy times are returned normalized to YYYY-MM-DDThh:mm:ss.fffffffZ. SAS tokens cannot read ACLs."
+      "notes": "GET /{table}?comp=acl returns the stored access policies as XML. The 2023-11-03 bearer recording with XML Accept checks an empty ACL and no DataServiceVersion header. Policy times are returned normalized to YYYY-MM-DDThh:mm:ss.fffffffZ. SAS tokens cannot read ACLs."
     },
     {
       "name": "Get Table Service Properties",
@@ -81,7 +81,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "GET /?restype=service&comp=properties returns the stored Logging, HourMetrics, MinuteMetrics and Cors sections (Azure defaults until set). Logging and metrics are stored and returned but not produced; CORS rules are enforced for preflights and normal requests."
+      "notes": "GET /?restype=service&comp=properties returns Logging, HourMetrics, MinuteMetrics and Cors in XML without DataServiceVersion. The recorded bearer profile has disabled analytics and retention and no CORS rules; it does not establish Azure defaults. Settings are stored but no analytics data is produced. CORS rules are enforced."
     },
     {
       "name": "Get Table Service Stats",
@@ -148,7 +148,7 @@
       "authorization": [
         "Anonymous"
       ],
-      "notes": "OPTIONS on any table URL is answered from the account's stored CORS rules, matched with the Blob service's code: a missing Origin or Access-Control-Request-Method is 400 MissingRequiredHeader, no matching rule is 403 CorsPreflightFailure. Responses to requests with an Origin that a rule allows carry Access-Control-Allow-Origin and the exposed headers. Error bodies are the Table JSON form and have not been compared with Azure."
+      "notes": "OPTIONS consults account CORS rules. The anonymous 2023-11-03 recording with no rules and XML Accept verifies 403 CorsPreflightFailure and 400 InvalidHeaderValue for missing Origin or Access-Control-Request-Method. Errors carry x-ms-error-code and correlated OData XML without DataServiceVersion. Successful configured preflights are not recorded."
     },
     {
       "name": "Query Entities",

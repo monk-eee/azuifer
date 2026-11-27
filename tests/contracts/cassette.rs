@@ -139,6 +139,7 @@ pub(super) enum ErrorCode {
     OutOfRangeQueryParameterValue,
     RequestBodyTooLarge,
     AtomFormatNotSupported,
+    CorsPreflightFailure,
     Other,
 }
 
@@ -184,6 +185,7 @@ impl ErrorCode {
             Some("OutOfRangeQueryParameterValue") => Self::OutOfRangeQueryParameterValue,
             Some("RequestBodyTooLarge") => Self::RequestBodyTooLarge,
             Some("AtomFormatNotSupported") => Self::AtomFormatNotSupported,
+            Some("CorsPreflightFailure") => Self::CorsPreflightFailure,
             Some(_) => Self::Other,
         }
     }

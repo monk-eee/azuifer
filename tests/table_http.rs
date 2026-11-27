@@ -1375,7 +1375,7 @@ fn cors_rules_answer_preflights_and_decorate_responses() {
     );
     let missing = server.send(Call::new("OPTIONS", "/Tables").auth(Auth::None));
     assert_eq!(missing.status, 400);
-    assert_eq!(missing.error_code(), "MissingRequiredHeader");
+    assert_eq!(missing.error_code(), "InvalidHeaderValue");
 
     let with_origin =
         server.send(Call::new("GET", "/Tables").header("origin", "http://app.example"));

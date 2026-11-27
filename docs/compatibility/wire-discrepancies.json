@@ -546,6 +546,72 @@
         }
       ],
       "status": "observed"
+    },
+    {
+      "id": "WD-028",
+      "service": "queue",
+      "operation": "Preflight Queue Request",
+      "category": "undocumented_live",
+      "summary": "Queue preflight failures return a correlated storage XML error with MessageDetails.",
+      "expected_by_docs_or_sdk": "Learn documents 403 for no matching CORS rule and 400 for malformed preflight, without specifying these error bodies.",
+      "observed_behavior": "With no CORS rules, the 403 CorsPreflightFailure says no rule matches in MessageDetails. Omitting Origin or Access-Control-Request-Method returns 400 InvalidHeaderValue and MessageDetails names the missing header. None of the three responses contains an allow header.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/ede20618bc9a933eedfaa72d22c76ef581326087/docs-ref-conceptual/storageservices/Preflight-Queue-Request.md#remarks",
+          "detail": "Remarks describe the 403 and 400 statuses, not the XML fields."
+        },
+        {
+          "kind": "live",
+          "reference": "1fa50382b0b61d58766a4db043c101a0ab54002a:tests/contracts/cassettes/queue-read-only-settings.json#rule_miss",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "anonymous",
+          "detail": "status=403, error_header=cors_preflight_failure, and details_match confirms the MessageDetails value."
+        },
+        {
+          "kind": "live",
+          "reference": "1fa50382b0b61d58766a4db043c101a0ab54002a:tests/contracts/cassettes/queue-read-only-settings.json#missing_method",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "anonymous",
+          "detail": "status=400 and error_header=invalid_header_value; details_match names the omitted method header. missing_origin records the same shape for Origin."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-029",
+      "service": "table",
+      "operation": "Preflight Table Request",
+      "category": "undocumented_live",
+      "summary": "Table preflight failures with XML Accept return OData XML and x-ms-error-code.",
+      "expected_by_docs_or_sdk": "Learn documents the 403 rule miss and 400 malformed preflight but does not specify their error envelopes.",
+      "observed_behavior": "At 2023-11-03 an anonymous rule miss returns 403 CorsPreflightFailure, and a missing required header returns 400 InvalidHeaderValue. With XML Accept both failures use the OData metadata namespace, with the code in the body and x-ms-error-code, and no DataServiceVersion.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/ede20618bc9a933eedfaa72d22c76ef581326087/docs-ref-conceptual/storageservices/Preflight-Table-Request.md#remarks",
+          "detail": "Remarks list the failure statuses without describing OData XML or the code header."
+        },
+        {
+          "kind": "live",
+          "reference": "1fa50382b0b61d58766a4db043c101a0ab54002a:tests/contracts/cassettes/table-read-only-settings.json#rule_miss",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "anonymous",
+          "detail": "status=403, error_header=cors_preflight_failure, body.kind=table_cors and namespace_matches=true."
+        },
+        {
+          "kind": "live",
+          "reference": "1fa50382b0b61d58766a4db043c101a0ab54002a:tests/contracts/cassettes/table-read-only-settings.json#missing_origin",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "anonymous",
+          "detail": "status=400 and error_header=invalid_header_value; the OData XML reports a missing CORS header. missing_method agrees."
+        }
+      ],
+      "status": "observed"
     }
   ],
   "observations": [

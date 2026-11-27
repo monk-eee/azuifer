@@ -55,7 +55,7 @@ enum Body {
 // Deserialize only the selected fields; rule contents and arbitrary XML are never retained.
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct WireProperties {
+pub(super) struct WireProperties {
     logging: Option<WireVersion>,
     hour_metrics: Option<WireVersion>,
     minute_metrics: Option<WireVersion>,
@@ -68,6 +68,16 @@ struct WireProperties {
 struct WireVersion {
     #[serde(rename = "Version")]
     version: String,
+    #[serde(rename = "Read")]
+    read: Option<bool>,
+    #[serde(rename = "Write")]
+    write: Option<bool>,
+    #[serde(rename = "Delete")]
+    delete: Option<bool>,
+    #[serde(rename = "Enabled")]
+    enabled: Option<bool>,
+    #[serde(rename = "RetentionPolicy")]
+    retention: Option<WireEnabled>,
 }
 
 #[derive(Deserialize)]
@@ -80,6 +90,27 @@ struct WireCors {
 struct WireEnabled {
     #[serde(rename = "Enabled")]
     enabled: bool,
+}
+
+impl WireProperties {
+    pub(super) fn cors_count(&self) -> Option<usize> {
+        self.cors.as_ref().map(|cors| cors.rules.len())
+    }
+
+    pub(super) fn analytics_disabled(&self) -> bool {
+        let version_and_retention = |part: &WireVersion| {
+            part.version == "1.0" && part.retention.as_ref().is_some_and(|r| !r.enabled)
+        };
+        self.logging.as_ref().is_some_and(|part| {
+            version_and_retention(part) && [part.read, part.write, part.delete] == [Some(false); 3]
+        }) && [&self.hour_metrics, &self.minute_metrics]
+            .into_iter()
+            .all(|metrics| {
+                metrics
+                    .as_ref()
+                    .is_some_and(|part| version_and_retention(part) && part.enabled == Some(false))
+            })
+    }
 }
 
 impl AccountCassette {
@@ -166,6 +197,7 @@ pub(super) fn observe(
     })?;
     let service = get("service", |headers, bytes| {
         let xml: WireProperties = project_xml(bytes, "StorageServiceProperties")?;
+        let cors_rules = xml.cors_count();
         let version_1 =
             |wire: Option<WireVersion>| wire.is_some_and(|field| field.version == "1.0");
         Ok(Body::ServiceProperties {
@@ -173,7 +205,7 @@ pub(super) fn observe(
             logging_version_1: version_1(xml.logging),
             hour_metrics_version_1: version_1(xml.hour_metrics),
             minute_metrics_version_1: version_1(xml.minute_metrics),
-            cors_rules: xml.cors.map(|cors| cors.rules.len()),
+            cors_rules,
             blob_soft_delete: xml.delete_retention_policy.map(|value| value.enabled),
             static_website: xml.static_website.map(|value| value.enabled),
         })
