@@ -36,14 +36,18 @@ impl Case {
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-struct XmlError {
-    code: ErrorCode,
+pub(super) struct XmlError {
+    pub(super) code: ErrorCode,
     correlation: Header,
     message_matches: bool,
     extra_elements: usize,
 }
 
-fn project_error(xml: &str, request_id: Option<&str>, expected: &str) -> Option<XmlError> {
+pub(super) fn project_error(
+    xml: &str,
+    request_id: Option<&str>,
+    expected: &str,
+) -> Option<XmlError> {
     let fields = flat_xml(xml, "Error")?;
     let (message, correlation) = error_message(fields.get("Message")?, request_id);
     Some(XmlError {
@@ -77,55 +81,19 @@ enum Body {
 }
 
 fn part(headers: &HeaderMap, wire: &str) -> Option<Part> {
-    let (kind, parameters) = header_text(headers, "content-type")?.split_once(';')?;
-    if kind.trim() != "multipart/mixed" {
+    let parts = super::batch::parse_parts(headers, wire)?;
+    let [wire] = parts.as_slice() else {
         return None;
-    }
-    let (name, boundary) = parameters.trim().split_once('=')?;
-    let boundary = boundary.trim().trim_matches('"');
-    if name.trim() != "boundary"
-        || boundary.is_empty()
-        || !boundary
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
-    {
-        return None;
-    }
-    let open = format!("--{boundary}\r\n");
-    let close = format!("\r\n--{boundary}--");
-    let scope = wire.strip_prefix(&open)?.trim_end().strip_suffix(&close)?;
-    if scope.contains(&open) {
-        return None;
-    }
-    let (mime, http) = scope.split_once("\r\n\r\n")?;
-    if part_header(mime, "Content-Type") != Some("application/http") {
-        return None;
-    }
-    let (head, document) = http.split_once("\r\n\r\n")?;
-    let status = head
-        .lines()
-        .next()?
-        .strip_prefix("HTTP/1.1 ")?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()?;
-    let id = part_header(head, "x-ms-request-id");
+    };
+    let id = wire.header("x-ms-request-id");
     Some(Part {
-        status,
-        content_id_present: part_header(mime, "Content-ID").is_some(),
-        header_code: ErrorCode::from_value(part_header(head, "x-ms-error-code")),
+        status: wire.status,
+        content_id_present: wire.content_id().is_some(),
+        header_code: ErrorCode::from_value(wire.header("x-ms-error-code")),
         request_id: id.is_some_and(|id| Uuid::parse_str(id).is_ok()),
-        api_version: super::cassette::echoed(part_header(head, "x-ms-version"), Some(VERSION)),
-        error: project_error(document.trim(), id, INVALID_INPUT),
+        api_version: super::cassette::echoed(wire.header("x-ms-version"), Some(VERSION)),
+        error: project_error(wire.body, id, INVALID_INPUT),
     })
-}
-
-fn part_header<'a>(lines: &'a str, name: &str) -> Option<&'a str> {
-    lines
-        .lines()
-        .filter_map(|line| line.split_once(':'))
-        .find_map(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value.trim()))
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]

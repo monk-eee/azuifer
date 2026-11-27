@@ -15,6 +15,7 @@ pub(crate) enum Error {
     InvalidAuthenticationInfo,
     InvalidName,
     InvalidHeader,
+    IncompatibleBlobTier,
     InvalidVersion,
     InvalidQuery,
     Unsupported,
@@ -77,6 +78,7 @@ pub(crate) enum Error {
     InvalidTag,
     TagsTooLarge,
     InvalidBatchEnvelope,
+    MixedBatchOperations,
     InvalidInput,
 }
 

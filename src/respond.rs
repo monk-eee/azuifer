@@ -544,6 +544,11 @@ fn describe(error: Error) -> (StatusCode, &'static str, &'static str) {
             "InvalidHeaderValue",
             "A request header is invalid or missing.",
         ),
+        Error::IncompatibleBlobTier => (
+            S::BAD_REQUEST,
+            "InvalidHeaderValue",
+            "The value for one of the HTTP headers is not in the correct format.",
+        ),
         Error::InvalidVersion => (
             S::BAD_REQUEST,
             "InvalidHeaderValue",
@@ -761,7 +766,7 @@ fn describe(error: Error) -> (StatusCode, &'static str, &'static str) {
         Error::LeaseMismatchLease => (
             S::CONFLICT,
             "LeaseIdMismatchWithLeaseOperation",
-            "The lease ID specified did not match the lease ID for the resource.",
+            "The lease ID specified did not match the lease ID for the blob.",
         ),
         Error::LeaseMismatchContainerLease => (
             S::CONFLICT,
@@ -838,6 +843,11 @@ fn describe(error: Error) -> (StatusCode, &'static str, &'static str) {
             "InvalidInput",
             "One of the request inputs is not valid.",
         ),
+        Error::MixedBatchOperations => (
+            S::BAD_REQUEST,
+            "AllBatchSubRequestsShouldBeSameApi",
+            "All batch subrequests should be the same api.",
+        ),
         Error::CorsPreflight => (
             S::FORBIDDEN,
             "CorsPreflightFailure",
@@ -866,13 +876,21 @@ pub(crate) fn request_error_response(
     request_id: &str,
     now: SystemTime,
 ) -> Response {
-    if error == Error::Page(PageError::UnalignedPageRange) {
-        let value = request_headers
-            .get("x-ms-range")
-            .or_else(|| request_headers.get("range"))
-            .and_then(|value| value.to_str().ok());
-        let Some(value) = value else {
-            tracing::error!("unaligned page range error without a usable request range");
+    let rejected_header = match error {
+        Error::Page(PageError::UnalignedPageRange) => Some((
+            "Range",
+            request_headers
+                .get("x-ms-range")
+                .or_else(|| request_headers.get("range")),
+        )),
+        Error::IncompatibleBlobTier => {
+            Some(("x-ms-access-tier", request_headers.get("x-ms-access-tier")))
+        }
+        _ => None,
+    };
+    if let Some((name, value)) = rejected_header {
+        let Some(value) = value.and_then(|value| value.to_str().ok()) else {
+            tracing::error!(header = name, "missing rejected Blob request header");
             return error_response(Error::Internal);
         };
         let (status, code, message) = describe(error);
@@ -880,7 +898,7 @@ pub(crate) fn request_error_response(
             status,
             code,
             &correlated_error_message(message, request_id, now),
-            &[("HeaderName", "Range"), ("HeaderValue", value)],
+            &[("HeaderName", name), ("HeaderValue", value)],
         );
     }
     let correlation = matches!(
@@ -898,7 +916,9 @@ pub(crate) fn request_error_response(
             | Error::LeaseIdMissing
             | Error::LeaseIdMissingBlob
             | Error::LeaseMismatchBlob
+            | Error::LeaseMismatchLease
             | Error::LeaseMismatchContainerLease
+            | Error::LeaseBreakingNoAcquire
             | Error::SnapshotsPresent
             | Error::Page(
                 PageError::AppendPositionConditionNotMet

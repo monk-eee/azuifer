@@ -1,4 +1,7 @@
-use super::{header, header_text, lifecycle::LEASE_ID};
+use super::{
+    header, header_text,
+    lifecycle::{LEASE_ID, WRONG_LEASE_ID},
+};
 use crate::contracts::cassette::Header;
 use anyhow::{Context as _, Result, bail};
 use reqwest::{Method, blocking::Request};
@@ -29,6 +32,9 @@ enum Operation {
     RenewContainerLease,
     ReleaseContainerLease,
     ReleaseLease,
+    RenewLease,
+    ChangeLease,
+    BreakLease,
     CreateSnapshot,
     ReadSnapshot,
     AppendBlock,
@@ -38,9 +44,17 @@ enum Operation {
     SealAppend,
     BlobMetadata,
     SetBlobProperties,
+    SetBlobTier,
     Container,
     ContainerMetadata,
     ListContainers,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Tier {
+    Cool,
+    PremiumP10,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -98,6 +112,12 @@ pub(super) struct Input {
     lease_id: Option<Header>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     lease_seconds: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease_break_seconds: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proposed_change_id: Option<Header>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    access_tier: Option<Tier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     append_position: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -175,12 +195,16 @@ impl Input {
             Some("metadata") if container => Operation::ContainerMetadata,
             Some("metadata") => Operation::BlobMetadata,
             Some("properties") => Operation::SetBlobProperties,
+            Some("tier") => Operation::SetBlobTier,
             Some("lease") => match text("x-ms-lease-action") {
                 Some("acquire") if container => Operation::AcquireContainerLease,
                 Some("renew") if container => Operation::RenewContainerLease,
                 Some("release") if container => Operation::ReleaseContainerLease,
                 Some("acquire") => Operation::AcquireLease,
                 Some("release") => Operation::ReleaseLease,
+                Some("renew") => Operation::RenewLease,
+                Some("change") => Operation::ChangeLease,
+                Some("break") => Operation::BreakLease,
                 _ => bail!("unexpected Blob probe lease action"),
             },
             Some("page") => match text("x-ms-page-write") {
@@ -295,6 +319,15 @@ impl Input {
                 |value| value == LEASE_ID,
             )),
             lease_seconds: number("x-ms-lease-duration")?,
+            lease_break_seconds: number("x-ms-lease-break-period")?,
+            proposed_change_id: (operation == Operation::ChangeLease)
+                .then(|| header(headers, "x-ms-proposed-lease-id", |id| id == WRONG_LEASE_ID)),
+            access_tier: match text("x-ms-access-tier") {
+                None => None,
+                Some("Cool") => Some(Tier::Cool),
+                Some("P10") => Some(Tier::PremiumP10),
+                _ => bail!("unexpected access tier in probe"),
+            },
             append_position: number("x-ms-blob-condition-appendpos")?,
             append_max_size: number("x-ms-blob-condition-maxsize")?,
             page_size: number("x-ms-blob-content-length")?,

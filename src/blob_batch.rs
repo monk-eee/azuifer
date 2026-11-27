@@ -16,6 +16,7 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode},
     response::Response,
 };
+use std::time::SystemTime;
 use uuid::Uuid;
 
 const MAX_SUBREQUESTS: usize = 256;
@@ -171,6 +172,17 @@ fn kind(request: &Subrequest) -> Result<&'static str> {
     }
 }
 
+fn check_kinds(requests: &[Subrequest]) -> Result<()> {
+    let (first, rest) = requests.split_first().ok_or(Error::InvalidBatchEnvelope)?;
+    let first_kind = kind(first)?;
+    for request in rest {
+        if kind(request)? != first_kind {
+            return Err(Error::MixedBatchOperations);
+        }
+    }
+    Ok(())
+}
+
 fn status_line(status: StatusCode) -> String {
     format!(
         "HTTP/1.1 {} {}",
@@ -249,9 +261,17 @@ async fn render_part(
     outcome: Result<Response>,
     version: &str,
     boundary: &str,
-    request_id: &str,
+    now: SystemTime,
 ) -> Result<String> {
-    let response = outcome.unwrap_or_else(error_response);
+    let request_id = Uuid::new_v4().to_string();
+    let response = match outcome {
+        Ok(response) => response,
+        Err(
+            error
+            @ (Error::InvalidBatchEnvelope | Error::MixedBatchOperations | Error::BlobMissing),
+        ) => correlated_error_response(error, &request_id, now),
+        Err(error) => error_response(error),
+    };
     let (head, body) = response.into_parts();
     let body = to_bytes(body, MAX_RESPONSE_PART_BYTES)
         .await
@@ -262,7 +282,7 @@ async fn render_part(
     }
     part.push_str(&format!("\r\n{}\r\n", status_line(head.status)));
     let mut headers = head.headers;
-    set(&mut headers, "x-ms-request-id", request_id)?;
+    set(&mut headers, "x-ms-request-id", &request_id)?;
     set(&mut headers, "x-ms-version", version)?;
     if !body.is_empty() {
         set(&mut headers, "content-length", &body.len().to_string())?;
@@ -294,28 +314,30 @@ pub(crate) async fn execute(
     let version = app.config.api_version.as_str();
     let reply = format!("batchresponse_{}", Uuid::new_v4());
     let mut text = String::new();
-    match parse_body(&bytes, &boundary) {
-        Err(Error::InvalidBatchEnvelope) if scope.is_some() => {
-            // Azure embeds the envelope rejection before executing any subrequests.
-            let id = Uuid::new_v4().to_string();
-            let rejection = correlated_error_response(Error::InvalidInput, &id, app.clock.now());
-            text.push_str(&render_part(None, Ok(rejection), version, &reply, &id).await?);
+    let prepared = parse_body(&bytes, &boundary).and_then(|requests| {
+        check_kinds(&requests)?;
+        Ok(requests)
+    });
+    match prepared {
+        Err(error @ (Error::InvalidBatchEnvelope | Error::MixedBatchOperations))
+            if scope.is_some() =>
+        {
+            text.push_str(&render_part(None, Err(error), version, &reply, app.clock.now()).await?);
         }
+        Err(Error::MixedBatchOperations) => return Err(Error::InvalidInput),
         Err(error) => return Err(error),
         Ok(requests) => {
-            let (first, rest) = requests.split_first().ok_or(Error::InvalidInput)?;
-            let first_kind = kind(first)?;
-            for request in rest {
-                if kind(request)? != first_kind {
-                    return Err(Error::InvalidInput);
-                }
-            }
             for request in &requests {
                 let outcome = run_one(app, ctx, scope.as_ref(), version, request).await;
-                let id = Uuid::new_v4().to_string();
                 text.push_str(
-                    &render_part(request.content_id.as_deref(), outcome, version, &reply, &id)
-                        .await?,
+                    &render_part(
+                        request.content_id.as_deref(),
+                        outcome,
+                        version,
+                        &reply,
+                        app.clock.now(),
+                    )
+                    .await?,
                 );
             }
         }
@@ -431,10 +453,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_item_renders_its_status_and_error_body() {
-        let id = "00000000-0000-4000-8000-000000000001";
-        let part = render_part(Some("7"), Err(Error::BlobMissing), "2023-11-03", "resp", id)
-            .await
-            .unwrap();
+        let part = render_part(
+            Some("7"),
+            Err(Error::BlobMissing),
+            "2023-11-03",
+            "resp",
+            SystemTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap();
         assert!(part.starts_with("--resp\r\nContent-Type: application/http\r\nContent-ID: 7\r\n\r\nHTTP/1.1 404 Not Found\r\n"));
         assert!(part.contains("x-ms-error-code: BlobNotFound\r\n"));
         assert!(part.contains("<Code>BlobNotFound</Code>"));
@@ -443,7 +470,7 @@ mod tests {
             Ok(crate::respond::empty(StatusCode::ACCEPTED)),
             "2023-11-03",
             "resp",
-            id,
+            SystemTime::UNIX_EPOCH,
         )
         .await
         .unwrap();

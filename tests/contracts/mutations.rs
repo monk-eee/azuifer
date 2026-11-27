@@ -18,6 +18,7 @@ use std::{fs::File, path::Path, time::SystemTime};
 mod containers;
 mod expanded;
 mod input;
+mod lease_tier;
 mod lifecycle;
 mod lists;
 
@@ -61,6 +62,10 @@ pub(super) enum Case {
     AppendSealing,
     #[serde(rename = "blob-container-lease")]
     ContainerLease,
+    #[serde(rename = "blob-finite-lease")]
+    FiniteLease,
+    #[serde(rename = "blob-tier")]
+    SetTier,
 }
 
 impl Case {
@@ -81,6 +86,8 @@ impl Case {
             Self::PageResizeSequence => "blob-page-resize-sequence",
             Self::AppendSealing => "blob-append-sealing",
             Self::ContainerLease => "blob-container-lease",
+            Self::FiniteLease => "blob-finite-lease",
+            Self::SetTier => "blob-tier",
         }
     }
 
@@ -223,6 +230,18 @@ impl Case {
                 ReleaseLease,
                 DeleteContainer,
             ],
+            Self::FiniteLease => &[
+                AcquireLease,
+                RenewBlobLease,
+                ChangeBlobLease,
+                RejectOldBlobLease,
+                BreakBlobLease,
+                RejectAcquireWhileBreaking,
+                ReadBrokenBlob,
+                ReacquireBlobLease,
+                ReleaseLease,
+            ],
+            Self::SetTier => &[SetCoolTier, HeadCoolBlob, RejectPremiumTier, ReadCoolBlob],
         }
     }
 }
@@ -324,6 +343,17 @@ enum Step {
     ReadLeasedContainer,
     RejectRenewWithWrongContainerLease,
     RenewContainerLease,
+    RenewBlobLease,
+    ChangeBlobLease,
+    RejectOldBlobLease,
+    BreakBlobLease,
+    RejectAcquireWhileBreaking,
+    ReadBrokenBlob,
+    ReacquireBlobLease,
+    SetCoolTier,
+    HeadCoolBlob,
+    RejectPremiumTier,
+    ReadCoolBlob,
 }
 
 impl Step {
@@ -336,6 +366,7 @@ impl Step {
             | Self::ReadLeasedOriginal
             | Self::ReadSnapshot
             | Self::ReadOriginalWithChecksum
+            | Self::ReadCoolBlob
             | Self::ReadRestored => Some((INITIAL, "initial", "BlockBlob")),
             Self::ReadUpdatedProperties => Some((INITIAL, expanded::UPDATED, "BlockBlob")),
             Self::ReadReplacement | Self::ReadLeasedReplacement | Self::ReadReleased => {
@@ -386,6 +417,9 @@ impl Step {
                 | Self::RejectSealedAppend
                 | Self::RejectDeleteWithoutContainerLease
                 | Self::RejectRenewWithWrongContainerLease
+                | Self::RejectOldBlobLease
+                | Self::RejectAcquireWhileBreaking
+                | Self::RejectPremiumTier
         )
     }
 
@@ -424,6 +458,9 @@ impl Step {
             | Self::AppendAtMaxSize
             | Self::Recreate => (201, Some(Tag::Changed)),
             Self::AcquireLease | Self::CreateSnapshot => (201, Some(Tag::Matches)),
+            Self::ReacquireBlobLease => (201, Some(Tag::Matches)),
+            Self::BreakBlobLease => (202, Some(Tag::Matches)),
+            Self::SetCoolTier => (200, Some(Tag::Missing)),
             Self::SetMetadata
             | Self::SetProperties
             | Self::SetContainerMetadata
@@ -431,6 +468,10 @@ impl Step {
             | Self::GrowAndMaxSequence => (200, Some(Tag::Changed)),
             Self::ReleaseLease
             | Self::ReadLeasedContainer
+            | Self::RenewBlobLease
+            | Self::ChangeBlobLease
+            | Self::ReadBrokenBlob
+            | Self::HeadCoolBlob
             | Self::RenewContainerLease
             | Self::HeadProperties
             | Self::ReadMetadata
@@ -549,6 +590,19 @@ enum Details {
         name: Header,
         value: Header,
     },
+    LeaseTime {
+        remaining: Header,
+        id: Header,
+    },
+    Tier {
+        cool: Header,
+        inferred: Header,
+        change_time: Header,
+    },
+    RejectedTier {
+        name: Header,
+        value: Header,
+    },
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -627,6 +681,7 @@ impl MutationCassette {
                 valid
                     && expanded::matches_fixture(r)
                     && lifecycle::matches_new_fixture(r)
+                    && lease_tier::matches_fixture(r)
                     && containers::matches_fixture(r),
                 "{:?}: did not produce the expected Blob state: {r:#?}",
                 r.step
@@ -668,6 +723,7 @@ struct Observed {
     snapshot: Option<String>,
     bytes: Vec<u8>,
     next_marker: Option<String>,
+    lease_time: Option<u32>,
 }
 
 fn usable_etag(headers: &HeaderMap) -> Option<&str> {
@@ -800,6 +856,12 @@ impl Probe<'_> {
                             value: echoed(fields.get("HeaderValue").map(String::as_str), Some(lifecycle::UNALIGNED_PAGE_RANGE)),
                         });
                     }
+                    if step == Step::RejectPremiumTier {
+                        fault_details = Some(Details::RejectedTier {
+                            name: echoed(fields.get("HeaderName").map(String::as_str), Some("x-ms-access-tier")),
+                            value: echoed(fields.get("HeaderValue").map(String::as_str), Some("P10")),
+                        });
+                    }
                     let expected = match code {
                         ErrorCode::BlobNotFound => "The specified blob does not exist.",
                         ErrorCode::BlobAlreadyExists => "The specified blob already exists.",
@@ -812,7 +874,10 @@ impl Probe<'_> {
                         }
                         ErrorCode::LeaseIdMissing => "There is currently a lease on the blob and no lease ID was specified in the request.",
                         ErrorCode::LeaseMismatchBlob => "The lease ID specified did not match the lease ID for the blob.",
-                        ErrorCode::LeaseMismatchLease => "The lease ID specified did not match the lease ID for the container.",
+                        ErrorCode::LeaseMismatchLease if step == Step::RejectRenewWithWrongContainerLease => "The lease ID specified did not match the lease ID for the container.",
+                        ErrorCode::LeaseMismatchLease => "The lease ID specified did not match the lease ID for the blob.",
+                        ErrorCode::LeaseBreakingNoAcquire => "The lease ID matched, but the lease is currently in breaking state and cannot be acquired until it is broken.",
+                        ErrorCode::LeaseAlreadyPresent => "There is already a lease present.",
                         ErrorCode::SnapshotsPresent => "This operation is not permitted because the blob has snapshots.",
                         ErrorCode::AppendPositionConditionNotMet => "The append position condition specified was not met.",
                         ErrorCode::SequenceNumberConditionNotMet => "The sequence number condition specified was not met.",
@@ -850,6 +915,7 @@ impl Probe<'_> {
             error_header,
             details: fault_details
                 .or_else(|| lifecycle::details(step, &headers))
+                .or_else(|| lease_tier::details(step, &headers))
                 .or_else(|| expanded::details(step, &headers))
                 .or_else(|| containers::details(step, &headers)),
             api_version: header(&headers, "x-ms-version", |value| value == VERSION),
@@ -864,6 +930,7 @@ impl Probe<'_> {
                 .map(str::to_owned),
             bytes,
             next_marker,
+            lease_time: text("x-ms-lease-time").and_then(|value| value.parse().ok()),
         })
     }
 
@@ -967,6 +1034,8 @@ pub(super) fn observe(
             Case::PageResizeSequence => probe.page_resize_sequence()?,
             Case::AppendSealing => probe.append_sealing()?,
             Case::ContainerLease => probe.container_lease(endpoint, companion)?,
+            Case::FiniteLease => probe.finite_lease()?,
+            Case::SetTier => probe.set_tier()?,
         }
         Ok(MutationCassette {
             schema_version: SCHEMA_VERSION,
@@ -1066,6 +1135,16 @@ fn replay_blob_mutation_container_lifecycle() -> Result<()> {
 #[test]
 fn replay_blob_mutation_container_lease() -> Result<()> {
     replay(Case::ContainerLease)
+}
+
+#[test]
+fn replay_blob_mutation_finite_lease() -> Result<()> {
+    replay(Case::FiniteLease)
+}
+
+#[test]
+fn replay_blob_mutation_set_tier() -> Result<()> {
+    replay(Case::SetTier)
 }
 
 #[test]

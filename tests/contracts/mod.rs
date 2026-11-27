@@ -1,8 +1,10 @@
 mod account;
+mod batch;
 mod cassette;
 mod delegation;
 mod live;
 mod mutations;
+mod query;
 mod request_errors;
 mod sas_reads;
 

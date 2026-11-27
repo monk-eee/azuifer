@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "delete_batch",
+      "status": 202,
+      "request_id": true,
+      "api_version": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "multipart",
+        "parts": [
+          {
+            "content_id": 0,
+            "status": 202,
+            "request_id": true,
+            "api_version": "matches",
+            "error_header": "missing",
+            "permanent_delete": "matches",
+            "empty_body": true,
+            "error": null
+          },
+          {
+            "content_id": 1,
+            "status": 202,
+            "request_id": true,
+            "api_version": "matches",
+            "error_header": "missing",
+            "permanent_delete": "matches",
+            "empty_body": true,
+            "error": null
+          },
+          {
+            "content_id": 2,
+            "status": 404,
+            "request_id": true,
+            "api_version": "matches",
+            "error_header": "blob_not_found",
+            "permanent_delete": "missing",
+            "empty_body": false,
+            "error": {
+              "code": "blob_not_found",
+              "correlation": "matches",
+              "message_matches": true,
+              "extra_elements": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "step": "read_deleted_a",
+      "status": 404,
+      "request_id": true,
+      "api_version": "matches",
+      "error_header": "blob_not_found",
+      "body": {
+        "kind": "xml",
+        "code": "blob_not_found",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "read_deleted_b",
+      "status": 404,
+      "request_id": true,
+      "api_version": "matches",
+      "error_header": "blob_not_found",
+      "body": {
+        "kind": "xml",
+        "code": "blob_not_found",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "tier_batch",
+      "status": 202,
+      "request_id": true,
+      "api_version": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "multipart",
+        "parts": [
+          {
+            "content_id": 0,
+            "status": 200,
+            "request_id": true,
+            "api_version": "matches",
+            "error_header": "missing",
+            "permanent_delete": "missing",
+            "empty_body": true,
+            "error": null
+          },
+          {
+            "content_id": 1,
+            "status": 404,
+            "request_id": true,
+            "api_version": "matches",
+            "error_header": "blob_not_found",
+            "permanent_delete": "missing",
+            "empty_body": false,
+            "error": {
+              "code": "blob_not_found",
+              "correlation": "matches",
+              "message_matches": true,
+              "extra_elements": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "step": "read_tiered",
+      "status": 200,
+      "request_id": true,
+      "api_version": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "tier_cool": "matches",
+        "original_etag": "matches"
+      }
+    },
+    {
+      "step": "mixed_batch",
+      "status": 202,
+      "request_id": true,
+      "api_version": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "multipart",
+        "parts": [
+          {
+            "content_id": null,
+            "status": 400,
+            "request_id": true,
+            "api_version": "matches",
+            "error_header": "mixed_batch_operations",
+            "permanent_delete": "missing",
+            "empty_body": false,
+            "error": {
+              "code": "mixed_batch_operations",
+              "correlation": "matches",
+              "message_matches": true,
+              "extra_elements": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "step": "read_unaffected",
+      "status": 200,
+      "request_id": true,
+      "api_version": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "tier_cool": "matches",
+        "original_etag": "matches"
+      }
+    }
+  ]
+}

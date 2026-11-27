@@ -2,6 +2,9 @@
 //! and Submit Batch (ADR-0018, ADR-0019). The server is the built binary; the
 //! helpers mirror `blob_http.rs` so the two files merge independently.
 
+#[path = "support/query_avro.rs"]
+mod query_avro;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hmac::{Hmac, Mac as _};
 use reqwest::{
@@ -1709,88 +1712,47 @@ fn the_versioning_option_validates_account_names() {
     assert!(!from_env.status.success());
 }
 
-/// The records of a Query Blob Contents Avro stream: the concatenated result data, the
-/// `end` total, and any `error` record as `(fatal, name, description, position)`.
 struct Queried {
     data: String,
-    total: Option<i64>,
-    error: Option<(bool, String, String, i64)>,
+    total: Option<u64>,
+    errors: Vec<(bool, String, u64)>,
     progress: usize,
 }
 
 fn decode_query(bytes: &[u8]) -> Queried {
-    fn long(bytes: &[u8], at: &mut usize) -> i64 {
-        let (mut value, mut shift) = (0u64, 0);
-        loop {
-            let byte = bytes[*at];
-            *at += 1;
-            value |= u64::from(byte & 0x7f) << shift;
-            if byte & 0x80 == 0 {
-                return ((value >> 1) as i64) ^ -((value & 1) as i64);
-            }
-            shift += 7;
-        }
-    }
-    fn blob(bytes: &[u8], at: &mut usize) -> Vec<u8> {
-        let length = long(bytes, at) as usize;
-        *at += length;
-        bytes[*at - length..*at].to_vec()
-    }
-    assert_eq!(&bytes[..4], b"Obj\x01");
-    let mut at = 4;
-    let mut schema = String::new();
-    loop {
-        let count = long(bytes, &mut at);
-        if count == 0 {
-            break;
-        }
-        for _ in 0..count {
-            let key = blob(bytes, &mut at);
-            let value = blob(bytes, &mut at);
-            if key == b"avro.schema" {
-                schema = String::from_utf8(value).unwrap();
-            }
-        }
-    }
-    assert!(schema.contains("com.microsoft.azure.storage.queryBlobContents"));
-    let sync = bytes[at..at + 16].to_vec();
-    at += 16;
+    use query_avro::{Kind, Record, decode};
+    let stream = decode(bytes).expect("valid Query Avro stream");
+    assert_eq!(
+        stream.schema,
+        [Kind::Data, Kind::Error, Kind::Progress, Kind::End]
+    );
+    assert!(stream.qualified_names && !stream.explicit_null_codec);
+    assert!(stream.block_sizes.iter().all(|count| *count == 1));
     let mut out = Queried {
         data: String::new(),
         total: None,
-        error: None,
+        errors: Vec::new(),
         progress: 0,
     };
-    let records = long(bytes, &mut at);
-    let size = long(bytes, &mut at) as usize;
-    let end = at + size;
-    assert_eq!(
-        &bytes[end..end + 16],
-        &sync[..],
-        "sync marker closes the block"
-    );
-    for _ in 0..records {
-        match long(bytes, &mut at) {
-            0 => out
-                .data
-                .push_str(&String::from_utf8(blob(bytes, &mut at)).unwrap()),
-            1 => {
-                long(bytes, &mut at);
-                long(bytes, &mut at);
+    for record in stream.records {
+        match record {
+            Record::Data(data) => out.data.push_str(std::str::from_utf8(data).unwrap()),
+            Record::Progress { scanned, total } => {
+                assert!(scanned <= total);
                 out.progress += 1;
             }
-            2 => out.total = Some(long(bytes, &mut at)),
-            3 => {
-                let fatal = bytes[at] == 1;
-                at += 1;
-                let name = String::from_utf8(blob(bytes, &mut at)).unwrap();
-                let description = String::from_utf8(blob(bytes, &mut at)).unwrap();
-                out.error = Some((fatal, name, description, long(bytes, &mut at)));
+            Record::End(total) => out.total = Some(total),
+            Record::Error {
+                fatal,
+                name,
+                description,
+                position,
+            } => {
+                assert!(!description.is_empty());
+                out.errors.push((fatal, name.to_owned(), position));
             }
-            other => panic!("unknown union branch {other}"),
         }
     }
-    assert_eq!(at, end);
     out
 }
 
@@ -1836,21 +1798,17 @@ fn query_blob_contents_runs_sql_over_csv_and_json_and_streams_avro() {
         ),
     );
     assert_eq!(response.status(), 200);
-    assert_eq!(
-        header(&response, "content-type"),
-        "application/octet-stream"
-    );
-    let length = header(&response, "content-length");
+    assert_eq!(header(&response, "content-type"), "avro/binary");
+    assert!(!response.headers().contains_key("content-length"));
     let bytes = response.bytes().unwrap();
-    assert_eq!(length, bytes.len().to_string());
     let rows = decode_query(&bytes);
     assert_eq!(rows.data, "ann\ncy\n");
-    assert_eq!(rows.total, Some(csv.len() as i64));
+    assert_eq!(rows.total, Some(csv.len() as u64));
     assert!(
         rows.progress >= 1,
         "SDKs read the first record unconditionally"
     );
-    assert!(rows.error.is_none());
+    assert!(rows.errors.is_empty());
 
     let positional = decode_query(
         &query(
@@ -1923,11 +1881,11 @@ fn query_blob_contents_runs_sql_over_csv_and_json_and_streams_avro() {
         .bytes()
         .unwrap(),
     );
-    let (fatal, name, _, position) = failed.error.expect("a runtime failure is an error record");
-    assert!(fatal);
-    assert_eq!(name, "CastFailed");
-    assert_eq!(position, 0);
-    assert_eq!(failed.total, Some(csv.len() as i64));
+    assert_eq!(
+        failed.errors,
+        [9, 16, 23].map(|position| (false, "InvalidTypeConversion".to_owned(), position))
+    );
+    assert_eq!(failed.total, Some(csv.len() as u64));
 }
 
 #[test]
@@ -1963,7 +1921,7 @@ fn query_blob_contents_reads_snapshots_and_rejects_bad_requests() {
         query_body("SELEC _1 FROM BlobStorage", CSV_PLAIN, CSV_PLAIN),
     );
     assert_eq!(syntax.status(), 400);
-    assert_eq!(error_code(syntax), "ParseError");
+    assert_eq!(error_code(syntax), "ErrorProcessingQueryExpression");
     let parquet = run(
         "data.csv",
         "",

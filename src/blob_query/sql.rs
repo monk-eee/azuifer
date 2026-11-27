@@ -60,12 +60,14 @@ impl Value {
 pub(super) struct SqlError {
     pub(super) name: &'static str,
     pub(super) message: String,
+    pub(super) fatal: bool,
 }
 
 fn parse_error<T>(message: impl Into<String>) -> Result<T, SqlError> {
     Err(SqlError {
         name: "ParseError",
         message: message.into(),
+        fatal: true,
     })
 }
 
@@ -73,6 +75,7 @@ fn runtime_error<T>(name: &'static str, message: impl Into<String>) -> Result<T,
     Err(SqlError {
         name,
         message: message.into(),
+        fatal: true,
     })
 }
 
@@ -861,11 +864,12 @@ fn cast(value: Value, kind: CastType) -> Result<Value, SqlError> {
     if matches!(value, Value::Null) {
         return Ok(Value::Null);
     }
-    let failed = |what: &str| {
-        runtime_error(
-            "CastFailed",
-            format!("cannot cast {} to {what}", value.to_text()),
-        )
+    let failed = || {
+        Err(SqlError {
+            name: "InvalidTypeConversion",
+            message: "Invalid type conversion.".into(),
+            fatal: false,
+        })
     };
     match kind {
         CastType::Text => Ok(Value::Str(value.to_text())),
@@ -874,16 +878,14 @@ fn cast(value: Value, kind: CastType) -> Result<Value, SqlError> {
             Some(Number::Float(float)) if float.is_finite() => Ok(Value::Int(float.trunc() as i64)),
             _ => match value {
                 Value::Bool(flag) => Ok(Value::Int(i64::from(flag))),
-                _ => failed("INT"),
+                _ => failed(),
             },
         },
         CastType::Float => match number(&value) {
             Some(number) => Ok(Value::Float(as_f64(number))),
-            None => failed("FLOAT"),
+            None => failed(),
         },
-        CastType::Bool => {
-            truth(&value).map_or_else(|| failed("BOOL"), |flag| Ok(Value::Bool(flag)))
-        }
+        CastType::Bool => truth(&value).map_or_else(failed, |flag| Ok(Value::Bool(flag))),
     }
 }
 
@@ -1372,7 +1374,8 @@ mod tests {
         let error = query
             .project(&csv(&["abc"]), &Scope { headers: None })
             .unwrap_err();
-        assert_eq!(error.name, "CastFailed");
+        assert_eq!(error.name, "InvalidTypeConversion");
+        assert!(!error.fatal);
         let query = Query::parse("SELECT 1 / 0 FROM BlobStorage").unwrap();
         assert_eq!(
             query
