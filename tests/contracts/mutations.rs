@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::{fs::File, path::Path, time::SystemTime};
 
 mod containers;
+mod copying;
 mod expanded;
 mod input;
 mod lease_tier;
@@ -66,6 +67,8 @@ pub(super) enum Case {
     FiniteLease,
     #[serde(rename = "blob-tier")]
     SetTier,
+    #[serde(rename = "blob-completed-copy")]
+    CompletedCopy,
 }
 
 impl Case {
@@ -88,6 +91,7 @@ impl Case {
             Self::ContainerLease => "blob-container-lease",
             Self::FiniteLease => "blob-finite-lease",
             Self::SetTier => "blob-tier",
+            Self::CompletedCopy => "blob-completed-copy",
         }
     }
 
@@ -242,6 +246,15 @@ impl Case {
                 ReleaseLease,
             ],
             Self::SetTier => &[SetCoolTier, HeadCoolBlob, RejectPremiumTier, ReadCoolBlob],
+            Self::CompletedCopy => &[
+                StartCopy,
+                HeadCopiedBlob,
+                ReadCopiedBlob,
+                RejectCopySource,
+                RejectCopyDestination,
+                RejectAbortCompletedCopy,
+                ReadUnchangedCopy,
+            ],
         }
     }
 }
@@ -354,6 +367,13 @@ enum Step {
     HeadCoolBlob,
     RejectPremiumTier,
     ReadCoolBlob,
+    StartCopy,
+    HeadCopiedBlob,
+    ReadCopiedBlob,
+    RejectCopySource,
+    RejectCopyDestination,
+    RejectAbortCompletedCopy,
+    ReadUnchangedCopy,
 }
 
 impl Step {
@@ -367,6 +387,8 @@ impl Step {
             | Self::ReadSnapshot
             | Self::ReadOriginalWithChecksum
             | Self::ReadCoolBlob
+            | Self::ReadCopiedBlob
+            | Self::ReadUnchangedCopy
             | Self::ReadRestored => Some((INITIAL, "initial", "BlockBlob")),
             Self::ReadUpdatedProperties => Some((INITIAL, expanded::UPDATED, "BlockBlob")),
             Self::ReadReplacement | Self::ReadLeasedReplacement | Self::ReadReleased => {
@@ -420,6 +442,9 @@ impl Step {
                 | Self::RejectOldBlobLease
                 | Self::RejectAcquireWhileBreaking
                 | Self::RejectPremiumTier
+                | Self::RejectCopySource
+                | Self::RejectCopyDestination
+                | Self::RejectAbortCompletedCopy
         )
     }
 
@@ -460,6 +485,7 @@ impl Step {
             Self::AcquireLease | Self::CreateSnapshot => (201, Some(Tag::Matches)),
             Self::ReacquireBlobLease => (201, Some(Tag::Matches)),
             Self::BreakBlobLease => (202, Some(Tag::Matches)),
+            Self::StartCopy => (202, Some(Tag::Valid)),
             Self::SetCoolTier => (200, Some(Tag::Missing)),
             Self::SetMetadata
             | Self::SetProperties
@@ -472,6 +498,7 @@ impl Step {
             | Self::ChangeBlobLease
             | Self::ReadBrokenBlob
             | Self::HeadCoolBlob
+            | Self::HeadCopiedBlob
             | Self::RenewContainerLease
             | Self::HeadProperties
             | Self::ReadMetadata
@@ -603,6 +630,13 @@ enum Details {
         name: Header,
         value: Header,
     },
+    Copy {
+        id: Header,
+        success: Header,
+        source: Header,
+        progress: Header,
+        completion_time: Header,
+    },
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -682,6 +716,7 @@ impl MutationCassette {
                     && expanded::matches_fixture(r)
                     && lifecycle::matches_new_fixture(r)
                     && lease_tier::matches_fixture(r)
+                    && copying::matches_fixture(r)
                     && containers::matches_fixture(r),
                 "{:?}: did not produce the expected Blob state: {r:#?}",
                 r.step
@@ -715,6 +750,7 @@ struct Probe<'a> {
     client: &'a Client,
     url: Url,
     bearer: &'a str,
+    copy_id: Option<String>,
     responses: Vec<Response>,
 }
 
@@ -891,6 +927,8 @@ impl Probe<'_> {
                         ErrorCode::InvalidPageRange => "The page range specified is invalid.",
                         ErrorCode::MaxBlobSizeConditionNotMet => "The max blob size condition specified was not met.",
                         ErrorCode::BlobIsSealed => "The blob is sealed and its contents cannot be modified.",
+                        ErrorCode::SourceConditionNotMet => "The source condition specified using HTTP conditional header(s) is not met.",
+                        ErrorCode::NoPendingCopyOperation => "There is currently no pending copy operation.",
                         _ => return None,
                     };
                     Some(Body::XmlError {
@@ -906,6 +944,7 @@ impl Probe<'_> {
                 })
                 .unwrap_or(Body::Other {})
         };
+        let copy = self.copy_details(step, &headers)?;
         self.responses.push(Response {
             step,
             request,
@@ -914,6 +953,7 @@ impl Probe<'_> {
             body,
             error_header,
             details: fault_details
+                .or(copy)
                 .or_else(|| lifecycle::details(step, &headers))
                 .or_else(|| lease_tier::details(step, &headers))
                 .or_else(|| expanded::details(step, &headers))
@@ -1016,6 +1056,7 @@ pub(super) fn observe(
             client,
             url,
             bearer,
+            copy_id: None,
             responses: Vec::with_capacity(case.steps().len()),
         };
         match case {
@@ -1036,6 +1077,7 @@ pub(super) fn observe(
             Case::ContainerLease => probe.container_lease(endpoint, companion)?,
             Case::FiniteLease => probe.finite_lease()?,
             Case::SetTier => probe.set_tier()?,
+            Case::CompletedCopy => probe.completed_copy()?,
         }
         Ok(MutationCassette {
             schema_version: SCHEMA_VERSION,
@@ -1145,6 +1187,11 @@ fn replay_blob_mutation_finite_lease() -> Result<()> {
 #[test]
 fn replay_blob_mutation_set_tier() -> Result<()> {
     replay(Case::SetTier)
+}
+
+#[test]
+fn replay_blob_mutation_completed_copy() -> Result<()> {
+    replay(Case::CompletedCopy)
 }
 
 #[test]

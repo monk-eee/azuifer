@@ -448,6 +448,12 @@ fn check_live_blob_mutation_set_tier() -> Result<()> {
 
 #[test]
 #[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_mutation_completed_copy() -> Result<()> {
+    live_mutation(mutations::Case::CompletedCopy)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
 fn check_live_blob_account_reads() -> Result<()> {
     run_live(
         Service::Blob,

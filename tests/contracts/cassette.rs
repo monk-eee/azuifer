@@ -133,6 +133,8 @@ pub(super) enum ErrorCode {
     QueueNotFound,
     TableAlreadyExists,
     ResourceNotFound,
+    SourceConditionNotMet,
+    NoPendingCopyOperation,
     Other,
 }
 
@@ -173,6 +175,8 @@ impl ErrorCode {
             Some("QueueNotFound") => Self::QueueNotFound,
             Some("TableAlreadyExists") => Self::TableAlreadyExists,
             Some("ResourceNotFound") => Self::ResourceNotFound,
+            Some("SourceConditionNotMet") => Self::SourceConditionNotMet,
+            Some("NoPendingCopyOperation") => Self::NoPendingCopyOperation,
             Some(_) => Self::Other,
         }
     }

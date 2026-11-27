@@ -906,6 +906,8 @@ pub(crate) fn request_error_response(
         Error::PermissionMismatch
             | Error::BlobAlreadyExists
             | Error::ConditionNotMet
+            | Error::SourceConditionNotMet
+            | Error::NoPendingCopy
             | Error::BlobMissing
             | Error::ContainerExists
             | Error::ContainerMissing

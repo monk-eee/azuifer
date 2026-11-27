@@ -1,0 +1,179 @@
+{
+  "schema_version": 2,
+  "source": "azure",
+  "case": "blob-completed-copy",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "start_copy",
+      "request": {
+        "method": "put",
+        "operation": "copy_blob",
+        "body_bytes": 0
+      },
+      "status": 202,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "valid",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      },
+      "details": {
+        "kind": "copy",
+        "id": "matches",
+        "success": "matches",
+        "source": "missing",
+        "progress": "missing",
+        "completion_time": "missing"
+      }
+    },
+    {
+      "step": "head_copied_blob",
+      "request": {
+        "method": "head",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      },
+      "details": {
+        "kind": "copy",
+        "id": "matches",
+        "success": "matches",
+        "source": "matches",
+        "progress": "matches",
+        "completion_time": "matches"
+      }
+    },
+    {
+      "step": "read_copied_blob",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 25,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      },
+      "details": {
+        "kind": "copy",
+        "id": "matches",
+        "success": "matches",
+        "source": "matches",
+        "progress": "matches",
+        "completion_time": "matches"
+      }
+    },
+    {
+      "step": "reject_copy_source",
+      "request": {
+        "method": "put",
+        "operation": "copy_blob",
+        "body_bytes": 0,
+        "source_if_match": "matches"
+      },
+      "status": 412,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "source_condition_not_met",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "source_condition_not_met",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "reject_copy_destination",
+      "request": {
+        "method": "put",
+        "operation": "copy_blob",
+        "body_bytes": 0,
+        "if_none_match_star": "matches"
+      },
+      "status": 409,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "blob_already_exists",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "blob_already_exists",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "reject_abort_completed_copy",
+      "request": {
+        "method": "put",
+        "operation": "abort_copy",
+        "body_bytes": 0
+      },
+      "status": 409,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "no_pending_copy_operation",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "no_pending_copy_operation",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "read_unchanged_copy",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 25,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      },
+      "details": {
+        "kind": "copy",
+        "id": "matches",
+        "success": "matches",
+        "source": "matches",
+        "progress": "matches",
+        "completion_time": "matches"
+      }
+    }
+  ]
+}

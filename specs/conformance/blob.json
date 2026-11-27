@@ -13,7 +13,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Copies complete synchronously, so no copy is ever pending: the request answers NoPendingCopyOperation, or CopyIdMismatch for a different copy id."
+      "notes": "Copies complete synchronously, so no copy is ever pending. Aborting a completed copy with its matching ID returns 409 NoPendingCopyOperation with request correlation; a different ID returns CopyIdMismatch."
     },
     {
       "name": "Append Block",
@@ -52,7 +52,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Sources on this listener (path-style or host-style URLs); other hosts answer NotImplemented unless the operator allowlists them with --allow-external-copy-sources (ADR-0024), in which case the source is fetched synchronously with SSRF guards. Completes synchronously with x-ms-copy-status: success and a copy id. The source is read with the caller's own Shared Key in the same account, a read SAS on the source URL, or public access, and may name a snapshot or version of a block blob. Source and destination conditions and leases apply. Block blob bytes are copied rather than shared; page and append blob copies keep their type and share extents, and a copied append blob is not sealed. Sealed copies are unsupported; incremental copy is a separate operation."
+      "notes": "Sources on this listener (path-style or host-style URLs); other hosts answer NotImplemented unless the operator allowlists them with --allow-external-copy-sources (ADR-0024), in which case the source is fetched synchronously with SSRF guards. Completes synchronously with x-ms-copy-status: success and a copy id. The source may name a snapshot or version of a block blob and can be read with same-account Shared Key or bearer credentials, a read SAS on the source URL, or public access. Copy properties preserve the source scheme and omit the query. Source and destination conditions and leases apply. Block blob bytes are copied rather than shared; page and append blob copies keep their type and share extents, and a copied append blob is not sealed. Sealed copies are unsupported; incremental copy is a separate operation."
     },
     {
       "name": "Create Container",

@@ -1,4 +1,5 @@
 use super::{
+    copying::STALE_SOURCE_ETAG,
     header, header_text,
     lifecycle::{LEASE_ID, WRONG_LEASE_ID},
 };
@@ -45,6 +46,8 @@ enum Operation {
     BlobMetadata,
     SetBlobProperties,
     SetBlobTier,
+    CopyBlob,
+    AbortCopy,
     Container,
     ContainerMetadata,
     ListContainers,
@@ -150,6 +153,8 @@ pub(super) struct Input {
     if_modified_since: Option<DateRelation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     if_unmodified_since: Option<DateRelation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_if_match: Option<Header>,
 }
 
 impl Input {
@@ -177,6 +182,9 @@ impl Input {
         let operation = match query("comp").as_deref() {
             None if container => Operation::Container,
             None if query("snapshot").is_some() => Operation::ReadSnapshot,
+            None if method == Verb::Put && text("x-ms-copy-source").is_some() => {
+                Operation::CopyBlob
+            }
             None => match text("x-ms-blob-type") {
                 Some("BlockBlob") => Operation::PutBlockBlob,
                 Some("AppendBlob") => Operation::PutAppendBlob,
@@ -196,6 +204,7 @@ impl Input {
             Some("metadata") => Operation::BlobMetadata,
             Some("properties") => Operation::SetBlobProperties,
             Some("tier") => Operation::SetBlobTier,
+            Some("copy") if text("x-ms-copy-action") == Some("abort") => Operation::AbortCopy,
             Some("lease") => match text("x-ms-lease-action") {
                 Some("acquire") if container => Operation::AcquireContainerLease,
                 Some("renew") if container => Operation::RenewContainerLease,
@@ -343,6 +352,9 @@ impl Input {
             range_crc64: requested_flag("x-ms-range-get-content-crc64"),
             if_modified_since: date_relation("if-modified-since"),
             if_unmodified_since: date_relation("if-unmodified-since"),
+            source_if_match: observe_header(header(headers, "x-ms-source-if-match", |value| {
+                value == STALE_SOURCE_ETAG
+            })),
             operation,
         })
     }

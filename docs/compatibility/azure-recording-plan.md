@@ -6,12 +6,12 @@ The target is the five Azure Storage REST services at **`2023-11-03`**, using th
 
 | Service | Operations | Advertised operation/auth pairs | Unsupported operations | Journey exchanges | Extra grid exchanges | Target |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Blob | 55 | 303 | 1 | 254 | 244 | 498 |
+| Blob | 55 | 303 | 1 | 255 | 244 | 499 |
 | DFS | 18 | 106 | 0 | 73 | 86 | 159 |
 | FileREST | 44 | 188 | 3 | 90 | 147 | 237 |
 | Queue | 17 | 72 | 0 | 43 | 53 | 96 |
 | Table | 19 | 72 | 1 | 57 | 53 | 110 |
-| **Total** | **153** | **741** | **5** | **517** | **583** | **1,100** |
+| **Total** | **153** | **741** | **5** | **518** | **583** | **1,101** |
 
 This is a finite coverage target, not a claim that every possible input is covered. It tests each advertised operation/auth pair once and adds separate exchanges for meaningful branches: conditions, checksums and limits, continuations, post-mutation state, failure atomicity, expiry, feature switches, and shared Blob/DFS state. It does not multiply every branch by every credential. Add a row when an API version, profile, or new variant changes contract behavior. Keep newer-version evidence separate until that version is adopted; a client reaching the emulator through version fallback is not evidence for the newer version. SMB and NFS wire exchanges, control-plane APIs, infrastructure performance, and emulator-only fault injection are out of scope.
 
@@ -73,7 +73,7 @@ The current target supports `flat` and Queue/Table lifecycle operations. Same-ac
 | B-19 | flat | Bearer | `Delete Blob` with current ETag; read missing; repeat delete; conditionally recreate; delete with stale ETag; read unchanged | 6 | [fixture](../../tests/contracts/cassettes/blob-conditional-delete.json) |
 | B-20 | flat | Bearer | Acquire finite lease; renew; change ID; reject old ID; break with delay; reject acquire during break; read broken state; reacquire after the break period; release | 9 | [fixture](../../tests/contracts/cassettes/blob-finite-lease.json) |
 | B-21 | flat | Bearer | `Lease Container` acquire; reject delete without lease; get leased properties; reject wrong-ID renew; renew correctly; release; delete with no active lease | 7 | [fixture](../../tests/contracts/cassettes/blob-container-lease.json) |
-| B-22 | copy | Bearer | `Copy Blob`; inspect copy status; read bytes and metadata; reject source condition; reject destination condition; `Abort Copy Blob` while pending on target that reliably queues; verify aborted destination; reject abort of completed copy | 8 | pending |
+| B-22 | copy | Bearer | `Copy Blob` completes within the same account; inspect source, progress and copy ID; read bytes and metadata; reject source condition; reject destination condition; `Abort Copy Blob` on a completed copy returns 409; read unchanged destination | 7 | [fixture](../../tests/contracts/cassettes/blob-completed-copy.json) |
 | B-23 | copy | Bearer | `Put Blob From URL`; read result; `Put Block From URL`; commit staged block; read committed bytes; `Append Block From URL`; read appended result; `Put Page From URL`; read sparse destination; reject invalid source range | 10 | pending |
 | B-24 | copy | Bearer | `Incremental Copy Blob` from a page snapshot; check copy state; update source page; take new snapshot; incremental copy again; get destination page ranges; verify bytes | 7 | pending |
 | B-25 | history | Bearer | Write first version; overwrite; list versions with current marker; read first version; delete base without deleting history; read retained version; restore by copy; read restored base | 8 | pending |
@@ -96,6 +96,7 @@ The current target supports `flat` and Queue/Table lifecycle operations. Same-ac
 | B-42 | flat | Bearer | Reject a container-scoped Submit Batch envelope with zero parts, checking the embedded 400 and its request correlation | 1 | [fixture](../../tests/contracts/cassettes/blob-batch-empty-envelope.json) |
 | B-43 | flat | Bearer | Reject malformed Query Blob Contents XML before reading blob data, checking status, code, message and request correlation | 1 | [fixture](../../tests/contracts/cassettes/blob-query-malformed-xml.json) |
 | B-44 | flat | Bearer | Reject a truncated container-scoped Submit Batch part before executing subrequests, checking status and request correlation | 1 | [fixture](../../tests/contracts/cassettes/blob-batch-truncated-part.json) |
+| B-45 | copy | Bearer | Abort a genuinely pending copy on a target that reliably queues; verify the aborted destination | 2 | pending |
 
 ### DFS and Blob/DFS
 
