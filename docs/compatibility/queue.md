@@ -34,6 +34,8 @@ Both styles work: `http://127.0.0.1:10001/{account}/{queue}/messages` and `http:
 
 Every response carries `x-ms-request-id`, `x-ms-version` and `date`; `x-ms-client-request-id` is echoed. Errors use Azure's XML shape with `x-ms-error-code`, and the message includes `RequestId:` and `Time:` lines. Message and ACL times in XML bodies use RFC 1123 and ISO 8601 respectively; a message that never expires reports `Fri, 31 Dec 9999 23:59:59 GMT`.
 
+With `include=metadata`, List Queues includes a `Metadata` element even for queues without metadata. The [Azure Queue lifecycle cassette](../../tests/contracts/cassettes/queue-lifecycle.json) replays the populated and empty cases across an opaque continuation.
+
 ## Authentication
 
 | Mode | Notes |

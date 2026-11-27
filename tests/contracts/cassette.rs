@@ -90,6 +90,9 @@ pub(super) enum Media {
     OctetStream,
     AvroBinary,
     Xml,
+    JsonNoMetadata,
+    JsonMinimalMetadata,
+    Json,
     Other,
 }
 
@@ -127,6 +130,9 @@ pub(super) enum ErrorCode {
     QueryExpression,
     InvalidXmlDocument,
     InvalidXmlNodeValue,
+    QueueNotFound,
+    TableAlreadyExists,
+    ResourceNotFound,
     Other,
 }
 
@@ -164,6 +170,9 @@ impl ErrorCode {
             Some("ErrorProcessingQueryExpression") => Self::QueryExpression,
             Some("InvalidXmlDocument") => Self::InvalidXmlDocument,
             Some("InvalidXmlNodeValue") => Self::InvalidXmlNodeValue,
+            Some("QueueNotFound") => Self::QueueNotFound,
+            Some("TableAlreadyExists") => Self::TableAlreadyExists,
+            Some("ResourceNotFound") => Self::ResourceNotFound,
             Some(_) => Self::Other,
         }
     }
@@ -336,6 +345,13 @@ pub(super) fn media(headers: &HeaderMap) -> Media {
         Some("application/octet-stream") => Media::OctetStream,
         Some("avro/binary") => Media::AvroBinary,
         Some("application/xml" | "application/xml; charset=utf-8") => Media::Xml,
+        Some("application/json;odata=nometadata;streaming=true;charset=utf-8") => {
+            Media::JsonNoMetadata
+        }
+        Some("application/json;odata=minimalmetadata;streaming=true;charset=utf-8") => {
+            Media::JsonMinimalMetadata
+        }
+        Some("application/json") => Media::Json,
         None if !headers.contains_key("content-type") => Media::Missing,
         _ => Media::Other,
     }

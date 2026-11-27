@@ -1,6 +1,7 @@
 mod account;
 mod batch;
 mod cassette;
+mod catalog;
 mod delegation;
 mod live;
 mod mutations;
@@ -29,6 +30,23 @@ const RANGE_START: usize = 2;
 const RANGE_END: usize = 8;
 const SAS_CASSETTE: &[u8] = include_bytes!("cassettes/blob-user-delegation-sas-read-only.json");
 const SAS_RESPONSE_FIELDS: [&str; 5] = ["rscc", "rscd", "rsce", "rscl", "rsct"];
+
+#[derive(Clone, Copy)]
+enum Service {
+    Blob,
+    Queue,
+    Table,
+}
+
+impl Service {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Blob => "blob",
+            Self::Queue => "queue",
+            Self::Table => "table",
+        }
+    }
+}
 
 pub(super) fn sign_sas(
     key_document: &str,
@@ -304,11 +322,19 @@ fn reviewed_sas() -> Result<Cassette> {
 }
 
 fn with_local<T>(observe: impl FnOnce(&Client, &Url, &str) -> Result<T>) -> Result<T> {
+    with_local_service(Service::Blob, observe)
+}
+
+fn with_local_service<T>(
+    service: Service,
+    observe: impl FnOnce(&Client, &Url, &str) -> Result<T>,
+) -> Result<T> {
+    let service = service.name();
     let server = Server::start(
         &[
             "--in-memory",
             "--services",
-            "blob",
+            service,
             "--tls-generate",
             "--oauth",
             "basic",
@@ -316,7 +342,7 @@ fn with_local<T>(observe: impl FnOnce(&Client, &Url, &str) -> Result<T>) -> Resu
         &[],
     );
     let trusting = client(Some(&server.generated_certificate()));
-    let endpoint = Url::parse(&format!("{}/{ACCOUNT}/", server.url("blob")))?;
+    let endpoint = Url::parse(&format!("{}/{ACCOUNT}/", server.url(service)))?;
     observe(&trusting, &endpoint, &basic_token())
 }
 

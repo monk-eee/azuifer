@@ -38,6 +38,9 @@ struct App {
     address: SocketAddr,
 }
 
+#[derive(Clone, Copy)]
+struct CatalogResponse;
+
 pub(crate) async fn router(
     config: Arc<Config>,
     address: SocketAddr,
@@ -86,6 +89,7 @@ async fn dispatch(State(app): State<Arc<App>>, request: Request) -> Response {
     };
     let mut response =
         outcome.unwrap_or_else(|error| handlers::error_response(&error, None, &request_id, now));
+    let legacy_odata = response.extensions().get::<CatalogResponse>().is_none();
     let version = version.unwrap_or_else(|_| app.config.api_version.as_str().to_owned());
     let client_request_id = parts
         .headers
@@ -93,7 +97,9 @@ async fn dispatch(State(app): State<Arc<App>>, request: Request) -> Response {
         .filter(|value| value.len() <= 1024)
         .cloned();
     let headers = response.headers_mut();
-    headers.insert("dataserviceversion", HeaderValue::from_static("3.0;"));
+    if legacy_odata {
+        headers.insert("dataserviceversion", HeaderValue::from_static("3.0;"));
+    }
     if let Some(value) = client_request_id {
         headers.insert("x-ms-client-request-id", value);
     }
@@ -197,5 +203,20 @@ async fn handle(
         request_id,
         now,
     };
-    handlers::execute(&ctx, request).await
+    let catalog = matches!(
+        &request.operation,
+        protocol::Operation::CreateTable(_)
+            | protocol::Operation::DeleteTable(_)
+            | protocol::Operation::GetTable(_)
+            | protocol::Operation::QueryTables(_)
+    );
+    let level = request.format.level;
+    let result = handlers::execute(&ctx, request).await;
+    if !catalog {
+        return result;
+    }
+    let mut response = result
+        .unwrap_or_else(|error| handlers::catalog_error_response(error, level, request_id, now));
+    response.extensions_mut().insert(CatalogResponse);
+    Ok(response)
 }

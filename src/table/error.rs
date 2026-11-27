@@ -188,7 +188,6 @@ impl TableError {
         }
     }
 
-    #[cfg(test)]
     pub(super) fn kind(&self) -> Kind {
         self.kind
     }

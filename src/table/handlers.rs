@@ -58,17 +58,41 @@ pub(super) fn error_response(
     request_id: &str,
     now: SystemTime,
 ) -> Response {
+    let mut response = odata_error_response(error, index, request_id, now, Metadata::Minimal);
+    response
+        .headers_mut()
+        .insert("x-ms-error-code", HeaderValue::from_static(error.code()));
+    response
+}
+
+pub(super) fn catalog_error_response(
+    error: TableError,
+    level: Metadata,
+    request_id: &str,
+    now: SystemTime,
+) -> Response {
+    let error = if error.kind() == Kind::TableNotFound {
+        TableError::new(Kind::ResourceNotFound)
+    } else {
+        error
+    };
+    odata_error_response(&error, None, request_id, now, level)
+}
+
+fn odata_error_response(
+    error: &TableError,
+    index: Option<usize>,
+    request_id: &str,
+    now: SystemTime,
+    level: Metadata,
+) -> Response {
     let body = error.body(index, request_id, &Ticks::from_system(now).format());
     let mut response = Response::new(Body::from(body));
     *response.status_mut() = error.status();
-    let headers = response.headers_mut();
-    headers.insert(
+    response.headers_mut().insert(
         "content-type",
-        HeaderValue::from_static(
-            "application/json;odata=minimalmetadata;streaming=true;charset=utf-8",
-        ),
+        HeaderValue::from_static(level.content_type()),
     );
-    headers.insert("x-ms-error-code", HeaderValue::from_static(error.code()));
     response
 }
 

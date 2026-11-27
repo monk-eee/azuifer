@@ -34,6 +34,8 @@ The [recording plan](azure-recording-plan.md) counts the exchange target, lists 
 | [Malformed Query Blob Contents XML](../../tests/contracts/cassettes/blob-query-malformed-xml.json) | An unclosed query XML document returns 400 `InvalidXmlDocument` before reading Blob data, with Azure's message and request correlation. This does not cover successful query results or Avro framing. |
 | [Batch delete and tier results](../../tests/contracts/cassettes/blob-batch-mixed-results.json) | Validates independent success and missing-blob responses inside homogeneous container-scoped delete and tier batches. Mixing operation kinds returns an embedded 400 and does not change the remaining blob. |
 | [Query Blob Contents Avro](../../tests/contracts/cassettes/blob-query-avro.json) | Validates CSV and JSON output, the schema union and block framing, an empty data record, progress and end counts, nonfatal conversion errors at byte offsets, and the HTTP syntax rejection. Azure returned 200 at this version, though Learn documents 202. |
+| [Queue lifecycle](../../tests/contracts/cassettes/queue-lifecycle.json) | Repeats create with identical metadata, replaces metadata, reads the empty queue's properties, follows and verifies a filtered continuation with populated and empty metadata, then deletes and checks the correlated `QueueNotFound` error. |
+| [Table lifecycle](../../tests/contracts/cassettes/table-lifecycle.json) | Honors the no-content preference and verifies the returned resource references. Rejects duplicate create, follows a filtered continuation, deletes, and verifies that lookup and repeated delete return `ResourceNotFound` in OData JSON. |
 
 The mutation cases use Entra bearer authentication. Their cassettes record the request method, operation, payload length and selected guards alongside the observed response. ETags, lease IDs, continuation markers and conditional dates are represented by their relationship to the scenario, never by their value.
 
@@ -62,7 +64,7 @@ cargo test --locked --test tls_auth_http \
   contracts::live::check_live_ -- --ignored --nocapture --test-threads=1
 ```
 
-All live tests check the account and tag before requesting a Storage access token. The delegation cases use short validity windows; neither they nor the account and service reads create containers or blobs. The SAS and mutation cases each create randomly named containers for synthetic data and delete them afterward. The tests do not list account keys, change account settings, or access existing containers. The recorder reports cleanup failures; an interrupted run may leave an `azuifer-contract-` container.
+All live tests check the account, tag, and canonical HTTPS service endpoint before requesting a Storage access token. The delegation cases use short validity windows; neither they nor the account and service reads create containers or blobs. Blob mutation/SAS and Queue/Table lifecycle cases create uniquely named synthetic resources and delete them afterward. Queue/Table lifecycle tests need permissions to create, list, and delete queues/tables, plus read and write queue metadata. They do not send messages or insert entities. The tests do not list account keys, change account settings, or read existing resources. The recorder reports cleanup failures; an interrupted run may leave an `azuifer-contract-` container or queue, or an `AzuiferContract` table.
 
 ## Capture and review a new baseline
 

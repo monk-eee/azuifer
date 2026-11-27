@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "source": "azure",
+  "case": "queue-lifecycle",
+  "api_version": "2023-11-03",
+  "exchanges": [
+    {
+      "step": "create",
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "odata_version": "missing",
+      "media": "missing",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty",
+        "empty": true
+      }
+    },
+    {
+      "step": "repeat_create",
+      "status": 204,
+      "api_version": "matches",
+      "request_id": "matches",
+      "odata_version": "missing",
+      "media": "missing",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty",
+        "empty": true
+      }
+    },
+    {
+      "step": "replace_metadata",
+      "status": 204,
+      "api_version": "matches",
+      "request_id": "matches",
+      "odata_version": "missing",
+      "media": "missing",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty",
+        "empty": true
+      }
+    },
+    {
+      "step": "read_metadata",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "odata_version": "missing",
+      "media": "missing",
+      "error_header": "missing",
+      "body": {
+        "kind": "queue_properties",
+        "empty": true,
+        "purpose": "matches",
+        "removed": "missing",
+        "count_zero": "matches"
+      }
+    },
+    {
+      "step": "first_page",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "odata_version": "missing",
+      "media": "xml",
+      "error_header": "missing",
+      "body": {
+        "kind": "queue_page",
+        "endpoint": "matches",
+        "limit": "matches",
+        "prefix": "matches",
+        "marker_echo": "missing",
+        "has_next": true,
+        "expected_queue": true,
+        "metadata": "updated"
+      }
+    },
+    {
+      "step": "next_page",
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "odata_version": "missing",
+      "media": "xml",
+      "error_header": "missing",
+      "body": {
+        "kind": "queue_page",
+        "endpoint": "matches",
+        "limit": "matches",
+        "prefix": "matches",
+        "marker_echo": "matches",
+        "has_next": false,
+        "expected_queue": true,
+        "metadata": "empty"
+      }
+    },
+    {
+      "step": "delete",
+      "status": 204,
+      "api_version": "matches",
+      "request_id": "matches",
+      "odata_version": "missing",
+      "media": "missing",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty",
+        "empty": true
+      }
+    },
+    {
+      "step": "read_missing",
+      "status": 404,
+      "api_version": "matches",
+      "request_id": "matches",
+      "odata_version": "missing",
+      "media": "xml",
+      "error_header": "queue_not_found",
+      "body": {
+        "kind": "xml_error",
+        "code": "queue_not_found",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    }
+  ]
+}

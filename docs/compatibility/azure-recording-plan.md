@@ -10,8 +10,8 @@ The target is the five Azure Storage REST services at **`2023-11-03`**, using th
 | DFS | 18 | 106 | 0 | 73 | 86 | 159 |
 | FileREST | 44 | 188 | 3 | 90 | 147 | 237 |
 | Queue | 17 | 72 | 0 | 43 | 53 | 96 |
-| Table | 19 | 72 | 1 | 56 | 53 | 109 |
-| **Total** | **153** | **741** | **5** | **516** | **583** | **1,099** |
+| Table | 19 | 72 | 1 | 57 | 53 | 110 |
+| **Total** | **153** | **741** | **5** | **517** | **583** | **1,100** |
 
 This is a finite coverage target, not a claim that every possible input is covered. It tests each advertised operation/auth pair once and adds separate exchanges for meaningful branches: conditions, checksums and limits, continuations, post-mutation state, failure atomicity, expiry, feature switches, and shared Blob/DFS state. It does not multiply every branch by every credential. Add a row when an API version, profile, or new variant changes contract behavior. Keep newer-version evidence separate until that version is adopted; a client reaching the emulator through version fallback is not evidence for the newer version. SMB and NFS wire exchanges, control-plane APIs, infrastructure performance, and emulator-only fault injection are out of scope.
 
@@ -44,7 +44,7 @@ manifest pairs + journeys -> select safe target -> record Azure candidate
 | `files` | Approved pre-provisioned disposable share or account-level control where the operation needs it; FileREST backup-intent permissions where required. `files-history`, `files-handles`, and `files-nfs` additionally require retention/snapshot settings, a disposable source of open handles, or an NFS-capable target, respectively. Do not rely on SMB/NFS wire parity. |
 | `queue`, `table` | Approved data-plane scopes for fresh synthetic resources, such as Storage Queue Data Contributor and Storage Table Data Contributor on dedicated targets. Account settings and multirole tests use dedicated accounts/identities. |
 
-The current target covers only `flat` and same-account Blob `copy` when its source authorization is supported. It has no Shared Key, anonymous access, HNS, versioning, or soft delete; it lacks the previously checked Queue, Table, and FileREST write permissions. A separate target or approved scope is required for those rows. This ledger never authorizes granting access or changing settings.
+The current target supports `flat` and Queue/Table lifecycle operations. Same-account Blob `copy` requires an authorized synthetic source. Queue message writes, Table entity writes, and FileREST backup writes were denied on this target. It has no Shared Key, anonymous access, HNS, versioning, or soft delete. Rows requiring those permissions or settings need a separate approved scope or target. This ledger never authorizes granting access or changing settings.
 
 ## Pathways
 
@@ -134,7 +134,7 @@ The current target covers only `flat` and same-account Blob `copy` when its sour
 
 | ID | Profile | Auth | Ordered exchanges | Count | Evidence |
 | --- | --- | --- | --- | ---: | --- |
-| Q-01 | queue | Bearer | `Create Queue`; repeat create; `Set Queue Metadata`; `Get Queue Metadata`; `List Queues` with prefix and page limit; resume; `Delete Queue`; read missing | 8 | pending |
+| Q-01 | queue | Bearer | `Create Queue`; repeat create with identical metadata; `Set Queue Metadata`; `Get Queue Metadata`; `List Queues` with prefix, metadata and page limit; resume to a queue with empty metadata; `Delete Queue`; read missing | 8 | [fixture](../../tests/contracts/cassettes/queue-lifecycle.json) |
 | Q-02 | queue | Bearer | `Put Message`; `Peek Messages` without receipt; `Get Messages` with receipt and dequeue count; peek hides inflight; `Update Message` rotates receipt; reject stale receipt; `Delete Message` with current receipt; get empty | 8 | pending |
 | Q-03 | queue | Bearer | Put delayed message; peek before visibility; get after visibility; get after visibility timeout; verify incremented dequeue count; reject pre-redelivery receipt | 6 | pending |
 | Q-04 | queue | Bearer | Put short-TTL message; read while live; read after expiry; reject body over limit; reject invalid visibility; `Clear Messages`; verify queue empty | 7 | pending |
@@ -146,7 +146,7 @@ The current target covers only `flat` and same-account Blob `copy` when its sour
 
 | ID | Profile | Auth | Ordered exchanges | Count | Evidence |
 | --- | --- | --- | --- | ---: | --- |
-| T-01 | table | Bearer | `Create Table`; repeat create; `Query Tables` first filtered page; continue; `Delete Table`; query missing | 6 | pending |
+| T-01 | table | Bearer | `Create Table` with return-no-content; reject duplicate create; `Query Tables` first filtered page; continue with the same filter; `Delete Table`; read missing; reject repeat delete | 7 | [fixture](../../tests/contracts/cassettes/table-lifecycle.json) |
 | T-02 | table | Bearer | `Insert Entity` with generated ETag; duplicate insert; `Query Entities` key lookup; `Merge Entity` with current ETag; read merged; reject stale replace; `Update Entity` replace; read omitted property removed; `Delete Entity` with current ETag; read missing | 10 | pending |
 | T-03 | table | Bearer | `Insert Or Merge Entity` missing; merge existing; query retained fields; `Insert Or Replace Entity` missing; replace existing; query dropped field; conditional delete rejects stale | 7 | pending |
 | T-04 | table | Bearer | Query typed and null values; select projection; filter PartitionKey and RowKey; OData string escaping; query first page; follow continuation headers; empty result; reject unsupported expression | 8 | pending |

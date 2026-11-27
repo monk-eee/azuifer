@@ -46,6 +46,8 @@ Known differences: the SAS signed IP range (`sip`) is not enforced because the l
 
 All Edm types round-trip: `String`, `Boolean`, `Int32`, `Int64` (JSON string), `Double` (`NaN`, `Infinity`, `-Infinity` as annotated strings; `-0.0` is stored as `0.0`), `DateTime`, `Guid`, and `Binary` (base64), using `<prop>@odata.type` annotations. `nometadata`, `minimalmetadata` and `fullmetadata` come from `Accept` or `$format`; a bare `application/json` is minimal. Null properties are never stored or returned (except `$select` of an absent property, which returns `null`). Timestamps and ETags have 100 ns resolution, never repeat within a run, and the ETag is `W/"datetime'...'"` derived from `Timestamp` (header `ETag` and `odata.etag`).
 
+Table catalog operations omit the legacy `DataServiceVersion` response header. Duplicate create returns `TableAlreadyExists`; reading or deleting a missing named table returns `ResourceNotFound`. The error code is in the negotiated `odata.error` JSON, not in `x-ms-error-code`. The [Azure Table lifecycle cassette](../../tests/contracts/cassettes/table-lifecycle.json) verifies these behaviors for bearer authentication with `odata=nometadata`; it does not cover entity or authentication errors.
+
 ## Known differences
 
 - Comparisons in `$filter` need identical Edm types. An unsuffixed integer outside the Int32 range is an `Int64` literal. A missing property satisfies only `ne`. Key ordering uses UTF-8 bytes, not UTF-16.

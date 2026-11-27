@@ -386,7 +386,7 @@ pub(super) fn list_queues(listing: Listing<'_>) -> Response {
     for (name, metadata) in &listing.queues {
         xml.open("Queue");
         xml.element("Name", name);
-        if listing.metadata && !metadata.is_empty() {
+        if listing.metadata {
             xml.open("Metadata");
             for (key, value) in metadata {
                 xml.element(key, value);
@@ -602,7 +602,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn listing_omits_empty_prefix_marker_and_metadata() {
+    async fn listing_omits_empty_prefix_and_marker_but_includes_requested_metadata() {
         let xml = body(list_queues(Listing {
             endpoint: "http://h/acct/",
             prefix: "",
@@ -619,7 +619,7 @@ mod tests {
         assert!(xml.contains("ServiceEndpoint=\"http://h/acct/\""));
         assert!(!xml.contains("<Prefix>") && !xml.contains("<Marker>"));
         assert!(xml.contains("<Queue><Name>a</Name><Metadata><k>v</k></Metadata></Queue>"));
-        assert!(xml.contains("<Queue><Name>b</Name></Queue><"));
+        assert!(xml.contains("<Queue><Name>b</Name><Metadata></Metadata></Queue>"));
         assert!(xml.ends_with("<NextMarker></NextMarker></EnumerationResults>"));
     }
 }

@@ -1,6 +1,6 @@
 use super::{
-    Cassette, Source, account, batch, delegation, mutations, observe_blob, observe_local, query,
-    request_errors, reviewed_sas, sas_reads, with_local,
+    Cassette, Service, Source, account, batch, catalog, delegation, mutations, observe_blob,
+    observe_local, query, request_errors, reviewed_sas, sas_reads, with_local,
 };
 use anyhow::{Context as _, Result, anyhow, ensure};
 use reqwest::{Url, blocking::Client, redirect::Policy};
@@ -55,7 +55,7 @@ impl LiveTarget {
         })
     }
 
-    fn verified_endpoint(&self) -> Result<Url> {
+    fn verified_endpoint(&self, service: Service) -> Result<Url> {
         let raw = az(
             &[
                 "storage",
@@ -72,14 +72,15 @@ impl LiveTarget {
         )?;
         let info: serde_json::Value = serde_json::from_slice(&raw)
             .map_err(|_| anyhow!("Azure CLI returned invalid storage account metadata"))?;
-        let endpoint = format!("https://{}.blob.core.windows.net/", self.account);
+        let service = service.name();
+        let endpoint = format!("https://{}.{service}.core.windows.net/", self.account);
         ensure!(
             info["tags"][OPT_IN_TAG].as_str() == Some("true"),
             "the selected account is not tagged {OPT_IN_TAG}=true"
         );
         ensure!(
-            info["primaryEndpoints"]["blob"].as_str() == Some(endpoint.as_str()),
-            "the selected account does not use a public Azure Blob HTTPS endpoint"
+            info["primaryEndpoints"][service].as_str() == Some(endpoint.as_str()),
+            "the selected account does not use a public Azure {service} HTTPS endpoint"
         );
         Ok(Url::parse(&endpoint)?)
     }
@@ -161,6 +162,7 @@ pub(super) enum Record<'a> {
     RequestRejection(&'a request_errors::Rejection),
     Batch(&'a batch::BatchCassette),
     Query(&'a query::QueryCassette),
+    Catalog(&'a catalog::CatalogCassette),
 }
 
 pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
@@ -176,6 +178,7 @@ pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
         Record::RequestRejection(cassette) => cassette.case.file_stem(),
         Record::Batch(_) => batch::CASE,
         Record::Query(_) => query::CASE,
+        Record::Catalog(cassette) => cassette.case.file_stem(),
     };
     let name = format!("{scenario}-{}.json", Uuid::new_v4().simple());
     let target = directory.join(name);
@@ -188,9 +191,12 @@ pub(super) fn save(cassette: Record<'_>, directory: &Path) -> Result<PathBuf> {
     Ok(target)
 }
 
-fn with_azure<T>(observe: impl FnOnce(&Client, &str, &Url, &str) -> Result<T>) -> Result<T> {
+fn with_azure<T>(
+    service: Service,
+    observe: impl FnOnce(&Client, &str, &Url, &str) -> Result<T>,
+) -> Result<T> {
     let target = LiveTarget::configured()?;
-    let endpoint = target.verified_endpoint()?;
+    let endpoint = target.verified_endpoint(service)?;
     let client = Client::builder()
         .https_only(true)
         .no_proxy()
@@ -233,6 +239,7 @@ fn check_drift<T>(
 }
 
 fn run_live<T>(
+    service: Service,
     reviewed: impl FnOnce() -> Result<T>,
     azure: impl FnOnce(&Client, &str, &Url, &str) -> Result<T>,
     local: impl FnOnce() -> Result<T>,
@@ -240,7 +247,7 @@ fn run_live<T>(
     capture: impl FnOnce(&T) -> Result<()>,
 ) -> Result<()> {
     match std::env::var_os(CAPTURE) {
-        Some(flag) if flag == "1" => return capture(&with_azure(azure)?),
+        Some(flag) if flag == "1" => return capture(&with_azure(service, azure)?),
         Some(_) => {
             return Err(anyhow!(
                 "unset {CAPTURE} for checks or set it to 1 to capture"
@@ -249,7 +256,7 @@ fn run_live<T>(
         None => (),
     }
     let baseline = reviewed()?;
-    check_drift(&baseline, with_azure(azure), local(), compare)?;
+    check_drift(&baseline, with_azure(service, azure), local(), compare)?;
     println!("Azure and Azuifer each matched the reviewed cassette");
     Ok(())
 }
@@ -258,6 +265,7 @@ fn run_live<T>(
 #[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
 fn check_live_blob_sas_contract() -> Result<()> {
     run_live(
+        Service::Blob,
         reviewed_sas,
         |client, account, endpoint, bearer| {
             observe_blob(client, account, endpoint, bearer, Source::Azure)
@@ -276,6 +284,7 @@ fn check_live_blob_sas_contract() -> Result<()> {
 
 fn live_sas_read(case: sas_reads::Case) -> Result<()> {
     run_live(
+        Service::Blob,
         || sas_reads::reviewed(case),
         |client, account, endpoint, bearer| {
             sas_reads::observe(client, account, endpoint, bearer, Source::Azure, case)
@@ -305,6 +314,7 @@ fn check_live_blob_sas_response_overrides() -> Result<()> {
 #[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
 fn check_live_delegation_key_contract() -> Result<()> {
     run_live(
+        Service::Blob,
         delegation::reviewed_key,
         |client, _, endpoint, bearer| delegation::observe(client, endpoint, bearer, Source::Azure),
         || {
@@ -321,6 +331,7 @@ fn check_live_delegation_key_contract() -> Result<()> {
 #[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
 fn check_live_delegation_window_contract() -> Result<()> {
     run_live(
+        Service::Blob,
         delegation::reviewed_windows,
         |client, _, endpoint, bearer| {
             delegation::observe_invalid_windows(client, endpoint, bearer, Source::Azure)
@@ -337,6 +348,7 @@ fn check_live_delegation_window_contract() -> Result<()> {
 
 fn live_mutation(case: mutations::Case) -> Result<()> {
     run_live(
+        Service::Blob,
         || mutations::reviewed(case),
         |client, _, endpoint, bearer| {
             mutations::observe(client, endpoint, bearer, Source::Azure, case)
@@ -438,6 +450,7 @@ fn check_live_blob_mutation_set_tier() -> Result<()> {
 #[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
 fn check_live_blob_account_reads() -> Result<()> {
     run_live(
+        Service::Blob,
         account::reviewed,
         |client, _, endpoint, bearer| account::observe(client, endpoint, bearer, Source::Azure),
         account::observe_local,
@@ -451,6 +464,7 @@ fn check_live_blob_account_reads() -> Result<()> {
 
 fn check_live_rejection(case: request_errors::Case) -> Result<()> {
     run_live(
+        Service::Blob,
         || request_errors::reviewed(case),
         |client, _, endpoint, bearer| {
             request_errors::observe(client, endpoint, bearer, Source::Azure, case)
@@ -480,6 +494,7 @@ fn check_live_blob_batch_truncated_part() -> Result<()> {
 #[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
 fn check_live_blob_batch_mixed_results() -> Result<()> {
     run_live(
+        Service::Blob,
         batch::reviewed,
         |client, _, endpoint, bearer| batch::observe(client, endpoint, bearer, Source::Azure),
         batch::observe_local,
@@ -495,6 +510,7 @@ fn check_live_blob_batch_mixed_results() -> Result<()> {
 #[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
 fn check_live_blob_query_avro() -> Result<()> {
     run_live(
+        Service::Blob,
         query::reviewed,
         |client, _, endpoint, bearer| query::observe(client, endpoint, bearer, Source::Azure),
         query::observe_local,
@@ -528,6 +544,34 @@ fn check_live_blob_mutation_page_resize_sequence() -> Result<()> {
 #[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
 fn check_live_blob_mutation_append_sealing() -> Result<()> {
     live_mutation(mutations::Case::AppendSealing)
+}
+
+fn live_catalog(case: catalog::Case) -> Result<()> {
+    run_live(
+        case.service(),
+        || catalog::reviewed(case),
+        |client, _, endpoint, bearer| {
+            catalog::observe(client, endpoint, bearer, Source::Azure, case)
+        },
+        || catalog::observe_local(case),
+        catalog::CatalogCassette::compare,
+        |azure| {
+            azure.validate()?;
+            save_azure(Record::Catalog(azure))
+        },
+    )
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_catalog_queue_lifecycle() -> Result<()> {
+    live_catalog(catalog::Case::QueueLifecycle)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_catalog_table_lifecycle() -> Result<()> {
+    live_catalog(catalog::Case::TableLifecycle)
 }
 
 #[test]
