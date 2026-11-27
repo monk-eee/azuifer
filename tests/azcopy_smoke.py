@@ -346,6 +346,11 @@ def smoke_files(azcopy, base, sas, data, tree, work):
     result = azcopy.run("remove", url("/tree"), "--from-to", "FileTrash", "--recursive")
     code, output = azcopy.run("list", url(), "--location", "File")
     step("files: remove --recursive", job_ok(result) and "big.bin" not in output)
+    surviving_copy = work / "file-peer-survivor.txt"
+    result = azcopy.run("copy", url("/tree/f001.txt", peer), str(surviving_copy), "--from-to", "FileLocal")
+    step("files: cross-share copy survives source removal",
+         job_ok(result) and surviving_copy.read_bytes() == (tree / "f001.txt").read_bytes(),
+         result[1][-300:])
     for name in (share, peer):
         http("DELETE", f"{base}/{name}?restype=share&{sas}")
 

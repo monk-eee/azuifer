@@ -58,27 +58,47 @@ pub(crate) async fn serve(
     };
     let path = decode(parts.uri.path());
     let wants_index = path.is_empty() || path.ends_with('/');
-    let Some(index) = site
+    let index = site
         .index_document
         .as_deref()
-        .filter(|index| !index.is_empty())
-    else {
-        return Ok(not_found(request_id));
-    };
+        .filter(|index| !index.is_empty());
     let name = if wants_index {
-        format!("{path}{index}")
+        index.map(|index| format!("{path}{index}"))
     } else {
-        path.clone()
+        Some(path.clone())
     };
-    match read(app, parts, &container, &name, true).await {
-        Ok(response) => return Ok(response),
-        Err(Error::BlobMissing | Error::ContainerMissing) => (),
-        Err(other) => return Err(other),
+    if let Some(name) = name {
+        let range = parts
+            .headers
+            .get("range")
+            .and_then(|value| value.to_str().ok())
+            .map(ByteRange::parse)
+            .transpose()?;
+        let options = BlobRead {
+            guard: Guard::parse(&parts.headers)?,
+            range,
+            with_body: parts.method == Method::GET,
+            range_checksum: None,
+        };
+        if let Some(response) = read(app, &container, &name, options).await? {
+            return Ok(response);
+        }
     }
-    if !wants_index
-        && read(app, parts, &container, &format!("{path}/{index}"), false)
-            .await
-            .is_ok()
+    let auxiliary_read = |with_body| BlobRead {
+        guard: Guard::default(),
+        range: None,
+        with_body,
+        range_checksum: None,
+    };
+    if let Some(index) = index.filter(|_| !wants_index)
+        && read(
+            app,
+            &container,
+            &format!("{path}/{index}"),
+            auxiliary_read(false),
+        )
+        .await?
+        .is_some()
     {
         let mut response = page(StatusCode::FOUND, "Found", "", request_id);
         let query = parts
@@ -93,7 +113,13 @@ pub(crate) async fn serve(
         return Ok(response);
     }
     if let Some(document) = site.error_document404_path.as_deref()
-        && let Ok(mut response) = read(app, parts, &container, document, true).await
+        && let Some(mut response) = read(
+            app,
+            &container,
+            document,
+            auxiliary_read(parts.method == Method::GET),
+        )
+        .await?
     {
         *response.status_mut() = StatusCode::NOT_FOUND;
         return Ok(response);
@@ -101,33 +127,21 @@ pub(crate) async fn serve(
     Ok(not_found(request_id))
 }
 
-/// Reads one blob of the `$web` container; `body` is false for the redirect probe.
+/// A missing website resource is distinct from a failed read.
 async fn read(
     app: &App,
-    parts: &Parts,
     container: &ContainerKey,
     name: &str,
-    body: bool,
-) -> Result<Response, Error> {
+    options: BlobRead,
+) -> Result<Option<Response>, Error> {
     let key = BlobKey {
         container: container.clone(),
         path: BlobPath::parse(name.to_owned())?,
     };
-    let range = parts
-        .headers
-        .get("range")
-        .and_then(|value| value.to_str().ok())
-        .map(ByteRange::parse)
-        .transpose()?;
-    let options = BlobRead {
-        guard: Guard::parse(&parts.headers)?,
-        range: if body { range } else { None },
-        with_body: body && parts.method == Method::GET,
-        range_checksum: None,
-    };
-    match app.store.read_path(key, options).await? {
-        PathRead::File(download) => respond::download_response(*download, None),
-        PathRead::Directory(..) => Err(Error::BlobMissing),
+    match app.store.read_path(key, options).await {
+        Ok(PathRead::File(download)) => respond::download_response(*download, None).map(Some),
+        Ok(PathRead::Directory(..)) | Err(Error::BlobMissing | Error::ContainerMissing) => Ok(None),
+        Err(error) => Err(error),
     }
 }
 

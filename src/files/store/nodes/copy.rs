@@ -4,14 +4,14 @@
 use super::{
     Store, Want, apply_smb, blank, check_file_lease, check_not_read_only, check_quota, content,
     db_error, find, finish, for_share, insert_node, is_symlink, new_nfs, resolve, save_node,
-    shares::{ShareRef, load_share},
+    shares::{ShareRef, intern_permission, load_share, permission_sddl},
     touch, writable,
 };
 use crate::{
     files::{
         error::{Error, Result},
         lease::{self, Kind, Use},
-        model::{CopyState, FileKind, Metadata, NodeInfo, Posix, SmbProperties},
+        model::{CopyState, FileKind, Metadata, NodeInfo, Posix, Protocol, SmbProperties},
         name::EntryPath,
         time::TICKS_PER_MILLI,
     },
@@ -107,7 +107,6 @@ impl Store {
             let name = path.name().ok_or(Error::ResourceTypeMismatch)?;
             let parent = resolved.parent.ok_or(Error::ParentNotFound)?;
             let mut reclaim = content::Reclaim::default();
-            let mut removed = 0;
             let mut node = match resolved.node {
                 Some(existing) if existing.directory => return Err(Error::ResourceTypeMismatch),
                 Some(existing) if is_symlink(&existing) => {
@@ -121,8 +120,6 @@ impl Store {
                     if existing.file_id == from.file_id && share.id == share_source.id {
                         return Err(Error::InvalidInput);
                     }
-                    removed = content::load_map(&tx, share.id, existing.file_id, existing.length)?
-                        .allocated_bytes();
                     reclaim.add_stored(&tx, share.id, Some(existing.file_id))?;
                     tx.execute(
                         "DELETE FROM ranges WHERE share_id=?1 AND file_id=?2",
@@ -159,6 +156,14 @@ impl Store {
             } else {
                 touch(&mut node, now);
             }
+            if share.info.protocol == Protocol::Smb
+                && share_source.info.protocol == Protocol::Smb
+                && source.target.share != target.share
+                && node.permission_key == from.permission_key
+            {
+                let sddl = permission_sddl(&tx, &source.target, &from.permission_key)?;
+                node.permission_key = intern_permission(&tx, &target, &sddl)?;
+            }
             node.change = now * TICKS_PER_MILLI;
             let copy_id = uuid::Uuid::new_v4().hyphenated().to_string();
             node.copy = Some(CopyState {
@@ -173,7 +178,8 @@ impl Store {
                 save_node(&tx, share.id, &node)?;
             }
             let from_map = content::load_map(&tx, share_source.id, from.file_id, from.length)?;
-            check_quota(&tx, &share, from_map.allocated_bytes(), removed)?;
+            // The replaced file's ranges were already removed in this transaction.
+            check_quota(&tx, &share, from_map.allocated_bytes(), 0)?;
             content::save_map(
                 &tx,
                 share.id,

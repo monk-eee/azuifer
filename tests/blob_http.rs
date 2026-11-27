@@ -1100,6 +1100,26 @@ fn a_busy_data_directory_and_a_truncated_extent_fail_explicitly() {
         500,
         "InternalError",
     );
+    let dest = "/testaccount/container/rejected-copy.txt";
+    let source = blob_url(&server, BLOB);
+    error(
+        server.request(
+            Method::PUT,
+            dest,
+            &[
+                ("x-ms-blob-type", "BlockBlob"),
+                ("x-ms-copy-source", &source),
+            ],
+            b"",
+        ),
+        500,
+        "InternalError",
+    );
+    error(
+        server.request(Method::GET, dest, &[], b""),
+        404,
+        "BlobNotFound",
+    );
 }
 
 #[test]
@@ -3298,6 +3318,26 @@ fn access_tiers_are_stored_and_archived_blobs_cannot_be_read() {
         409,
         "BlobArchived",
     );
+    let source = blob_url(&server, BLOB);
+    let dest = "/testaccount/container/tier-copy.bin";
+    assert_eq!(server.put(dest, &[], b"keep").status(), 201);
+    let before = etag(&server.request(Method::HEAD, dest, &[], b""));
+    error(
+        server.request(
+            Method::PUT,
+            dest,
+            &[
+                ("x-ms-blob-type", "BlockBlob"),
+                ("x-ms-copy-source", &source),
+            ],
+            b"",
+        ),
+        409,
+        "BlobArchived",
+    );
+    let unchanged = server.request(Method::GET, dest, &[], b"");
+    assert_eq!(etag(&unchanged), before);
+    assert_eq!(unchanged.bytes().unwrap().as_ref(), b"keep");
     assert_eq!(
         server.request(Method::HEAD, BLOB, &[], b"").headers()["x-ms-access-tier"],
         "Archive"
@@ -5291,6 +5331,15 @@ fn the_web_host_serves_the_web_container_as_a_static_website() {
     let missing = get(Method::GET, "/nothing.html");
     assert_eq!(missing.status(), 404);
     assert_eq!(missing.text().unwrap(), "custom missing");
+    let missing_range = client
+        .get(format!("{}/nothing.html", server.blob_url()))
+        .header("host", &host)
+        .header("range", "bytes=0-1")
+        .send()
+        .unwrap();
+    assert_eq!(missing_range.status(), 404);
+    assert!(!missing_range.headers().contains_key("content-range"));
+    assert_eq!(missing_range.text().unwrap(), "custom missing");
     let head = get(Method::HEAD, "/docs/page.html");
     assert_eq!(head.status(), 200);
     assert_eq!(head.headers()["content-length"], "6");
@@ -5309,6 +5358,65 @@ fn the_web_host_serves_the_web_container_as_a_static_website() {
     let off = get(Method::GET, "/");
     assert_eq!(off.status(), 404);
     assert_eq!(off.headers()["x-ms-error-code"], "WebContentNotFound");
+
+    let without_index = site(true).replace("<IndexDocument>index.html</IndexDocument>", "");
+    assert_eq!(
+        server
+            .request(Method::PUT, settings, &[], without_index.as_bytes())
+            .status(),
+        202
+    );
+    let asset = get(Method::GET, "/docs/%70age.html");
+    assert_eq!(asset.status(), 200);
+    assert_eq!(asset.text().unwrap(), "a page");
+    let no_index = get(Method::GET, "/");
+    assert_eq!(no_index.status(), 404);
+    assert_eq!(no_index.text().unwrap(), "custom missing");
+}
+
+#[test]
+fn a_static_website_does_not_hide_a_damaged_error_document() {
+    let location = tempfile::tempdir().unwrap();
+    let server = Emulator::start(Some(location.path()), &[]);
+    let settings = "/testaccount?restype=service&comp=properties";
+    assert_eq!(
+        server.request(
+            Method::PUT, settings, &[],
+            b"<StorageServiceProperties><StaticWebsite><Enabled>true</Enabled>\
+              <IndexDocument>index.html</IndexDocument><ErrorDocument404Path>404.html</ErrorDocument404Path>\
+              </StaticWebsite></StorageServiceProperties>"
+        ).status(),
+        202
+    );
+    assert_eq!(
+        server
+            .request(Method::PUT, "/testaccount/$web?restype=container", &[], b"")
+            .status(),
+        201
+    );
+    let host = format!(
+        "testaccount.web.localhost:{}",
+        server.blob_url().rsplit(':').next().unwrap()
+    );
+    let get_missing = || server.raw(Method::GET, "/absent", &[("host", &host)], b"");
+    let missing = get_missing();
+    assert_eq!(missing.status(), 404);
+    assert_eq!(missing.headers()["x-ms-error-code"], "WebContentNotFound");
+    assert_eq!(
+        server
+            .put("/testaccount/$web/404.html", &[], b"custom")
+            .status(),
+        201
+    );
+    assert_eq!(get_missing().text().unwrap(), "custom");
+    let extent = fs::read_dir(location.path().join("content"))
+        .unwrap()
+        .next()
+        .expect("committed 404 extent")
+        .unwrap()
+        .path();
+    fs::write(extent, b"short").unwrap();
+    error(get_missing(), 500, "InternalError");
 }
 
 #[test]

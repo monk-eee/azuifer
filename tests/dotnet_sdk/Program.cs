@@ -207,6 +207,26 @@ await Step("table: transaction batch", async () =>
     };
     var r = await table.SubmitTransactionAsync(actions);
     Check(r.Value.Count == 3, "batch result");
+    var changed = (await table.GetEntityAsync<TableEntity>("b", "2")).Value;
+    var stale = changed.ETag;
+    changed["v"] = 20;
+    await table.UpdateEntityAsync(changed, stale, TableUpdateMode.Replace);
+    try
+    {
+        await table.SubmitTransactionAsync(new List<TableTransactionAction>
+        {
+            new(TableTransactionActionType.Add, new TableEntity("b", "rolledBack") { ["v"] = 4 }),
+            new(TableTransactionActionType.UpdateReplace, new TableEntity("b", "2") { ["v"] = 99 }, stale),
+        });
+        throw new InvalidOperationException("expected the stale ETag to roll back the transaction");
+    }
+    catch (TableTransactionFailedException e)
+    {
+        Check(e.Status == 412 && e.ErrorCode == "UpdateConditionNotSatisfied", "stale transaction status");
+        Check(e.FailedTransactionActionIndex == 1, "failed action index");
+    }
+    Check(!(await table.GetEntityIfExistsAsync<TableEntity>("b", "rolledBack")).HasValue, "no partial insert");
+    Check((await table.GetEntityAsync<TableEntity>("b", "2")).Value.GetInt32("v") == 20, "failed action did not overwrite");
 });
 await Step("table: list tables and delete", async () =>
 {
