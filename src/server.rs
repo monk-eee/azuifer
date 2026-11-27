@@ -291,9 +291,12 @@ pub(crate) async fn dispatch(State(app): State<Arc<App>>, request: Request) -> R
                         }
                         response
                     }
-                    Err(error) => {
-                        respond::request_error_response(error, &request_id, app.clock.now())
-                    }
+                    Err(error) => respond::request_error_response(
+                        error,
+                        &parts.headers,
+                        &request_id,
+                        app.clock.now(),
+                    ),
                 },
                 _ => error_response(Error::Busy),
             };

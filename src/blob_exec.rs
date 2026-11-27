@@ -50,13 +50,13 @@ pub(crate) async fn execute(
     match op {
         Operation::ListContainers(account, page, metadata, deleted) => {
             let endpoint = storage_endpoint(app, account.as_str());
-            let (limit, prefix) = (page.limit, page.prefix.clone());
+            let xml = respond::container_list_xml(&endpoint, &page);
             if deleted {
                 let page = store.list_containers_with_deleted(account, page).await?;
-                return lifecycle::list_containers(&endpoint, limit, &prefix, page, metadata);
+                return lifecycle::list_containers(xml, page, metadata);
             }
             let page = store.list_containers(account, page).await?;
-            respond::list_containers(&endpoint, limit, &prefix, page, metadata)
+            respond::list_containers(xml, page, metadata)
         }
         Operation::GetServiceProperties(account) => {
             let properties = store.service_properties(account).await?;

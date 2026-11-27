@@ -25,6 +25,7 @@ pub(crate) enum Error {
     Crc64Mismatch,
     ConflictingRangeChecksums,
     InvalidBlockId,
+    BlockIdWidthMismatch,
     InvalidBlockList,
     InvalidXml,
     BlockCountExceeded,

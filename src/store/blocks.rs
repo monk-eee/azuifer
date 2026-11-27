@@ -60,7 +60,7 @@ impl Store {
                 [account, container, name], |row| Ok((row.get(0)?, row.get(1)?)),
             ).map_err(db_error)?;
             if width.is_some_and(|width| width as usize != block.width) {
-                return Err(Error::InvalidBlockId);
+                return Err(Error::BlockIdWidthMismatch);
             }
             let existing = tx.query_row(
                 "SELECT id, length FROM staged_blocks WHERE account=?1 AND container=?2 AND name=?3 AND block_id=?4",

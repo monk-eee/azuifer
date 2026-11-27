@@ -1,0 +1,216 @@
+{
+  "schema_version": 2,
+  "source": "azure",
+  "case": "blob-container-lifecycle",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "create_container",
+      "request": {
+        "method": "put",
+        "operation": "container",
+        "body_bytes": 0
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "valid",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "reject_duplicate_container",
+      "request": {
+        "method": "put",
+        "operation": "container",
+        "body_bytes": 0
+      },
+      "status": 409,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "container_already_exists",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "container_already_exists",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "set_container_metadata",
+      "request": {
+        "method": "put",
+        "operation": "container_metadata",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "changed",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "read_container_metadata",
+      "request": {
+        "method": "get",
+        "operation": "container_metadata",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      },
+      "details": {
+        "kind": "container",
+        "purpose": "matches",
+        "removed": "missing",
+        "lease_state": "missing",
+        "lease_status": "missing",
+        "public_access": "missing"
+      }
+    },
+    {
+      "step": "head_container",
+      "request": {
+        "method": "head",
+        "operation": "container",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      },
+      "details": {
+        "kind": "container",
+        "purpose": "matches",
+        "removed": "missing",
+        "lease_state": "matches",
+        "lease_status": "matches",
+        "public_access": "missing"
+      }
+    },
+    {
+      "step": "list_containers_first",
+      "request": {
+        "method": "get",
+        "operation": "list_containers",
+        "body_bytes": 0,
+        "container_list": {
+          "max_results": 1,
+          "filtered": true,
+          "continued": false,
+          "metadata": true
+        }
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "missing",
+      "body": {
+        "kind": "container_list",
+        "media": "xml",
+        "service_endpoint": "matches",
+        "prefix": "matches",
+        "max_results": 1,
+        "echoed_marker": "missing",
+        "next_marker": "present",
+        "entries": [
+          {
+            "name": "companion",
+            "purpose": "missing",
+            "tracked_etag": null
+          }
+        ]
+      }
+    },
+    {
+      "step": "list_containers_next",
+      "request": {
+        "method": "get",
+        "operation": "list_containers",
+        "body_bytes": 0,
+        "container_list": {
+          "max_results": 1,
+          "filtered": true,
+          "continued": true,
+          "metadata": true
+        }
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "missing",
+      "body": {
+        "kind": "container_list",
+        "media": "xml",
+        "service_endpoint": "matches",
+        "prefix": "matches",
+        "max_results": 1,
+        "echoed_marker": "matches",
+        "next_marker": "empty",
+        "entries": [
+          {
+            "name": "tracked",
+            "purpose": "matches",
+            "tracked_etag": "matches"
+          }
+        ]
+      }
+    },
+    {
+      "step": "delete_container",
+      "request": {
+        "method": "delete",
+        "operation": "container",
+        "body_bytes": 0
+      },
+      "status": 202,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      }
+    },
+    {
+      "step": "read_missing_container",
+      "request": {
+        "method": "get",
+        "operation": "container",
+        "body_bytes": 0
+      },
+      "status": 404,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "container_not_found",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "container_not_found",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    }
+  ]
+}

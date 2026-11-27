@@ -403,6 +403,30 @@ fn check_live_blob_mutation_conditional_delete() -> Result<()> {
 }
 
 #[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_mutation_container_lifecycle() -> Result<()> {
+    live_mutation(mutations::Case::ContainerLifecycle)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_mutation_block_list_selectors() -> Result<()> {
+    live_mutation(mutations::Case::BlockListSelectors)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_mutation_page_resize_sequence() -> Result<()> {
+    live_mutation(mutations::Case::PageResizeSequence)
+}
+
+#[test]
+#[ignore = "live Azure access: requires a signed-in Azure CLI and an explicitly tagged test account"]
+fn check_live_blob_mutation_append_sealing() -> Result<()> {
+    live_mutation(mutations::Case::AppendSealing)
+}
+
+#[test]
 fn live_drift_is_reported_even_when_both_services_change_together() -> Result<()> {
     let baseline = reviewed_sas()?;
     let actual = |drift| {

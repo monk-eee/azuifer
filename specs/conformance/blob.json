@@ -244,7 +244,7 @@
         "Anonymous",
         "Bearer"
       ],
-      "notes": "GET and HEAD with comp=metadata; anonymous access requires container-level public access. Metadata names are returned in lowercase because the HTTP layer folds header case."
+      "notes": "GET and HEAD with comp=metadata return metadata without lease properties; anonymous access requires container-level public access. Metadata names are returned in lowercase because the HTTP layer folds header case."
     },
     {
       "name": "Get Container Properties",
@@ -271,7 +271,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Lists allocated ranges with a byte window, marker, and maxresults; touching ranges merge. snapshot lists a snapshot's ranges, and prevsnapshot returns the diff (PageRange for changed ranges, ClearRange for ranges cleared since) against the live blob or a newer snapshot. Page range diffs have not been compared with Azure."
+      "notes": "Lists allocated ranges with a byte window, marker, and maxresults; touching ranges merge. Unpaged listings omit NextMarker. snapshot lists a snapshot's ranges, and prevsnapshot returns the diff (PageRange for changed ranges, ClearRange for ranges cleared since) against the live blob or a newer snapshot. Page range diffs have not been compared with Azure."
     },
     {
       "name": "Get User Delegation Key",
@@ -343,7 +343,7 @@
         "AccountSAS",
         "Bearer"
       ],
-      "notes": "Supports prefix, marker, maxresults, and include=metadata; the listing carries lease state and public access. include=deleted and include=system answer NotImplemented. Markers are opaque local tokens."
+      "notes": "Supports prefix, marker, maxresults, and include=metadata,deleted; the listing carries lease state and public access. include=system answers NotImplemented. Markers are opaque local tokens, and a nonempty request marker is echoed in the response."
     },
     {
       "name": "Preflight Blob Request",
@@ -391,7 +391,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Per-block limit defaults to 5000 MiB (--max-block-bytes). Staged blocks survive restart and require the lease id while the blob is leased. Azure's staging expiration is not modeled. Page and append blobs answer InvalidBlobType."
+      "notes": "Per-block limit defaults to 5000 MiB (--max-block-bytes). Staged blocks survive restart and require the lease id while the blob is leased. A block ID width that conflicts with staged IDs returns InvalidBlobOrBlock. Azure's staging expiration is not modeled. Page and append blobs answer InvalidBlobType."
     },
     {
       "name": "Put Block From URL",
@@ -430,7 +430,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Update and clear of 512-byte-aligned ranges, 4 MiB per update, Content-MD5 or crc64, sequence-number conditions, and leases. Each update stores a new extent, so partly overwritten extents stay until fully replaced."
+      "notes": "Update and clear of 512-byte-aligned ranges, 4 MiB per update, Content-MD5 or crc64, sequence-number conditions, and leases. An unaligned range returns InvalidHeaderValue with the rejected range. Each update stores a new extent, so partly overwritten extents stay until fully replaced."
     },
     {
       "name": "Put Page From URL",

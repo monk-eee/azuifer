@@ -1,10 +1,10 @@
 use super::{
     VERSION,
     cassette::{
-        ApiVersion, ErrorCode, Header, Media, Source, error_message, flat_xml, header, header_text,
-        is_utc_timestamp, media,
+        ApiVersion, ErrorCode, Header, Media, Source, echoed, error_message, flat_xml, header,
+        header_text, is_utc_timestamp, media,
     },
-    read_bounded, request, sent, with_fresh_container, with_local,
+    read_bounded, request, require_status, send, sent, with_fresh_container, with_local,
 };
 use anyhow::{Context as _, Result, ensure};
 use reqwest::{
@@ -15,9 +15,11 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use std::{fs::File, path::Path, time::SystemTime};
 
+mod containers;
 mod expanded;
 mod input;
 mod lifecycle;
+mod lists;
 
 const SCHEMA_VERSION: u8 = 2;
 const INITIAL: &[u8] = b"original synthetic bytes\n";
@@ -49,6 +51,14 @@ pub(super) enum Case {
     ConditionalReads,
     #[serde(rename = "blob-conditional-delete")]
     ConditionalDelete,
+    #[serde(rename = "blob-container-lifecycle")]
+    ContainerLifecycle,
+    #[serde(rename = "blob-block-list-selectors")]
+    BlockListSelectors,
+    #[serde(rename = "blob-page-resize-sequence")]
+    PageResizeSequence,
+    #[serde(rename = "blob-append-sealing")]
+    AppendSealing,
 }
 
 impl Case {
@@ -64,6 +74,10 @@ impl Case {
             Self::MetadataProperties => "blob-metadata-properties",
             Self::ConditionalReads => "blob-conditional-reads",
             Self::ConditionalDelete => "blob-conditional-delete",
+            Self::ContainerLifecycle => "blob-container-lifecycle",
+            Self::BlockListSelectors => "blob-block-list-selectors",
+            Self::PageResizeSequence => "blob-page-resize-sequence",
+            Self::AppendSealing => "blob-append-sealing",
         }
     }
 
@@ -160,6 +174,43 @@ impl Case {
                 RejectStaleDelete,
                 ReadReplacement,
             ],
+            Self::ContainerLifecycle => &[
+                CreateContainer,
+                RejectDuplicateContainer,
+                SetContainerMetadata,
+                ReadContainerMetadata,
+                HeadContainer,
+                ListContainersFirst,
+                ListContainersNext,
+                DeleteContainer,
+                ReadMissingContainer,
+            ],
+            Self::BlockListSelectors => &[
+                ListUncommittedBlocks,
+                ListCommittedBlocks,
+                CommitSelectedBlocks,
+                ListAllBlocks,
+                RejectBlockWidth,
+                ReadCommitted,
+            ],
+            Self::PageResizeSequence => &[
+                ListPageRanges,
+                ListBoundedPageRanges,
+                RejectUnalignedPage,
+                ShrinkPageBlob,
+                ReadShrunkPages,
+                GrowAndMaxSequence,
+                ReadGrownPages,
+                UpdateSequence,
+                IncrementSequence,
+            ],
+            Self::AppendSealing => &[
+                AppendAtMaxSize,
+                RejectAppendOverMax,
+                SealAppend,
+                RejectSealedAppend,
+                ReadSealedAppend,
+            ],
         }
     }
 }
@@ -229,6 +280,34 @@ enum Step {
     DeleteMissing,
     Recreate,
     RejectStaleDelete,
+    CreateContainer,
+    RejectDuplicateContainer,
+    SetContainerMetadata,
+    ReadContainerMetadata,
+    HeadContainer,
+    ListContainersFirst,
+    ListContainersNext,
+    DeleteContainer,
+    ReadMissingContainer,
+    ListUncommittedBlocks,
+    ListCommittedBlocks,
+    CommitSelectedBlocks,
+    ListAllBlocks,
+    RejectBlockWidth,
+    ListPageRanges,
+    ListBoundedPageRanges,
+    RejectUnalignedPage,
+    ShrinkPageBlob,
+    ReadShrunkPages,
+    GrowAndMaxSequence,
+    ReadGrownPages,
+    UpdateSequence,
+    IncrementSequence,
+    AppendAtMaxSize,
+    RejectAppendOverMax,
+    SealAppend,
+    RejectSealedAppend,
+    ReadSealedAppend,
 }
 
 impl Step {
@@ -249,12 +328,16 @@ impl Step {
             Self::ReadCommitted | Self::ReadAfterRejectedCommit => {
                 Some((ASSEMBLED, "assembled", "BlockBlob"))
             }
-            Self::ReadFirstAppend => Some((FIRST_BLOCK, "appended", "AppendBlob")),
+            Self::ReadFirstAppend | Self::ReadSealedAppend => {
+                Some((FIRST_BLOCK, "appended", "AppendBlob"))
+            }
             Self::ReadBothAppends => Some((lifecycle::APPENDED, "appended", "AppendBlob")),
             Self::ReadSparsePages | Self::ReadPagesAfterRejection => {
                 Some((&lifecycle::SPARSE_PAGES, "pages", "PageBlob"))
             }
             Self::ReadClearedPages => Some((&[0; 2 * lifecycle::PAGE_SIZE], "pages", "PageBlob")),
+            Self::ReadShrunkPages => Some((&lifecycle::SPARSE_PAGES, "pages", "PageBlob")),
+            Self::ReadGrownPages => Some((&lifecycle::GROWN_PAGES, "pages", "PageBlob")),
             _ => None,
         }
     }
@@ -279,14 +362,39 @@ impl Step {
                 | Self::ReadDeleted
                 | Self::DeleteMissing
                 | Self::RejectStaleDelete
+                | Self::RejectDuplicateContainer
+                | Self::ReadMissingContainer
+                | Self::RejectBlockWidth
+                | Self::RejectUnalignedPage
+                | Self::RejectAppendOverMax
+                | Self::RejectSealedAppend
         )
+    }
+
+    fn is_listing(self) -> bool {
+        matches!(
+            self,
+            Self::ListUncommittedBlocks
+                | Self::ListCommittedBlocks
+                | Self::ListAllBlocks
+                | Self::ListPageRanges
+                | Self::ListBoundedPageRanges
+                | Self::ListContainersFirst
+                | Self::ListContainersNext
+        )
+    }
+
+    fn is_container_listing(self) -> bool {
+        matches!(self, Self::ListContainersFirst | Self::ListContainersNext)
     }
 
     fn expected_empty(self) -> Option<(u16, Option<Tag>)> {
         Some(match self {
-            Self::Seed | Self::Commit | Self::CreateAppend | Self::CreatePage => {
-                (201, Some(Tag::Valid))
-            }
+            Self::Seed
+            | Self::Commit
+            | Self::CreateAppend
+            | Self::CreatePage
+            | Self::CreateContainer => (201, Some(Tag::Valid)),
             Self::StageFirst | Self::StageSecond => (201, Some(Tag::Missing)),
             Self::Overwrite
             | Self::RestoreSnapshot
@@ -294,15 +402,24 @@ impl Step {
             | Self::AppendSecond
             | Self::WritePage
             | Self::ClearPage
+            | Self::CommitSelectedBlocks
+            | Self::AppendAtMaxSize
             | Self::Recreate => (201, Some(Tag::Changed)),
             Self::AcquireLease | Self::CreateSnapshot => (201, Some(Tag::Matches)),
-            Self::SetMetadata | Self::SetProperties => (200, Some(Tag::Changed)),
+            Self::SetMetadata
+            | Self::SetProperties
+            | Self::SetContainerMetadata
+            | Self::ShrinkPageBlob
+            | Self::GrowAndMaxSequence => (200, Some(Tag::Changed)),
             Self::ReleaseLease
             | Self::HeadProperties
             | Self::ReadMetadata
-            | Self::ReadMetadataAfterRejection => (200, Some(Tag::Matches)),
+            | Self::ReadMetadataAfterRejection
+            | Self::ReadContainerMetadata
+            | Self::HeadContainer => (200, Some(Tag::Matches)),
+            Self::SealAppend | Self::UpdateSequence | Self::IncrementSequence => (200, None),
             Self::HeadNotModified | Self::GetNotModified | Self::MixedNotModified => (304, None),
-            Self::DeleteCurrent => (202, None),
+            Self::DeleteCurrent | Self::DeleteContainer => (202, None),
             _ => return None,
         })
     }
@@ -350,6 +467,9 @@ enum Body {
         message_matches: bool,
         extra_elements: usize,
     },
+    BlockList(lists::Blocks),
+    PageList(lists::PageRanges),
+    ContainerList(containers::ContainerPage),
     Other {},
 }
 
@@ -393,6 +513,21 @@ enum Details {
     },
     Deletion {
         permanent: Header,
+    },
+    Container {
+        purpose: Header,
+        removed: Header,
+        lease_state: Header,
+        lease_status: Header,
+        public_access: Header,
+    },
+    AppendSeal {
+        sealed: Header,
+        blocks: Option<u64>,
+    },
+    InvalidRangeHeader {
+        name: Header,
+        value: Header,
     },
 }
 
@@ -445,6 +580,14 @@ impl MutationCassette {
                 (400..500).contains(&r.status)
                     && matches!(&r.body, Body::XmlError { code, media: Media::Xml, .. }
                         if *code == r.error_header && !matches!(code, ErrorCode::Missing | ErrorCode::Other))
+            } else if r.step.is_listing() {
+                r.status == 200
+                    && r.error_header == ErrorCode::Missing
+                    && if r.step.is_container_listing() {
+                        containers::matches_listing(r)
+                    } else {
+                        lists::matches_fixture(r)
+                    }
             } else if let Some((status, tag)) = r.step.expected_empty() {
                 r.status == status
                     && tag.is_none_or(|tag| r.etag == tag)
@@ -461,7 +604,10 @@ impl MutationCassette {
                 })
             };
             ensure!(
-                valid && expanded::matches_fixture(r),
+                valid
+                    && expanded::matches_fixture(r)
+                    && lifecycle::matches_new_fixture(r)
+                    && containers::matches_fixture(r),
                 "{:?}: did not produce the expected Blob state: {r:#?}",
                 r.step
             );
@@ -501,6 +647,7 @@ struct Observed {
     etag: Option<String>,
     snapshot: Option<String>,
     bytes: Vec<u8>,
+    next_marker: Option<String>,
 }
 
 fn usable_etag(headers: &HeaderMap) -> Option<&str> {
@@ -517,6 +664,17 @@ fn usable_etag(headers: &HeaderMap) -> Option<&str> {
 impl Probe<'_> {
     fn request(&self, method: Method) -> RequestBuilder {
         request(self.client, method, self.url.clone()).bearer_auth(self.bearer)
+    }
+
+    fn setup(
+        &self,
+        wire: RequestBuilder,
+        expected: u16,
+        phase: &'static str,
+    ) -> Result<reqwest::blocking::Response> {
+        let response = send(wire, phase)?;
+        require_status(&response, expected, phase)?;
+        Ok(response)
     }
 
     fn create_blob(&self, kind: &'static str, metadata: &'static str) -> RequestBuilder {
@@ -570,6 +728,7 @@ impl Probe<'_> {
             .map_err(|_| anyhow::anyhow!("{step:?}: could not build Blob probe request"))?;
         let request = input::Input::observe(&wire, reference, modified)
             .with_context(|| format!("{step:?}"))?;
+        let container_list_url = step.is_container_listing().then(|| wire.url().clone());
         let response = sent(self.client.execute(wire), "send Blob mutation probe")
             .with_context(|| format!("{step:?}"))?;
         let status = response.status().as_u16();
@@ -585,8 +744,18 @@ impl Probe<'_> {
             (Some(_), Some(_)) => Tag::Changed,
         };
         let error_header = ErrorCode::from_value(text("x-ms-error-code"));
-        let body = if let (200 | 206, Some((expected, metadata, kind))) =
-            (status, step.expected_blob())
+        let mut next_marker = None;
+        let mut fault_details = None;
+        let body = if status == 200 && step.is_listing() {
+            if let Some(url) = container_list_url {
+                let (page, marker) = containers::project(&url, reference, &headers, &bytes)
+                    .with_context(|| format!("{step:?}"))?;
+                next_marker = marker;
+                Body::ContainerList(page)
+            } else {
+                lists::project(step, &headers, &bytes).with_context(|| format!("{step:?}"))?
+            }
+        } else if let (200 | 206, Some((expected, metadata, kind))) = (status, step.expected_blob())
         {
             Body::Blob {
                 bytes_match: bytes == expected,
@@ -605,6 +774,12 @@ impl Probe<'_> {
                     let code = ErrorCode::from_value(fields.get("Code").map(String::as_str));
                     let (message, correlation) =
                         error_message(fields.get("Message")?, text("x-ms-request-id"));
+                    if step == Step::RejectUnalignedPage {
+                        fault_details = Some(Details::InvalidRangeHeader {
+                            name: echoed(fields.get("HeaderName").map(String::as_str), Some("Range")),
+                            value: echoed(fields.get("HeaderValue").map(String::as_str), Some(lifecycle::UNALIGNED_PAGE_RANGE)),
+                        });
+                    }
                     let expected = match code {
                         ErrorCode::BlobNotFound => "The specified blob does not exist.",
                         ErrorCode::BlobAlreadyExists => "The specified blob already exists.",
@@ -620,6 +795,13 @@ impl Probe<'_> {
                         ErrorCode::InvalidHeaderValue => "The value for one of the HTTP headers is not in the correct format.",
                         ErrorCode::InvalidRange => "The range specified is invalid for the current size of the resource.",
                         ErrorCode::BothCrc64AndMd5RangeHeaderPresent => "Both x-ms-range-get-content-crc64 header and x-ms-range-get-content-md5 header are present.",
+                        ErrorCode::ContainerAlreadyExists => "The specified container already exists.",
+                        ErrorCode::ContainerNotFound => "The specified container does not exist.",
+                        ErrorCode::InvalidBlockId => "The specified block ID is invalid. The block ID must be a Base64-encoded string.",
+                        ErrorCode::InvalidBlobOrBlock => "The specified blob or block content is invalid.",
+                        ErrorCode::InvalidPageRange => "The page range specified is invalid.",
+                        ErrorCode::MaxBlobSizeConditionNotMet => "The max blob size condition specified was not met.",
+                        ErrorCode::BlobIsSealed => "The blob is sealed and its contents cannot be modified.",
                         _ => return None,
                     };
                     Some(Body::XmlError {
@@ -642,8 +824,10 @@ impl Probe<'_> {
             etag,
             body,
             error_header,
-            details: lifecycle::details(step, &headers)
-                .or_else(|| expanded::details(step, &headers)),
+            details: fault_details
+                .or_else(|| lifecycle::details(step, &headers))
+                .or_else(|| expanded::details(step, &headers))
+                .or_else(|| containers::details(step, &headers)),
             api_version: header(&headers, "x-ms-version", |value| value == VERSION),
             request_id: header(&headers, "x-ms-request-id", |id| {
                 uuid::Uuid::parse_str(id).is_ok()
@@ -655,6 +839,7 @@ impl Probe<'_> {
                 .filter(|value| is_utc_timestamp(value))
                 .map(str::to_owned),
             bytes,
+            next_marker,
         })
     }
 
@@ -735,7 +920,7 @@ pub(super) fn observe(
     source: Source,
     case: Case,
 ) -> Result<MutationCassette> {
-    with_fresh_container(client, endpoint, bearer, |_, url| {
+    with_fresh_container(client, endpoint, bearer, |companion, url| {
         let mut probe = Probe {
             client,
             url,
@@ -753,6 +938,10 @@ pub(super) fn observe(
             Case::MetadataProperties => probe.metadata_properties()?,
             Case::ConditionalReads => probe.conditional_reads()?,
             Case::ConditionalDelete => probe.conditional_delete()?,
+            Case::ContainerLifecycle => probe.container_lifecycle(endpoint, companion)?,
+            Case::BlockListSelectors => probe.block_list_selectors()?,
+            Case::PageResizeSequence => probe.page_resize_sequence()?,
+            Case::AppendSealing => probe.append_sealing()?,
         }
         Ok(MutationCassette {
             schema_version: SCHEMA_VERSION,
@@ -842,6 +1031,26 @@ fn replay_blob_mutation_conditional_reads() -> Result<()> {
 #[test]
 fn replay_blob_mutation_conditional_delete() -> Result<()> {
     replay(Case::ConditionalDelete)
+}
+
+#[test]
+fn replay_blob_mutation_container_lifecycle() -> Result<()> {
+    replay(Case::ContainerLifecycle)
+}
+
+#[test]
+fn replay_blob_mutation_block_list_selectors() -> Result<()> {
+    replay(Case::BlockListSelectors)
+}
+
+#[test]
+fn replay_blob_mutation_page_resize_sequence() -> Result<()> {
+    replay(Case::PageResizeSequence)
+}
+
+#[test]
+fn replay_blob_mutation_append_sealing() -> Result<()> {
+    replay(Case::AppendSealing)
 }
 
 #[test]

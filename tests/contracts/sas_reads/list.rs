@@ -1,9 +1,8 @@
 use super::{
     BLOB_BYTES, Body, Exchange, PURPOSE, Readback, Step, request, seed, sign_sas, signed_url,
 };
-use crate::contracts::cassette::{Header, Media, media};
-use anyhow::{Context as _, Result, anyhow, ensure};
-use quick_xml::{Reader, events::Event};
+use crate::contracts::cassette::{Header, Media, XmlEtag, echoed, media, project_xml};
+use anyhow::{Context as _, Result};
 use reqwest::{Method, Url, blocking::Client};
 use serde::{Deserialize, Serialize};
 
@@ -43,21 +42,12 @@ enum Marker {
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum Etag {
-    Matches,
-    UnquotedMatch,
-    Missing,
-    Different,
-}
-
-#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Entry {
     Blob {
         name: Name,
         length: Option<u64>,
-        etag: Etag,
+        etag: XmlEtag,
         block_blob: bool,
         purpose_matches: bool,
     },
@@ -100,7 +90,7 @@ impl Page {
                     Entry::Blob {
                         name,
                         length: Some(length),
-                        etag: Etag::Matches | Etag::UnquotedMatch,
+                        etag: XmlEtag::Matches | XmlEtag::UnquotedMatch,
                         block_blob: true,
                         purpose_matches: true,
                     },
@@ -172,33 +162,6 @@ struct WireMetadata {
     purpose: Option<String>,
 }
 
-impl WirePage {
-    fn parse(bytes: &[u8]) -> Result<Self> {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|_| anyhow!("invalid Blob list response encoding"))?
-            .trim_start_matches('\u{feff}');
-        let mut reader = Reader::from_str(text);
-        reader.config_mut().trim_text(true);
-        let root = match reader.read_event() {
-            Ok(Event::Decl(_)) => reader.read_event(),
-            event => event,
-        };
-        ensure!(
-            matches!(root, Ok(Event::Start(tag)) if tag.name().as_ref() == "EnumerationResults"),
-            "unexpected Blob list XML envelope"
-        );
-        quick_xml::de::from_str(text).map_err(|_| anyhow!("invalid Blob list XML fields"))
-    }
-}
-
-fn echoed(actual: Option<&str>, expected: Option<&str>) -> Header {
-    match actual {
-        Some(value) if Some(value) == expected => Header::Matches,
-        Some(_) => Header::Different,
-        None => Header::Missing,
-    }
-}
-
 struct Listing<'a> {
     client: &'a Client,
     endpoint: &'a Url,
@@ -246,14 +209,7 @@ impl Listing<'_> {
                         Name::Nested => Some(self.nested_etag.as_str()),
                         _ => None,
                     };
-                    let etag = match (properties.etag.as_deref(), expected) {
-                        (Some(actual), Some(expected)) if actual == expected => Etag::Matches,
-                        (Some(actual), Some(expected)) if actual == expected.trim_matches('"') => {
-                            Etag::UnquotedMatch
-                        }
-                        (None, _) => Etag::Missing,
-                        _ => Etag::Different,
-                    };
+                    let etag = XmlEtag::observe(properties.etag.as_deref(), expected);
                     Entry::Blob {
                         name,
                         length: properties.length,
@@ -301,7 +257,7 @@ impl Listing<'_> {
         let mut next = None;
         let exchange =
             Exchange::observe(step, self.wire(sas, prefix, marker), |headers, bytes| {
-                let raw = WirePage::parse(bytes)?;
+                let raw: WirePage = project_xml(bytes, "EnumerationResults")?;
                 let page = self.page(&raw, media(headers), prefix, marker);
                 next = raw.next_marker.filter(|value| !value.is_empty());
                 Ok(Body::List(page))

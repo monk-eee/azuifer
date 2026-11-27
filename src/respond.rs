@@ -5,11 +5,11 @@ use crate::{
     blob_sas::Overrides,
     domain::{
         BlobInfo, BlobListing, ContainerInfo, Entity, Error, Include, ListEntry, ListRequest,
-        Metadata, Page, PublicAccess, Result, SignedIdentifier,
+        Metadata, Page, PageRequest, PublicAccess, Result, SignedIdentifier,
     },
     lease::LeaseView,
     store::{Download, Payload},
-    wire::{Xml, correlated_error_message, xml_error},
+    wire::{Xml, correlated_error_message, xml_error, xml_error_with_details},
 };
 use axum::{
     body::Body,
@@ -271,8 +271,8 @@ pub(crate) fn blob_metadata_response(download: Download) -> Result<Response> {
 pub(crate) fn container_response(info: ContainerInfo, metadata_only: bool) -> Result<Response> {
     let mut response = entity_response(StatusCode::OK, info.entity)?;
     let headers = response.headers_mut();
-    lease_headers(headers, info.lease)?;
     if !metadata_only {
+        lease_headers(headers, info.lease)?;
         if let Some(access) = info.public_access.name() {
             set(headers, "x-ms-blob-public-access", access)?;
         }
@@ -327,19 +327,28 @@ pub(crate) fn lease_elements(xml: &mut Xml, view: LeaseView) {
     }
 }
 
+pub(crate) fn container_list_xml(endpoint: &str, page: &PageRequest) -> Xml {
+    let mut xml = Xml::root("EnumerationResults", &[("ServiceEndpoint", endpoint)]);
+    paging_elements(&mut xml, page);
+    xml.open("Containers");
+    xml
+}
+
+fn paging_elements(xml: &mut Xml, page: &PageRequest) {
+    if !page.prefix.is_empty() {
+        xml.element("Prefix", &page.prefix);
+    }
+    if let Some(marker) = page.marker() {
+        xml.element("Marker", &marker);
+    }
+    xml.element("MaxResults", &page.limit.to_string());
+}
+
 pub(crate) fn list_containers(
-    endpoint: &str,
-    limit: u32,
-    prefix: &str,
+    mut xml: Xml,
     page: Page<ContainerInfo>,
     metadata: bool,
 ) -> Result<Response> {
-    let mut xml = Xml::root("EnumerationResults", &[("ServiceEndpoint", endpoint)]);
-    if !prefix.is_empty() {
-        xml.element("Prefix", prefix);
-    }
-    xml.element("MaxResults", &limit.to_string());
-    xml.open("Containers");
     for (name, info) in page.items {
         xml.open("Container");
         xml.element("Name", &name);
@@ -369,13 +378,7 @@ pub(crate) fn blob_list_xml(endpoint: &str, container: &str, request: &ListReque
         "EnumerationResults",
         &[("ServiceEndpoint", endpoint), ("ContainerName", container)],
     );
-    if !request.page.prefix.is_empty() {
-        xml.element("Prefix", &request.page.prefix);
-    }
-    if let Some(marker) = request.page.marker() {
-        xml.element("Marker", &marker);
-    }
-    xml.element("MaxResults", &request.page.limit.to_string());
+    paging_elements(&mut xml, &request.page);
     if let Some(delimiter) = &request.delimiter {
         xml.element("Delimiter", delimiter);
     }
@@ -586,6 +589,11 @@ fn describe(error: Error) -> (StatusCode, &'static str, &'static str) {
             "InvalidBlockId",
             "The block ID is malformed or has inconsistent length.",
         ),
+        Error::BlockIdWidthMismatch => (
+            S::BAD_REQUEST,
+            "InvalidBlobOrBlock",
+            "The specified blob or block content is invalid.",
+        ),
         Error::InvalidBlockList => (
             S::BAD_REQUEST,
             "InvalidBlockList",
@@ -609,7 +617,7 @@ fn describe(error: Error) -> (StatusCode, &'static str, &'static str) {
         Error::ContainerExists => (
             S::CONFLICT,
             "ContainerAlreadyExists",
-            "The container already exists.",
+            "The specified container already exists.",
         ),
         Error::ContainerMissing => (
             S::NOT_FOUND,
@@ -839,21 +847,49 @@ pub(crate) fn error_response(error: Error) -> Response {
     render_error(error, None)
 }
 
-pub(crate) fn request_error_response(error: Error, request_id: &str, now: SystemTime) -> Response {
+pub(crate) fn request_error_response(
+    error: Error,
+    request_headers: &HeaderMap,
+    request_id: &str,
+    now: SystemTime,
+) -> Response {
+    if error == Error::Page(PageError::UnalignedPageRange) {
+        let value = request_headers
+            .get("x-ms-range")
+            .or_else(|| request_headers.get("range"))
+            .and_then(|value| value.to_str().ok());
+        let Some(value) = value else {
+            tracing::error!("unaligned page range error without a usable request range");
+            return error_response(Error::Internal);
+        };
+        let (status, code, message) = describe(error);
+        return xml_error_with_details(
+            status,
+            code,
+            &correlated_error_message(message, request_id, now),
+            &[("HeaderName", "Range"), ("HeaderValue", value)],
+        );
+    }
     let correlation = matches!(
         error,
         Error::PermissionMismatch
             | Error::BlobAlreadyExists
             | Error::ConditionNotMet
             | Error::BlobMissing
+            | Error::ContainerExists
+            | Error::ContainerMissing
             | Error::InvalidBlockList
+            | Error::BlockIdWidthMismatch
             | Error::InvalidRange(_)
             | Error::ConflictingRangeChecksums
             | Error::LeaseIdMissingBlob
             | Error::LeaseMismatchBlob
             | Error::SnapshotsPresent
             | Error::Page(
-                PageError::AppendPositionConditionNotMet | PageError::SequenceNumberConditionNotMet
+                PageError::AppendPositionConditionNotMet
+                    | PageError::SequenceNumberConditionNotMet
+                    | PageError::MaxBlobSizeConditionNotMet
+                    | PageError::BlobIsSealed
             )
     )
     .then_some((request_id, now));

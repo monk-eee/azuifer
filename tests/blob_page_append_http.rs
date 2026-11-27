@@ -587,8 +587,8 @@ fn put_page_validates_ranges_bodies_and_checksums() {
     server.create_container();
     assert_eq!(server.create_page(PAGE, 8 * 1024 * 1024, &[]).status(), 201);
     for (range, status, code) in [
-        ("bytes=1-512", 416, "InvalidPageRange"),
-        ("bytes=0-1022", 416, "InvalidPageRange"),
+        ("bytes=1-512", 400, "InvalidHeaderValue"),
+        ("bytes=0-1022", 400, "InvalidHeaderValue"),
         ("bytes=8388608-8389119", 416, "InvalidPageRange"),
         ("bytes=0-1023", 400, "InvalidHeaderValue"),
         ("bytes=0-", 400, "InvalidHeaderValue"),

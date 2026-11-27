@@ -1,7 +1,7 @@
 use anyhow::{Result, ensure};
 use quick_xml::{Reader, events::Event};
 use reqwest::header::HeaderMap;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
 
 use super::{BLOB_BYTES, RANGE_END, RANGE_START, VERSION};
@@ -52,6 +52,36 @@ pub(super) enum Header {
     Different,
 }
 
+pub(super) fn echoed(actual: Option<&str>, expected: Option<&str>) -> Header {
+    match actual {
+        Some(value) if Some(value) == expected => Header::Matches,
+        Some(_) => Header::Different,
+        None => Header::Missing,
+    }
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum XmlEtag {
+    Matches,
+    UnquotedMatch,
+    Missing,
+    Different,
+}
+
+impl XmlEtag {
+    pub(super) fn observe(value: Option<&str>, expected: Option<&str>) -> Self {
+        match (value, expected) {
+            (Some(actual), Some(expected)) if actual == expected => Self::Matches,
+            (Some(actual), Some(expected)) if actual == expected.trim_matches('"') => {
+                Self::UnquotedMatch
+            }
+            (None, _) => Self::Missing,
+            _ => Self::Different,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Media {
@@ -79,6 +109,12 @@ pub(super) enum ErrorCode {
     AppendPositionConditionNotMet,
     SequenceNumberConditionNotMet,
     ContainerNotFound,
+    ContainerAlreadyExists,
+    InvalidBlockId,
+    InvalidBlobOrBlock,
+    InvalidPageRange,
+    MaxBlobSizeConditionNotMet,
+    BlobIsSealed,
     InvalidInput,
     InvalidHeaderValue,
     InvalidRange,
@@ -105,6 +141,12 @@ impl ErrorCode {
             Some("AppendPositionConditionNotMet") => Self::AppendPositionConditionNotMet,
             Some("SequenceNumberConditionNotMet") => Self::SequenceNumberConditionNotMet,
             Some("ContainerNotFound") => Self::ContainerNotFound,
+            Some("ContainerAlreadyExists") => Self::ContainerAlreadyExists,
+            Some("InvalidBlockId") => Self::InvalidBlockId,
+            Some("InvalidBlobOrBlock") => Self::InvalidBlobOrBlock,
+            Some("InvalidPageRange") => Self::InvalidPageRange,
+            Some("MaxBlobSizeConditionNotMet") => Self::MaxBlobSizeConditionNotMet,
+            Some("BlobIsSealed") => Self::BlobIsSealed,
             Some("InvalidInput") => Self::InvalidInput,
             Some("InvalidHeaderValue") => Self::InvalidHeaderValue,
             Some("InvalidRange") => Self::InvalidRange,
@@ -114,6 +156,23 @@ impl ErrorCode {
             Some(_) => Self::Other,
         }
     }
+}
+
+pub(super) fn project_xml<T: DeserializeOwned>(bytes: &[u8], root: &str) -> Result<T> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| anyhow::anyhow!("invalid {root} response encoding"))?
+        .trim_start_matches('\u{feff}');
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(true);
+    let start = match reader.read_event() {
+        Ok(Event::Decl(_)) => reader.read_event(),
+        event => event,
+    };
+    ensure!(
+        matches!(start, Ok(Event::Start(tag) | Event::Empty(tag)) if tag.name().as_ref() == root),
+        "unexpected {root} XML envelope"
+    );
+    quick_xml::de::from_str(text).map_err(|_| anyhow::anyhow!("invalid {root} XML fields"))
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]

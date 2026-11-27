@@ -1,0 +1,124 @@
+{
+  "schema_version": 2,
+  "source": "azure",
+  "case": "blob-append-sealing",
+  "api_version": "2023-11-03",
+  "responses": [
+    {
+      "step": "append_at_max_size",
+      "request": {
+        "method": "put",
+        "operation": "append_block",
+        "body_bytes": 6,
+        "append_position": 0,
+        "append_max_size": 6
+      },
+      "status": 201,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "changed",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      },
+      "details": {
+        "kind": "append",
+        "offset": 0,
+        "blocks": 1
+      }
+    },
+    {
+      "step": "reject_append_over_max",
+      "request": {
+        "method": "put",
+        "operation": "append_block",
+        "body_bytes": 1,
+        "append_position": 6,
+        "append_max_size": 6
+      },
+      "status": 412,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "max_blob_size_condition_not_met",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "max_blob_size_condition_not_met",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "seal_append",
+      "request": {
+        "method": "put",
+        "operation": "seal_append",
+        "body_bytes": 0,
+        "if_match": "matches"
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "changed",
+      "error_header": "missing",
+      "body": {
+        "kind": "empty"
+      },
+      "details": {
+        "kind": "append_seal",
+        "sealed": "matches",
+        "blocks": null
+      }
+    },
+    {
+      "step": "reject_sealed_append",
+      "request": {
+        "method": "put",
+        "operation": "append_block",
+        "body_bytes": 1,
+        "append_position": 6
+      },
+      "status": 409,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "missing",
+      "error_header": "blob_is_sealed",
+      "body": {
+        "kind": "xml_error",
+        "media": "xml",
+        "code": "blob_is_sealed",
+        "correlation": "matches",
+        "message_matches": true,
+        "extra_elements": 0
+      }
+    },
+    {
+      "step": "read_sealed_append",
+      "request": {
+        "method": "get",
+        "operation": "blob",
+        "body_bytes": 0
+      },
+      "status": 200,
+      "api_version": "matches",
+      "request_id": "matches",
+      "etag": "matches",
+      "error_header": "missing",
+      "body": {
+        "kind": "blob",
+        "bytes_match": true,
+        "length": 6,
+        "media": "text_plain",
+        "blob_type": "matches",
+        "metadata": "matches"
+      },
+      "details": {
+        "kind": "append_seal",
+        "sealed": "matches",
+        "blocks": 1
+      }
+    }
+  ]
+}

@@ -21,8 +21,12 @@ The [recording plan](azure-recording-plan.md) counts the exchange target, lists 
 | [Blob metadata and properties](../../tests/contracts/cassettes/blob-metadata-properties.json) | Conditional metadata replacement removes omitted entries and rejects stale updates. A properties update clears omitted headers while preserving content and the newly set metadata. |
 | [Conditional Blob reads](../../tests/contracts/cassettes/blob-conditional-reads.json) | Distinguishes empty 304 `ConditionNotMet` responses from 412 XML errors for ETag and date conditions, including mixed preconditions. A valid ETag-conditioned range read returns 206. |
 | [Conditional Blob deletion](../../tests/contracts/cassettes/blob-conditional-delete.json) | Deletion with the current ETag is permanent on the flat profile. A read and repeat delete return 404. After recreation, the old ETag cannot delete the replacement. |
+| [Blob container lifecycle](../../tests/contracts/cassettes/blob-container-lifecycle.json) | Create and reject a duplicate; replace metadata; distinguish metadata reads from properties; follow and verify a filtered continuation; delete and confirm the container is gone. |
+| [Block-list selectors](../../tests/contracts/cassettes/blob-block-list-selectors.json) | List committed and uncommitted blocks independently. Commit a staged block and a committed block in that order, even when the committed ID also has a staged replacement. A mismatched block ID width is rejected without changing the committed bytes. |
+| [Page ranges, resize and sequence](../../tests/contracts/cassettes/blob-page-resize-sequence.json) | Verify allocated ranges and an intersecting window, reject an unaligned write, shrink and grow with zero-fill, and observe max, update and increment sequence actions. |
+| [Append sealing](../../tests/contracts/cassettes/blob-append-sealing.json) | Append exactly at the size limit, reject growth beyond it, seal the blob, reject a later append, and read back the unchanged bytes and one committed block. |
 
-The mutation cases use Entra bearer authentication. Their cassettes record the request method, operation, payload length and selected guards alongside the observed response. ETags, lease IDs and conditional dates are represented by their relationship to the scenario, never by their value.
+The mutation cases use Entra bearer authentication. Their cassettes record the request method, operation, payload length and selected guards alongside the observed response. ETags, lease IDs, continuation markers and conditional dates are represented by their relationship to the scenario, never by their value.
 
 ## Replay without Azure
 

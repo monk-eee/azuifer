@@ -1,6 +1,6 @@
 use super::{
-    Details, FIRST_BLOCK, INITIAL, Probe, REJECTED, REPLACEMENT, SECOND_BLOCK, Step, header,
-    header_text,
+    Details, ErrorCode, FIRST_BLOCK, Header, INITIAL, Probe, REJECTED, REPLACEMENT, Response,
+    SECOND_BLOCK, Step, header, header_text, usable_etag,
 };
 use crate::contracts::cassette::is_utc_timestamp;
 use anyhow::{Context as _, Result, ensure};
@@ -17,7 +17,14 @@ pub(super) const SPARSE_PAGES: [u8; 2 * PAGE_SIZE] = {
     second.copy_from_slice(&PAGE_BLOCK);
     pages
 };
+pub(super) const GROWN_PAGES: [u8; 4 * PAGE_SIZE] = {
+    let mut pages = [0; 4 * PAGE_SIZE];
+    let (preserved, _) = pages.split_at_mut(2 * PAGE_SIZE);
+    preserved.copy_from_slice(&SPARSE_PAGES);
+    pages
+};
 const SEQUENCE: u64 = 3;
+pub(super) const UNALIGNED_PAGE_RANGE: &str = "bytes=513-1024";
 
 pub(super) fn details(step: Step, headers: &HeaderMap) -> Option<Details> {
     use Step::*;
@@ -41,17 +48,61 @@ pub(super) fn details(step: Step, headers: &HeaderMap) -> Option<Details> {
         CreateSnapshot => Details::Snapshot {
             timestamp: header(headers, "x-ms-snapshot", is_utc_timestamp),
         },
-        AppendFirst | AppendSecond | ReadFirstAppend | ReadBothAppends => Details::Append {
-            offset: number("x-ms-blob-append-offset"),
-            blocks: number("x-ms-blob-committed-block-count"),
-        },
-        WritePage | ReadSparsePages | ReadPagesAfterRejection | ClearPage | ReadClearedPages => {
-            Details::Sequence {
-                number: number("x-ms-blob-sequence-number"),
+        AppendFirst | AppendSecond | ReadFirstAppend | ReadBothAppends | AppendAtMaxSize => {
+            Details::Append {
+                offset: number("x-ms-blob-append-offset"),
+                blocks: number("x-ms-blob-committed-block-count"),
             }
         }
+        WritePage
+        | ReadSparsePages
+        | ReadPagesAfterRejection
+        | ClearPage
+        | ReadClearedPages
+        | ShrinkPageBlob
+        | ReadShrunkPages
+        | GrowAndMaxSequence
+        | ReadGrownPages
+        | UpdateSequence
+        | IncrementSequence => Details::Sequence {
+            number: number("x-ms-blob-sequence-number"),
+        },
+        SealAppend | ReadSealedAppend => Details::AppendSeal {
+            sealed: header(headers, "x-ms-blob-sealed", |value| value == "true"),
+            blocks: number("x-ms-blob-committed-block-count"),
+        },
         _ => return None,
     })
+}
+
+pub(super) fn matches_new_fixture(response: &Response) -> bool {
+    use Step::*;
+    let status_and_code = |status, code| response.status == status && response.error_header == code;
+    let sequence = |expected| matches!(&response.details, Some(Details::Sequence { number: Some(number) }) if *number == expected);
+    match response.step {
+        RejectBlockWidth => status_and_code(400, ErrorCode::InvalidBlobOrBlock),
+        RejectUnalignedPage => status_and_code(400, ErrorCode::InvalidHeaderValue),
+        RejectAppendOverMax => status_and_code(412, ErrorCode::MaxBlobSizeConditionNotMet),
+        RejectSealedAppend => status_and_code(409, ErrorCode::BlobIsSealed),
+        ShrinkPageBlob | ReadShrunkPages | IncrementSequence => sequence(3),
+        GrowAndMaxSequence | ReadGrownPages => sequence(7),
+        UpdateSequence => sequence(2),
+        AppendAtMaxSize => matches!(
+            response.details,
+            Some(Details::Append {
+                offset: Some(0),
+                blocks: Some(1)
+            })
+        ),
+        ReadSealedAppend => matches!(
+            response.details,
+            Some(Details::AppendSeal {
+                sealed: Header::Matches,
+                blocks: Some(1)
+            })
+        ),
+        _ => true,
+    }
 }
 
 impl Probe<'_> {
@@ -228,6 +279,54 @@ impl Probe<'_> {
             .body(bytes)
     }
 
+    pub(super) fn append_sealing(&mut self) -> Result<()> {
+        let created = self.setup(
+            self.create_blob("AppendBlob", "appended")
+                .header("content-length", "0"),
+            201,
+            "create append blob for seal probe",
+        )?;
+        let initial = usable_etag(created.headers()).context("append creation lacks ETag")?;
+        let size = FIRST_BLOCK.len();
+        let appended = self
+            .record(
+                Step::AppendAtMaxSize,
+                self.append_block(0, FIRST_BLOCK)
+                    .header("x-ms-blob-condition-maxsize", size.to_string()),
+                Some(initial),
+            )?
+            .etag
+            .context("append lacks ETag")?;
+        self.record(
+            Step::RejectAppendOverMax,
+            self.append_block(size, b"x")
+                .header("x-ms-blob-condition-maxsize", size.to_string()),
+            Some(&appended),
+        )?;
+        let sealed = self
+            .record(
+                Step::SealAppend,
+                self.request(Method::PUT)
+                    .query(&[("comp", "seal")])
+                    .header("content-length", "0")
+                    .header("if-match", &appended),
+                Some(&appended),
+            )?
+            .etag
+            .context("seal lacks ETag")?;
+        self.record(
+            Step::RejectSealedAppend,
+            self.append_block(size, b"x"),
+            Some(&sealed),
+        )?;
+        self.record(
+            Step::ReadSealedAppend,
+            self.request(Method::GET),
+            Some(&sealed),
+        )?;
+        Ok(())
+    }
+
     pub(super) fn sparse_page_writes(&mut self) -> Result<()> {
         let create = self
             .record(
@@ -275,6 +374,94 @@ impl Probe<'_> {
             Step::ReadClearedPages,
             self.request(Method::GET),
             Some(&cleared),
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn page_resize_sequence(&mut self) -> Result<()> {
+        self.setup(
+            self.create_blob("PageBlob", "pages")
+                .header("content-length", "0")
+                .header("x-ms-blob-content-length", "2048")
+                .header("x-ms-blob-sequence-number", SEQUENCE.to_string()),
+            201,
+            "create page blob for range and resize probe",
+        )?;
+        let written = self.setup(
+            self.request(Method::PUT)
+                .query(&[("comp", "page")])
+                .header("x-ms-page-write", "update")
+                .header("x-ms-range", "bytes=512-1535")
+                .body(&[b'p'; 2 * PAGE_SIZE][..]),
+            201,
+            "allocate two adjacent pages",
+        )?;
+        let initial = usable_etag(written.headers()).context("page write lacks ETag")?;
+        let list = |probe: &Self| probe.request(Method::GET).query(&[("comp", "pagelist")]);
+        self.record(Step::ListPageRanges, list(self), Some(initial))?;
+        self.record(
+            Step::ListBoundedPageRanges,
+            list(self).header("x-ms-range", "bytes=1024-1535"),
+            Some(initial),
+        )?;
+        self.record(
+            Step::RejectUnalignedPage,
+            self.request(Method::PUT)
+                .query(&[("comp", "page")])
+                .header("x-ms-page-write", "update")
+                .header("x-ms-range", UNALIGNED_PAGE_RANGE)
+                .body(&[b'x'; PAGE_SIZE][..]),
+            Some(initial),
+        )?;
+        let properties = |probe: &Self| {
+            probe
+                .request(Method::PUT)
+                .query(&[("comp", "properties")])
+                .header("content-length", "0")
+        };
+        let shrunk = self
+            .record(
+                Step::ShrinkPageBlob,
+                properties(self).header("x-ms-blob-content-length", "1024"),
+                Some(initial),
+            )?
+            .etag
+            .context("shrink lacks ETag")?;
+        self.record(
+            Step::ReadShrunkPages,
+            self.request(Method::GET),
+            Some(&shrunk),
+        )?;
+        let grown = self
+            .record(
+                Step::GrowAndMaxSequence,
+                properties(self)
+                    .header("x-ms-blob-content-length", "2048")
+                    .header("x-ms-sequence-number-action", "max")
+                    .header("x-ms-blob-sequence-number", "7"),
+                Some(&shrunk),
+            )?
+            .etag
+            .context("grow lacks ETag")?;
+        self.record(
+            Step::ReadGrownPages,
+            self.request(Method::GET),
+            Some(&grown),
+        )?;
+        let updated = self
+            .record(
+                Step::UpdateSequence,
+                properties(self)
+                    .header("x-ms-sequence-number-action", "update")
+                    .header("x-ms-blob-sequence-number", "2"),
+                Some(&grown),
+            )?
+            .etag
+            .context("sequence update lacks ETag")?;
+        self.record(
+            Step::IncrementSequence,
+            properties(self).header("x-ms-sequence-number-action", "increment"),
+            Some(&updated),
         )?;
         Ok(())
     }

@@ -205,11 +205,19 @@ fn with_fresh_container<T>(
     require_status(&created, 201, "create test container")?;
 
     let outcome = observe(&container, blob_url);
-    let cleanup = send(
+    let cleanup = delete_test_container(client, container_url, bearer)
+        .and_then(|response| require_status(&response, 202, "delete test container"));
+    finish_cleanup(outcome, cleanup)
+}
+
+fn delete_test_container(client: &Client, container_url: Url, bearer: &str) -> Result<Response> {
+    send(
         request(client, Method::DELETE, container_url).bearer_auth(bearer),
         "delete test container",
     )
-    .and_then(|response| require_status(&response, 202, "delete test container"));
+}
+
+fn finish_cleanup<T>(outcome: Result<T>, cleanup: Result<()>) -> Result<T> {
     match (outcome, cleanup) {
         (Ok(cassette), Ok(())) => Ok(cassette),
         (Ok(_), Err(error)) | (Err(error), Ok(())) => Err(error),
