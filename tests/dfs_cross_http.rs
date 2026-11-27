@@ -446,6 +446,42 @@ fn a_directory_rename_is_never_partly_visible_to_blob_listings() {
 }
 
 #[test]
+fn blob_delete_of_a_directory_needs_it_empty_and_children_go_first() {
+    let server = Emulator::start(None);
+    server.filesystem();
+    server.dfs_file("tree/sub/a.txt", b"a");
+    server.dfs_file("tree/b.txt", b"b");
+    let blob_delete = |path: &str| server.blob("DELETE", &format!("{LAKE}/{path}"), &[], b"");
+
+    // Azure refuses to delete a directory that still has children, for each directory in turn.
+    for directory in ["tree", "tree/sub"] {
+        let refused = blob_delete(directory);
+        assert_eq!(refused.status(), 409, "{directory}");
+        assert_eq!(header(&refused, "x-ms-error-code"), "DirectoryIsNotEmpty");
+        assert!(
+            refused
+                .text()
+                .unwrap()
+                .contains("This operation is not permitted on a non-empty directory.")
+        );
+    }
+    // Deleting children first, deepest first, empties each directory so it can go.
+    for path in ["tree/sub/a.txt", "tree/sub", "tree/b.txt", "tree"] {
+        assert_eq!(blob_delete(path).status(), 202, "{path}");
+    }
+    let listing = server
+        .blob(
+            "GET",
+            &format!("{LAKE}?restype=container&comp=list"),
+            &[],
+            b"",
+        )
+        .text()
+        .unwrap();
+    assert!(!listing.contains("<Name>tree"), "{listing}");
+}
+
+#[test]
 fn blob_leases_protect_files_from_dfs_operations() {
     let server = Emulator::start(None);
     server.filesystem();

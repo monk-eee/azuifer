@@ -615,8 +615,8 @@ fn describe(error: Error) -> Option<(StatusCode, &'static str, &'static str)> {
         ),
         Error::DirectoryNotEmpty => (
             S::CONFLICT,
-            "DirectoryNotEmpty",
-            "The directory is not empty.",
+            "DirectoryIsNotEmpty",
+            "This operation is not permitted on a non-empty directory.",
         ),
         Error::ResourceNotFound => (
             S::NOT_FOUND,
