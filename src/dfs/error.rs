@@ -40,11 +40,9 @@ type Described = (StatusCode, &'static str, &'static str);
 fn path_error(error: PathError) -> Described {
     use StatusCode as S;
     match error {
-        PathError::Shared(_) => (
-            S::INTERNAL_SERVER_ERROR,
-            "InternalError",
-            "The local storage operation failed.",
-        ),
+        // From<PathError> already files these under Request; keep the mapping honest.
+        PathError::Shared(error) => request_error(error),
+
         PathError::InvalidFlushPosition => (
             S::BAD_REQUEST,
             "InvalidFlushPosition",

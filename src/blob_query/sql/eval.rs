@@ -254,7 +254,7 @@ fn function(name: &str, args: &[Value]) -> Result<Value, SqlError> {
             else {
                 return runtime_error("TypeMismatch", "SUBSTRING positions are whole numbers");
             };
-            let skip = usize::try_from((start - 1).max(0)).unwrap_or(usize::MAX);
+            let skip = usize::try_from(start.saturating_sub(1).max(0)).unwrap_or(usize::MAX);
             let source = text(&args[0]);
             let chars = source.chars().skip(skip);
             Value::Str(match length {
@@ -282,7 +282,10 @@ impl Eval<'_> {
             Expr::Literal(value) => value.clone(),
             Expr::Column(path) => lookup(self.row, strip_alias(path, self.alias), self.scope),
             Expr::Negate(inner) => match number(&self.expr(inner)?) {
-                Some(Number::Int(int)) => Value::Int(-int),
+                Some(Number::Int(int)) => match int.checked_neg() {
+                    Some(negated) => Value::Int(negated),
+                    None => return runtime_error("Overflow", "integer overflow"),
+                },
                 Some(Number::Float(float)) => Value::Float(-float),
                 None => Value::Null,
             },
