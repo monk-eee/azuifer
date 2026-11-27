@@ -1,0 +1,196 @@
+{
+  "schema_version": 1,
+  "description": "Discrepancies and undocumented details in the cited Learn pages, SDK revision, and scoped live Azure recordings. This ledger does not certify Azuifer parity.",
+  "categories": [
+    "live_vs_docs",
+    "sdk_vs_docs",
+    "live_vs_sdk",
+    "docs_inconsistency",
+    "undocumented_live"
+  ],
+  "entries": [
+    {
+      "id": "WD-001",
+      "service": "blob",
+      "operation": "List Blobs",
+      "category": "undocumented_live",
+      "summary": "List XML ETags are unquoted; HTTP ETags use quotes.",
+      "expected_by_docs_or_sdk": "List Blobs gives an <Etag> placeholder without specifying quotation; Get Blob explicitly specifies quoted HTTP ETags for versions 2011-08-18 and later.",
+      "observed_behavior": "The live list_first and list_nested exchanges record etag=unquoted_match. Do not apply the HTTP quotation rule to the XML field.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/dfcd9c1fa1de3284d5e9c153a5f97fd9476b2979/docs-ref-conceptual/storageservices/List-Blobs.md",
+          "detail": "Response body (XML): <Etag>etag</Etag> does not specify quotation."
+        },
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/0eb2e907f98f5307eb3d70d85bca0144643b3536/docs-ref-conceptual/storageservices/Get-Blob.md",
+          "detail": "Response headers: HTTP ETag values are quoted from version 2011-08-18."
+        },
+        {
+          "kind": "live",
+          "reference": "cf4ae1673295b316bbd3ba8e9a12c6e5369fa909:tests/contracts/cassettes/blob-user-delegation-sas-list.json#list_first",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "user_delegation_sas",
+          "detail": "status=200; body.entries[0].etag=unquoted_match. Recording inspected on the unmerged cassette branch."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-003",
+      "service": "blob",
+      "operation": "Get Blob",
+      "category": "undocumented_live",
+      "summary": "Both checksum headers produce the specific BothCrc64AndMd5RangeHeaderPresent error.",
+      "expected_by_docs_or_sdk": "Get Blob documents HTTP 400 when both checksum headers are supplied, but does not name the error code; the cited Blob error table also omits it.",
+      "observed_behavior": "HTTP 400 with BothCrc64AndMd5RangeHeaderPresent in the error header and XML body. The status agrees with the docs.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/0eb2e907f98f5307eb3d70d85bca0144643b3536/docs-ref-conceptual/storageservices/Get-Blob.md",
+          "detail": "x-ms-range-get-content-crc64 documents the both-headers HTTP 400 case."
+        },
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/73da3c4c8e320ec0097168c335707da920c789d2/docs-ref-conceptual/storageservices/Blob-Service-Error-Codes.md",
+          "detail": "The error table does not list BothCrc64AndMd5RangeHeaderPresent."
+        },
+        {
+          "kind": "live",
+          "reference": "0682d29586aa366ba79f55a8cb7682627ec28799:tests/contracts/cassettes/blob-range-checksums.json#reject_both_checksums",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=400; error_header and body.code=both_crc64_and_md5_range_header_present. Recording inspected on the unmerged cassette branch."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-004",
+      "service": "blob",
+      "operation": "Get Blob / Get Blob Properties",
+      "category": "undocumented_live",
+      "summary": "Conditional 304 responses carry x-ms-error-code: ConditionNotMet.",
+      "expected_by_docs_or_sdk": "The conditional-header page specifies HTTP 304 but not the x-ms-error-code header on that response.",
+      "observed_behavior": "HEAD and GET not-modified exchanges have status=304, error_header=condition_not_met, and an empty body.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/788bc9a3b971a055687ad66dfb9cc300173f5ce6/docs-ref-conceptual/storageservices/Specifying-Conditional-Headers-for-Blob-Service-Operations.md",
+          "detail": "The read-condition tables specify 304 without the corresponding error header."
+        },
+        {
+          "kind": "live",
+          "reference": "0682d29586aa366ba79f55a8cb7682627ec28799:tests/contracts/cassettes/blob-conditional-reads.json#head_not_modified",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "bearer",
+          "detail": "status=304; error_header=condition_not_met; body.kind=empty. get_not_modified and mixed_not_modified agree. Recording inspected on the unmerged cassette branch."
+        }
+      ],
+      "status": "observed"
+    },
+    {
+      "id": "WD-009",
+      "service": "file",
+      "operation": "Create Hard Link / Create Symbolic Link",
+      "category": "sdk_vs_docs",
+      "summary": "Learn lists x-ms-file-file-id; the Python SDK reads x-ms-file-id.",
+      "expected_by_docs_or_sdk": "The Learn response-header tables name x-ms-file-file-id.",
+      "observed_behavior": "The generated Python SDK deserializes x-ms-file-id for both operations. Live NFS behavior has not been established.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/b99009d88ad8c6e1457ef7c2cc6ece41e2b32b68/docs-ref-conceptual/storageservices/Create-Hard-Link.md",
+          "detail": "Common response headers list x-ms-file-file-id."
+        },
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/253c83faa4bc3fc99aeb332b5f5a65b98cced81b/docs-ref-conceptual/storageservices/Create-Symbolic-Link.md",
+          "detail": "Common response headers list x-ms-file-file-id."
+        },
+        {
+          "kind": "sdk",
+          "reference": "https://github.com/Azure/azure-sdk-for-python/blob/040660ed8e5a0650d90321d799521b542bec8cb0/sdk/storage/azure-storage-file-share/azure/storage/fileshare/_generated/operations/_file_operations.py",
+          "detail": "create_symbolic_link and create_hard_link parse x-ms-file-id at lines 3664 and 3853."
+        }
+      ],
+      "status": "awaiting_live_recording"
+    },
+    {
+      "id": "WD-011",
+      "service": "file",
+      "operation": "Read Symbolic Link",
+      "category": "docs_inconsistency",
+      "summary": "The Read Symbolic Link page disagrees with itself about the first supported API version.",
+      "expected_by_docs_or_sdk": "The introduction says 2025-07-05 and later.",
+      "observed_behavior": "The x-ms-version request-header row says 2025-05-05 and later. The correct live boundary needs recording.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/b99009d88ad8c6e1457ef7c2cc6ece41e2b32b68/docs-ref-conceptual/storageservices/Read-Symbolic-Link.md",
+          "detail": "Introduction specifies 2025-07-05."
+        },
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/b99009d88ad8c6e1457ef7c2cc6ece41e2b32b68/docs-ref-conceptual/storageservices/Read-Symbolic-Link.md",
+          "detail": "Request-header table specifies 2025-05-05."
+        }
+      ],
+      "status": "awaiting_live_recording"
+    }
+  ],
+  "observations": [
+    {
+      "id": "WD-002",
+      "service": "blob",
+      "operation": "List Blobs",
+      "category": "documented_match",
+      "summary": "Echoed continuation markers are documented behavior, not an Azure discrepancy.",
+      "expected_by_docs_or_sdk": "The response-body section says Marker is present when specified on the request URI.",
+      "observed_behavior": "The live list_next exchange has echoed_marker=matches. The earlier omission was in Azuifer, not Learn.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/dfcd9c1fa1de3284d5e9c153a5f97fd9476b2979/docs-ref-conceptual/storageservices/List-Blobs.md",
+          "detail": "Response body (XML) explicitly describes Marker echo."
+        },
+        {
+          "kind": "live",
+          "reference": "cf4ae1673295b316bbd3ba8e9a12c6e5369fa909:tests/contracts/cassettes/blob-user-delegation-sas-list.json#list_next",
+          "source": "azure",
+          "api_version": "2023-11-03",
+          "auth_mode": "user_delegation_sas",
+          "detail": "status=200; body.echoed_marker=matches. Recording inspected on the unmerged cassette branch."
+        }
+      ],
+      "status": "documented_match"
+    },
+    {
+      "id": "WD-010",
+      "service": "file",
+      "operation": "Read Symbolic Link",
+      "category": "needs_evidence",
+      "summary": "The earlier Get Symbolic Link versus Read Symbolic Link claim is not substantiated by the cited Learn pages.",
+      "expected_by_docs_or_sdk": "An earlier note referred to Get Symbolic Link.",
+      "observed_behavior": "Both the operation index and reference page say Read Symbolic Link; the request is GET ?restype=symboliclink. A second authoritative naming source is still needed.",
+      "evidence": [
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/56b890f55117464925f121700890e6eae01aadf7/docs-ref-conceptual/storageservices/Operations-on-Files.md",
+          "detail": "The index names Read Symbolic Link."
+        },
+        {
+          "kind": "docs",
+          "reference": "https://github.com/MicrosoftDocs/azure-docs-rest-apis/blob/b99009d88ad8c6e1457ef7c2cc6ece41e2b32b68/docs-ref-conceptual/storageservices/Read-Symbolic-Link.md",
+          "detail": "The reference title also names Read Symbolic Link."
+        }
+      ],
+      "status": "needs_evidence"
+    }
+  ]
+}

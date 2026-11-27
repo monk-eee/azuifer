@@ -21,6 +21,10 @@ jobs:
       RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Validate wire discrepancy ledger
+        run: |
+          python scripts/audit-wire-discrepancies.py
+          python -m unittest discover -s scripts -p test_audit_wire_discrepancies.py
       - run: rustup show
       - run: cargo fetch --locked
       - run: cargo fmt --check

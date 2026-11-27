@@ -1,0 +1,23 @@
+{
+  "base": "main",
+  "hotspot_lines": 800,
+  "extra_checks": [
+    {
+      "name": "wire-discrepancies-ledger",
+      "command": ["python", "scripts/audit-wire-discrepancies.py"]
+    },
+    {
+      "name": "azure-recording-plan",
+      "when_exists": "scripts/audit-azure-recording-plan.py",
+      "command": ["python", "scripts/audit-azure-recording-plan.py"]
+    }
+  ],
+  "tallies": [
+    {
+      "name": "wire-discrepancies (docs vs SDK vs live Azure)",
+      "path": "docs/compatibility/wire-discrepancies.json",
+      "items_key": "entries",
+      "category_key": "category"
+    }
+  ]
+}
