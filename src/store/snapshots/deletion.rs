@@ -1,17 +1,18 @@
 //! Deleting snapshots, versions and blobs, soft delete and its expiry, and Undelete Blob.
 
 use super::{
-    DELETED_TAGS, Kind, Tombstone, archive, drop_tags, find, is_versioned, missing, move_tags,
-    move_tags_to, release, retention, unique_ticks,
+    Archived, DELETED_TAGS, Kind, Tombstone, archive, drop_tags, find, is_versioned, missing,
+    move_tags, move_tags_to, release, retention, unique_ticks,
 };
 use crate::{
+    blob_immutability::Protection,
     blob_snapshot::{DeleteSnapshots, Removal, Selector},
     conditions::Guard,
     domain::{BlobKey, Error, Result},
     stamp::Ticks,
     store::{
         BlobRow, Mode, Store, blob, blob_params, blobs::guard_delete, container, db_error,
-        page_history, pages, remove_staged, require_blob,
+        immutability, page_history, pages, remove_staged, require_blob,
     },
 };
 use rusqlite::{Connection, OptionalExtension as _, params};
@@ -182,7 +183,18 @@ fn retire_current(
             Some(version) => version,
             None => unique_ticks(db, key, Ticks::from_seconds(row.info.entity.modified), None)?,
         };
-        archive(db, mode, key, id, Kind::Version, state, None)?;
+        archive(
+            db,
+            mode,
+            key,
+            id,
+            Archived {
+                kind: Kind::Version,
+                state,
+                tombstone: None,
+                protection: row.info.lifecycle.protection,
+            },
+        )?;
         move_tags(db, key, state)?;
         Deletion::Retained
     } else {
@@ -211,7 +223,18 @@ fn retire_current(
                     deleted_at: now,
                     expires_at: now + retention,
                 };
-                archive(db, mode, key, id, Kind::Deleted, Ticks(0), Some(tombstone))?;
+                archive(
+                    db,
+                    mode,
+                    key,
+                    id,
+                    Archived {
+                        kind: Kind::Deleted,
+                        state: Ticks(0),
+                        tombstone: Some(tombstone),
+                        protection: Protection::default(),
+                    },
+                )?;
                 Deletion::Retained
             }
             None => {
@@ -229,8 +252,10 @@ fn retire_current(
 }
 
 /// Removes a blob that reached its expiry. Azure does not soft-delete an expired
-/// blob, so the blob and its snapshots go for good; an account that keeps
-/// versions keeps the blob as a version.
+/// blob, so the blob and its unprotected snapshots go for good; an account that
+/// keeps versions keeps the blob (and any WORM state) as a version. On a
+/// non-versioned account, an active immutability policy or legal hold prevents
+/// the lazy sweep from deleting the protected blob.
 pub(in crate::store) fn expire(
     db: &Connection,
     mode: &Mode,
@@ -240,32 +265,50 @@ pub(in crate::store) fn expire(
     released: &mut Vec<Uuid>,
 ) -> Result<()> {
     let [account, container, name] = blob_params(key);
+    let versioned = is_versioned(db, account)?;
+    if !versioned && row.info.lifecycle.protection.check_delete(now).is_err() {
+        return Ok(());
+    }
     released.extend(remove_staged(db, key)?);
     let ranges = page_history::extents_where(
         db,
-        "b.account=?1 AND b.container=?2 AND b.name=?3 AND b.kind=1",
-        params![account, container, name],
+        "b.account=?1 AND b.container=?2 AND b.name=?3 AND b.kind=1
+         AND b.legal_hold=0 AND (b.immutability_mode='' OR b.immutable_until<=?4)",
+        params![account, container, name, now],
     )?;
     let mut delete = db
         .prepare(
-            "DELETE FROM blob_history WHERE account=?1 AND container=?2 AND name=?3 AND kind=1
+            "DELETE FROM blob_history
+             WHERE account=?1 AND container=?2 AND name=?3 AND kind=1
+               AND legal_hold=0 AND (immutability_mode='' OR immutable_until<=?4)
              RETURNING content_id",
         )
         .map_err(db_error)?;
     let snapshots: Vec<Uuid> = delete
-        .query_map(params![account, container, name], |row| row.get(0))
+        .query_map(params![account, container, name, now], |row| row.get(0))
         .map_err(db_error)?
         .collect::<rusqlite::Result<_>>()
         .map_err(db_error)?;
     released.extend(snapshots);
     released.extend(page_history::free(db, mode, ranges)?);
     let id = row.info.entity.id;
-    if is_versioned(db, account)? {
+    if versioned {
         let state = match row.info.entity.version {
             Some(version) => version,
             None => unique_ticks(db, key, Ticks::from_millis(now), None)?,
         };
-        archive(db, mode, key, id, Kind::Version, state, None)?;
+        archive(
+            db,
+            mode,
+            key,
+            id,
+            Archived {
+                kind: Kind::Version,
+                state,
+                tombstone: None,
+                protection: row.info.lifecycle.protection,
+            },
+        )?;
         move_tags(db, key, state)?;
     } else {
         drop_tags(db, key, 0)?;
@@ -292,6 +335,7 @@ pub(in crate::store) fn delete_current(
         return Err(Error::SnapshotsPresent);
     }
     if snapshots != DeleteSnapshots::Refuse {
+        immutability::check_blob_snapshots(db, key, now)?;
         remove_states(db, mode, key, Kind::Snapshot, None, now, released)?;
     }
     if snapshots == DeleteSnapshots::Only {
@@ -318,6 +362,7 @@ fn delete_retained(
     else {
         return Err(missing(db, key));
     };
+    kept.row.info.lifecycle.protection.check_delete(now)?;
     guard.conditions.check(Some(kept.row.info.entity), false)?;
     remove_states(db, mode, key, kind, Some(state), now, released)?;
     Ok(if retention(db, &key.container.account)?.is_some() {

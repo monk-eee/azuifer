@@ -208,7 +208,11 @@ pub(crate) fn lifecycle_headers(headers: &mut HeaderMap, lifecycle: &Lifecycle) 
 }
 
 /// The lifecycle elements of a List Blobs `Properties`.
-pub(crate) fn lifecycle_elements(xml: &mut Xml, lifecycle: &Lifecycle) -> Result<()> {
+pub(crate) fn lifecycle_elements(
+    xml: &mut Xml,
+    lifecycle: &Lifecycle,
+    force_legal_hold: bool,
+) -> Result<()> {
     if let Some(expires) = lifecycle.expires {
         xml.element("Expiry-Time", &blob_expiry::http_time(expires)?);
     }
@@ -220,7 +224,7 @@ pub(crate) fn lifecycle_elements(xml: &mut Xml, lifecycle: &Lifecycle) -> Result
         );
         xml.element("ImmutabilityPolicyMode", mode.name());
     }
-    if protection.has_policy() || protection.legal_hold {
+    if protection.has_policy() || protection.legal_hold || force_legal_hold {
         xml.element(
             "LegalHold",
             if protection.legal_hold {

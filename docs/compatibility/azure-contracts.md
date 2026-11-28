@@ -2,7 +2,7 @@
 
 The [Rust harness](../../tests/contracts/mod.rs) runs the same requests against Azure and the built Azuifer binary over HTTPS. Each case pins API version `2023-11-03`. The reviewed Azure cassette is the baseline. A live check compares each service with it independently: Azure drift, Azuifer drift, or both can fail the check. Matching each other is not enough.
 
-The [recording plan](azure-recording-plan.md) tracks **270 of 1,294 planned exchanges matched** at `2023-11-03`: 187 Blob, 35 Queue, and 48 Table. There are **51 reviewed cassette files** (34 Blob, 7 Queue, 10 Table); the 52 offline replay tests include a drift-detection test, not a 52nd Azure file. DFS and FileREST have no reviewed live cassettes. The [wire ledger](wire-discrepancies.json) tracks 31 pinned entries; some are documentation or SDK findings still awaiting a live run.
+The [recording plan](azure-recording-plan.md) tracks **270 of 1,310 planned exchanges matched** at `2023-11-03`: 187 Blob, 35 Queue, and 48 Table. There are **51 reviewed cassette files** (34 Blob, 7 Queue, 10 Table); the 52 offline replay tests include a drift-detection test, not a 52nd Azure file. DFS and FileREST have no reviewed live cassettes. The [wire ledger](wire-discrepancies.json) tracks 31 pinned entries; some are documentation or SDK findings still awaiting a live run.
 
 Use `azuifer conformance export --format markdown` (or omit the format flag for JSON) for the audited totals and explicit operation/auth credits. A scenario can verify a rejection without establishing full operation parity. The legacy JSON `azure_differential_verified` flag remains `false` for full Blob/SharedKey verification; use `live_azure_evidence` for the actual recorded progress.
 

@@ -164,6 +164,13 @@ CREATE TABLE IF NOT EXISTS deleted_containers (
     PRIMARY KEY (account, name, version)
 ) STRICT;";
 
+/// Version 7 (ADR-0039): per-version and per-snapshot immutability policies and legal
+/// holds on `blob_history`, so retired versions and snapshots carry their own WORM state.
+const V7: &str = "
+ALTER TABLE blob_history ADD COLUMN immutable_until INTEGER;
+ALTER TABLE blob_history ADD COLUMN immutability_mode TEXT NOT NULL DEFAULT '';
+ALTER TABLE blob_history ADD COLUMN legal_hold INTEGER NOT NULL DEFAULT 0;";
+
 /// Each migration is keyed by the `PRAGMA user_version` it leaves behind. Numbers
 /// need not be consecutive: branches that add migrations in parallel reserve their
 /// own number, and a database applies every migration above its version.
@@ -174,6 +181,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (4, V4),
     (5, super::dfs_paths::SCHEMA),
     (6, V6),
+    (7, V7),
 ];
 
 /// The newest schema this build writes.
@@ -229,7 +237,7 @@ mod tests {
         let version: i64 = db
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
     }
 
     #[test]
@@ -351,7 +359,7 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, 99, "the version is not lowered");
-        assert_eq!(supported(), 6);
+        assert_eq!(supported(), 7);
     }
 
     #[test]
@@ -365,6 +373,65 @@ mod tests {
         let version: i64 = db
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
+    }
+
+    #[test]
+    fn v6_database_migrates_to_v7_preserving_current_lifecycle_and_adding_history_protection() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.pragma_update(None, "foreign_keys", true).unwrap();
+        db.execute_batch(BASE).unwrap();
+        for (version, sql) in MIGRATIONS.iter().filter(|(version, _)| *version <= 6) {
+            db.execute_batch(sql).unwrap();
+            db.pragma_update(None, "user_version", version).unwrap();
+        }
+        db.execute_batch(
+            "INSERT INTO containers (account, name, id, modified) VALUES ('acct', 'box', x'01', 5);
+             INSERT INTO blobs (account, container, name, id, modified, length, content_type, md5, metadata)
+             VALUES ('acct', 'box', 'a', x'02', 7, 3, 'text/plain', '', '{}');
+             INSERT INTO blob_lifecycle (account, container, name, immutable_until, immutability_mode, legal_hold)
+             VALUES ('acct', 'box', 'a', 9000, 'locked', 1);
+             INSERT INTO blob_history
+               (account, container, name, kind, state_id, content_id, modified, etag, created, length,
+                content_type, content_encoding, content_language, content_disposition, cache_control,
+                md5, metadata, access_tier, access_tier_changed, copy_id, copy_source, copy_completed)
+             VALUES ('acct', 'box', 'a', 2, 10, x'02', 7, x'02', 7, 3, '', '', '', '', '', '', '{}',
+                '', 0, '', '', 0);",
+        )
+        .unwrap();
+        migrate(&mut db).unwrap();
+        let version: i64 = db
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 7);
+        let lifecycle: (Option<i64>, String, i64) = db
+            .query_row(
+                "SELECT immutable_until, immutability_mode, legal_hold FROM blob_lifecycle",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(lifecycle, (Some(9000), "locked".into(), 1));
+        let history: (Option<i64>, String, i64) = db
+            .query_row(
+                "SELECT immutable_until, immutability_mode, legal_hold FROM blob_history",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(history, (None, String::new(), 0));
+        db.execute(
+            "UPDATE blob_history SET immutable_until=12000, immutability_mode='unlocked', legal_hold=1",
+            [],
+        )
+        .unwrap();
+        let updated: (Option<i64>, String, i64) = db
+            .query_row(
+                "SELECT immutable_until, immutability_mode, legal_hold FROM blob_history",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(updated, (Some(12000), "unlocked".into(), 1));
     }
 }

@@ -12,6 +12,7 @@ use super::{
     require_blob, tags,
 };
 use crate::{
+    blob_immutability::{PolicyMode, Protection},
     blob_snapshot::Selector,
     blob_tags::Tags,
     conditions::Guard,
@@ -99,6 +100,12 @@ fn retained(row: &Row<'_>, now: i64) -> rusqlite::Result<Retained> {
     }
     let deleted_at: Option<i64> = row.get(at + 2)?;
     let expires_at: Option<i64> = row.get(at + 3)?;
+    let mode: String = row.get(at + 5)?;
+    blob.info.lifecycle.protection = Protection {
+        until: row.get(at + 4)?,
+        mode: PolicyMode::from_stored(&mode),
+        legal_hold: row.get::<_, i64>(at + 6)? != 0,
+    };
     Ok(Retained {
         row: blob,
         tombstone: deleted_at
@@ -232,39 +239,43 @@ fn unique_ticks(
     }
 }
 
-/// Copies the current blob row (and its block list) into a history row. The row
-/// shares the blob's extent; the in-memory backend copies the bytes.
-fn archive(
-    db: &Connection,
-    mode: &Mode,
-    key: &BlobKey,
-    id: Uuid,
+struct Archived {
     kind: Kind,
     state: Ticks,
     tombstone: Option<Tombstone>,
-) -> Result<()> {
+    protection: Protection,
+}
+
+/// Copies the current blob row (and its block list) into a history row. The row
+/// shares the blob's extent; the in-memory backend copies the bytes.
+fn archive(db: &Connection, mode: &Mode, key: &BlobKey, id: Uuid, entry: Archived) -> Result<()> {
     let [account, container, name] = blob_params(key);
     db.execute(
         "INSERT INTO blob_history
             (account, container, name, kind, state_id, content_id, modified, etag, created, length,
              content_type, content_encoding, content_language, content_disposition, cache_control,
              md5, metadata, access_tier, access_tier_changed, copy_id, copy_source, copy_completed,
-             bytes, deleted_at, expires_at, blob_type, sequence_number, append_count, sealed)
+             bytes, deleted_at, expires_at, blob_type, sequence_number, append_count, sealed,
+             immutable_until, immutability_mode, legal_hold)
          SELECT account, container, name, ?4, ?5, id, modified, COALESCE(etag, id),
                 CASE WHEN created=0 THEN modified ELSE created END, length,
                 content_type, content_encoding, content_language, content_disposition, cache_control,
                 md5, metadata, access_tier, access_tier_changed, copy_id, copy_source, copy_completed,
-                CASE WHEN ?6 THEN bytes END, ?7, ?8, blob_type, sequence_number, append_count, sealed
+                CASE WHEN ?6 THEN bytes END, ?7, ?8, blob_type, sequence_number, append_count, sealed,
+                ?9, ?10, ?11
          FROM blobs WHERE account=?1 AND container=?2 AND name=?3",
         params![
             account,
             container,
             name,
-            kind.code(),
-            state.0,
+            entry.kind.code(),
+            entry.state.0,
             matches!(mode, Mode::Memory { .. }),
-            tombstone.map(|t| t.deleted_at),
-            tombstone.map(|t| t.expires_at),
+            entry.tombstone.map(|t| t.deleted_at),
+            entry.tombstone.map(|t| t.expires_at),
+            entry.protection.until,
+            entry.protection.mode.map_or("", PolicyMode::name),
+            i64::from(entry.protection.legal_hold),
         ],
     )
     .map_err(db_error)?;
@@ -272,10 +283,10 @@ fn archive(
         "INSERT INTO history_blocks
          SELECT account, container, name, ?4, ?5, position, block_id, offset, length
          FROM committed_blocks WHERE account=?1 AND container=?2 AND name=?3",
-        params![account, container, name, kind.code(), state.0],
+        params![account, container, name, entry.kind.code(), entry.state.0],
     )
     .map_err(db_error)?;
-    page_history::archive_ranges(db, key, kind.code(), state.0)?;
+    page_history::archive_ranges(db, key, entry.kind.code(), entry.state.0)?;
     pin(mode, id);
     Ok(())
 }
@@ -289,7 +300,18 @@ pub(super) fn snapshot_current(
     now: i64,
 ) -> Result<Ticks> {
     let time = unique_ticks(db, key, Ticks::from_millis(now), None)?;
-    archive(db, mode, key, id, Kind::Snapshot, time, None)?;
+    archive(
+        db,
+        mode,
+        key,
+        id,
+        Archived {
+            kind: Kind::Snapshot,
+            state: time,
+            tombstone: None,
+            protection: Protection::default(),
+        },
+    )?;
     Ok(time)
 }
 
@@ -357,11 +379,15 @@ pub(super) fn begin_write(
             mode,
             key,
             old.info.entity.id,
-            Kind::Version,
-            state,
-            None,
+            Archived {
+                kind: Kind::Version,
+                state,
+                tombstone: None,
+                protection: old.info.lifecycle.protection,
+            },
         )?;
         move_tags(db, key, state)?;
+        super::expiry::clear_protection(db, key)?;
     } else if change == Change::Content
         && let Some(retention) = retention(db, account)?
     {
@@ -375,9 +401,12 @@ pub(super) fn begin_write(
             mode,
             key,
             old.info.entity.id,
-            Kind::Snapshot,
-            state,
-            Some(tombstone),
+            Archived {
+                kind: Kind::Snapshot,
+                state,
+                tombstone: Some(tombstone),
+                protection: Protection::default(),
+            },
         )?;
     }
     Ok(new)
@@ -420,7 +449,9 @@ fn find(
     let [account, container, name] = blob_params(key);
     db.query_row(
         &format!(
-            "SELECT {HISTORY_BLOB}, kind, state_id, deleted_at, expires_at FROM blob_history
+            "SELECT {HISTORY_BLOB}, kind, state_id, deleted_at, expires_at,
+                    immutable_until, immutability_mode, legal_hold
+             FROM blob_history
              WHERE account=?1 AND container=?2 AND name=?3 AND kind=?4 AND state_id=?5
                AND (deleted_at IS NULL OR expires_at > ?6)"
         ),
@@ -443,7 +474,19 @@ pub(super) fn find_version(
         .map(|kept| kept.row))
 }
 
-fn missing(db: &Connection, key: &BlobKey) -> Error {
+/// A live (not soft-deleted) snapshot.
+pub(super) fn find_snapshot(
+    db: &Connection,
+    key: &BlobKey,
+    snapshot: Ticks,
+    now: i64,
+) -> Result<Option<BlobRow>> {
+    Ok(find(db, key, Kind::Snapshot, snapshot, now)?
+        .filter(|kept| kept.tombstone.is_none())
+        .map(|kept| kept.row))
+}
+
+pub(super) fn missing(db: &Connection, key: &BlobKey) -> Error {
     match container(db, &key.container) {
         Ok(_) => Error::BlobMissing,
         Err(error) => error,
@@ -550,9 +593,12 @@ impl Store {
                 mode,
                 &key,
                 row.info.entity.id,
-                Kind::Snapshot,
-                time,
-                None,
+                Archived {
+                    kind: Kind::Snapshot,
+                    state: time,
+                    tombstone: None,
+                    protection: Protection::default(),
+                },
             )?;
             if let Some(metadata) = metadata {
                 let [account, container, name] = blob_params(&key);

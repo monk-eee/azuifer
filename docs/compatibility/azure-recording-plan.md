@@ -6,12 +6,12 @@ The target is the five Azure Storage REST services, using the operations and aut
 
 | Service | Operations | Advertised operation/auth pairs | Unsupported operations | Journey exchanges | Extra grid exchanges | Target |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Blob | 55 | 303 | 1 | 277 | 244 | 521 |
+| Blob | 55 | 303 | 1 | 293 | 244 | 537 |
 | DFS | 19 | 112 | 0 | 129 | 91 | 220 |
 | FileREST | 44 | 197 | 0 | 182 | 153 | 335 |
 | Queue | 17 | 72 | 0 | 49 | 52 | 101 |
 | Table | 19 | 72 | 1 | 65 | 52 | 117 |
-| **Total** | **154** | **756** | **2** | **702** | **592** | **1,294** |
+| **Total** | **154** | **756** | **2** | **718** | **592** | **1,310** |
 
 This is a finite coverage target, not a claim that every possible input is covered. It tests each advertised operation/auth pair once and adds separate exchanges for meaningful branches: conditions, checksums and limits, continuations, post-mutation state, failure atomicity, expiry, feature switches, and shared Blob/DFS state. It does not multiply every branch by every credential. Add a row when an API version, profile, or new variant changes contract behavior. Keep newer-version evidence separate until that version is adopted; a client reaching the emulator through version fallback is not evidence for the newer version. SMB and NFS wire exchanges, control-plane APIs, infrastructure performance, and emulator-only fault injection are out of scope.
 
@@ -58,7 +58,7 @@ The current target supports `flat`, same-account Blob `copy` with an authorized 
 
 Corporate storage controls (for example Secure Future Initiative restrictions)
 can disallow Shared Key and public blob access. This affects what an approved
-target can record, not Azuifer's advertised scope or the full **1,294-exchange**
+target can record, not Azuifer's advertised scope or the full **1,310-exchange**
 target. The `Auth` and `Profile` columns describe separate prerequisites:
 
 | Requirement | What can be recorded |
@@ -78,7 +78,10 @@ from the wrong profile as a match.
 Read-only HEAD checks found neither `$root` nor `$logs` on the current target.
 B-36 still needs a disposable singleton profile: neither container was created,
 populated, or listed. B-46 isolates the invalid-name rejection without accessing
-either singleton or changing account settings.
+either singleton or changing account settings. B-49 tracks
+[ADR-0039](../adr.d/0039-blob-version-immutability.md) for per-version and
+per-snapshot immutability policies and legal holds on a versioned WORM-enabled
+profile.
 
 | ID | Profile | Auth | Ordered exchanges | Count | Evidence |
 | --- | --- | --- | --- | ---: | --- |
@@ -130,6 +133,7 @@ either singleton or changing account settings.
 | B-46 | flat | Bearer | Reject a container-properties HEAD on a synthetic invalid dollar-prefixed name | 1 | [fixture](../../tests/contracts/cassettes/blob-invalid-system-container-name.json) |
 | B-47 | copy | Bearer | Put Blob From URL with a matching source MD5; Put Blob From URL with a wrong source MD5; read the destination to confirm none exists; Put Block From URL with a matching source MD5; Put Block From URL with a matching source CRC64; Put Block From URL with a wrong source CRC64; Get Block List uncommitted; Put Page From URL with a matching source MD5; Put Page From URL with a wrong source MD5; Put Page From URL with both source hash headers; Get Page Ranges; Append Block From URL with a matching source CRC64; Append Block From URL with a wrong source MD5; read the append blob | 14 | pending |
 | B-48 | copy | Bearer | Copy Blob of an append blob with x-ms-seal-blob true; Get Blob Properties of the destination; Append Block to the sealed destination; Copy Blob of the sealed destination with x-ms-seal-blob false; Get Blob Properties of the second copy; Copy Blob of a page blob with x-ms-seal-blob true; read the destination to confirm none exists | 7 | pending |
+| B-49 | history + config | Bearer | Set an unlocked immutability policy on a versioned blob via versionid; set a legal hold on that version via versionid; overwrite the blob with Put Blob to retire that version into history; read Get Blob Properties on the new current version to verify it starts unprotected; read Get Blob Properties on the retired historical versionid to verify its policy and legal hold survived retirement; list blobs with include=versions,immutabilitypolicy,legalhold to verify per-version policy and legal-hold XML elements; try Delete Blob on the protected historical versionid while the legal hold is active; clear the legal hold on the historical versionid; try Delete Blob on the historical versionid while the unlocked policy is still active; delete the unlocked policy on the historical versionid; delete the now-unprotected historical versionid; set an unlocked immutability policy on a blob snapshot via snapshot; read Get Blob Properties on that snapshot to verify its independent policy; try Delete Blob with x-ms-delete-snapshots include while the snapshot is protected; delete the snapshot's unlocked policy via snapshot; delete the blob with x-ms-delete-snapshots include | 16 | pending |
 
 ### DFS and Blob/DFS
 

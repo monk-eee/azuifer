@@ -611,6 +611,8 @@ pub(crate) enum Include {
     Versions,
     Deleted,
     Tags,
+    ImmutabilityPolicy,
+    LegalHold,
 }
 
 pub(crate) struct ListRequest {

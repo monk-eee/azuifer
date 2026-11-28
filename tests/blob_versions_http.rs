@@ -1938,3 +1938,486 @@ fn query_blob_contents_reads_snapshots_and_rejects_bad_requests() {
     );
     assert_eq!(status_of(run("missing.csv", "", select())), 404);
 }
+
+fn http_date_in(seconds: u64) -> String {
+    let now = SystemTime::now() + Duration::from_secs(CLOCK_OFFSET.get());
+    httpdate::fmt_http_date(now + Duration::from_secs(seconds))
+}
+
+#[test]
+fn version_immutability_policies_and_legal_holds_protect_versions_and_survive_overwrite() {
+    let server = Emulator::start(None, &["--versioning-accounts", ACCOUNT, "--test-clock"]);
+    server.create_container();
+    let name = "worm.txt";
+    let v1_put = server.put(name, &[], b"v1-data");
+    assert_eq!(v1_put.status(), 201);
+    let v1 = header(&v1_put, "x-ms-version-id");
+    let v1_etag = header(&v1_put, "etag");
+
+    let set_policy = |selector: &str, until: &str, mode: Option<&str>| {
+        let mut headers = vec![("x-ms-immutability-policy-until-date", until)];
+        if let Some(mode) = mode {
+            headers.push(("x-ms-immutability-policy-mode", mode));
+        }
+        server.send(
+            Method::PUT,
+            &format!("{}?comp=immutabilityPolicies{selector}", blob(name)),
+            &headers,
+            b"",
+        )
+    };
+    let delete_policy = |selector: &str| {
+        server.send(
+            Method::DELETE,
+            &format!("{}?comp=immutabilityPolicies{selector}", blob(name)),
+            &[],
+            b"",
+        )
+    };
+    let set_hold = |selector: &str, value: &str| {
+        server.send(
+            Method::PUT,
+            &format!("{}?comp=legalhold{selector}", blob(name)),
+            &[("x-ms-legal-hold", value)],
+            b"",
+        )
+    };
+    let v1_sel = format!("&versionid={}", encode(&v1));
+
+    // Set Unlocked policy on the current version via explicit versionid, then lock + legal hold.
+    let t1 = http_date_in(120);
+    let set = set_policy(&v1_sel, &t1, Some("Unlocked"));
+    assert_eq!(set.status(), 200);
+    assert_eq!(header(&set, "x-ms-immutability-policy-mode"), "unlocked");
+    assert_eq!(header(&set, "x-ms-immutability-policy-until-date"), t1);
+    assert_eq!(
+        header(&server.send(Method::HEAD, &blob(name), &[], b""), "etag"),
+        v1_etag,
+        "policy must not change ETag"
+    );
+    let locked = set_policy(&v1_sel, &t1, Some("Locked"));
+    assert_eq!(locked.status(), 200);
+    assert_eq!(header(&locked, "x-ms-immutability-policy-mode"), "locked");
+    assert_eq!(set_hold(&v1_sel, "true").status(), 200);
+
+    // Overwrite creates v2 unprotected while v1 keeps its Locked policy and Legal Hold in history.
+    let v2_put = server.put(name, &[], b"v2-data");
+    assert_eq!(v2_put.status(), 201);
+    let v2 = header(&v2_put, "x-ms-version-id");
+    let v2_sel = format!("&versionid={}", encode(&v2));
+    assert_ne!(v1, v2);
+
+    let v2_head = server.send(Method::HEAD, &blob(name), &[], b"");
+    assert!(
+        !v2_head
+            .headers()
+            .contains_key("x-ms-immutability-policy-mode")
+    );
+    assert!(!v2_head.headers().contains_key("x-ms-legal-hold"));
+
+    for method in [Method::HEAD, Method::GET] {
+        let resp = server.send(
+            method,
+            &format!("{}?versionid={}", blob(name), encode(&v1)),
+            &[],
+            b"",
+        );
+        assert_eq!(resp.status(), 200);
+        assert_eq!(header(&resp, "x-ms-immutability-policy-mode"), "locked");
+        assert_eq!(header(&resp, "x-ms-immutability-policy-until-date"), t1);
+        assert_eq!(header(&resp, "x-ms-legal-hold"), "true");
+    }
+
+    // List Blobs with include=versions,immutabilitypolicy,legalhold surfaces per-version state.
+    let listed = server.list("include=versions,immutabilitypolicy,legalhold");
+    let chunks: Vec<&str> = listed.split("<Blob>").skip(1).collect();
+    assert_eq!(chunks.len(), 2, "{listed}");
+    assert!(chunks[0].contains(&format!("<VersionId>{v1}</VersionId>")));
+    assert!(chunks[0].contains("<ImmutabilityPolicyMode>locked</ImmutabilityPolicyMode>"));
+    assert!(chunks[0].contains(&format!(
+        "<ImmutabilityPolicyUntilDate>{t1}</ImmutabilityPolicyUntilDate>"
+    )));
+    assert!(chunks[0].contains("<LegalHold>true</LegalHold>"));
+    assert!(chunks[1].contains(&format!("<VersionId>{v2}</VersionId>")));
+    assert!(!chunks[1].contains("<ImmutabilityPolicyMode>"));
+    assert!(chunks[1].contains("<LegalHold>false</LegalHold>"));
+
+    // Locked historical v1 refuses shortening, unlocking, policy deletion, and version/container deletion.
+    let shorten = set_policy(&v1_sel, &http_date_in(30), Some("Locked"));
+    assert_eq!(shorten.status(), 409);
+    assert_eq!(error_code(shorten), "BlobImmutableDueToPolicy");
+    let unlock = set_policy(&v1_sel, &http_date_in(300), Some("Unlocked"));
+    assert_eq!(unlock.status(), 409);
+    assert_eq!(error_code(unlock), "BlobImmutableDueToPolicy");
+    let del_pol = delete_policy(&v1_sel);
+    assert_eq!(del_pol.status(), 409);
+    assert_eq!(error_code(del_pol), "BlobImmutableDueToPolicy");
+
+    // Locked historical v1 can be extended.
+    let t1_ext = http_date_in(240);
+    let extended = set_policy(&v1_sel, &t1_ext, Some("Locked"));
+    assert_eq!(extended.status(), 200);
+    assert_eq!(
+        header(&extended, "x-ms-immutability-policy-until-date"),
+        t1_ext
+    );
+
+    let del_v1_held = server.send(
+        Method::DELETE,
+        &format!("{}?versionid={}", blob(name), encode(&v1)),
+        &[],
+        b"",
+    );
+    assert_eq!(del_v1_held.status(), 409);
+    assert_eq!(error_code(del_v1_held), "BlobImmutableDueToLegalHold");
+    let del_ctr_held = server.send(
+        Method::DELETE,
+        &format!("{CONTAINER}?restype=container"),
+        &[],
+        b"",
+    );
+    assert_eq!(del_ctr_held.status(), 409);
+    assert_eq!(error_code(del_ctr_held), "BlobImmutableDueToLegalHold");
+
+    // Clear legal hold on v1: still protected by its unexpired locked policy.
+    assert_eq!(set_hold(&v1_sel, "false").status(), 200);
+    let del_v1_pol = server.send(
+        Method::DELETE,
+        &format!("{}?versionid={}", blob(name), encode(&v1)),
+        &[],
+        b"",
+    );
+    assert_eq!(del_v1_pol.status(), 409);
+    assert_eq!(error_code(del_v1_pol), "BlobImmutableDueToPolicy");
+    let del_ctr_pol = server.send(
+        Method::DELETE,
+        &format!("{CONTAINER}?restype=container"),
+        &[],
+        b"",
+    );
+    assert_eq!(del_ctr_pol.status(), 409);
+    assert_eq!(error_code(del_ctr_pol), "BlobImmutableDueToPolicy");
+
+    // Historical v2: set unlocked policy + hold directly on a non-current version, then delete policy + hold.
+    let v3_put = server.put(name, &[], b"v3-data");
+    let v3 = header(&v3_put, "x-ms-version-id");
+    let v3_sel = format!("&versionid={}", encode(&v3));
+    assert_eq!(
+        set_policy(&v2_sel, &http_date_in(600), Some("Unlocked")).status(),
+        200
+    );
+    assert_eq!(set_hold(&v2_sel, "true").status(), 200);
+    let del_v2_blocked = server.send(
+        Method::DELETE,
+        &format!("{}?versionid={}", blob(name), encode(&v2)),
+        &[],
+        b"",
+    );
+    assert_eq!(del_v2_blocked.status(), 409);
+    assert_eq!(error_code(del_v2_blocked), "BlobImmutableDueToLegalHold");
+    assert_eq!(delete_policy(&v2_sel).status(), 200);
+    assert_eq!(set_hold(&v2_sel, "false").status(), 200);
+    assert_eq!(
+        server
+            .send(
+                Method::DELETE,
+                &format!("{}?versionid={}", blob(name), encode(&v2)),
+                &[],
+                b"",
+            )
+            .status(),
+        202
+    );
+
+    // Property/metadata write on protected v3 retires v3 with its policy and leaves new v4 unprotected.
+    let t3 = http_date_in(180);
+    assert_eq!(set_policy(&v3_sel, &t3, Some("Unlocked")).status(), 200);
+    let meta = server.send(
+        Method::PUT,
+        &format!("{}?comp=metadata", blob(name)),
+        &[("x-ms-meta-k", "v")],
+        b"",
+    );
+    assert_eq!(meta.status(), 200);
+    assert!(
+        !server
+            .send(Method::HEAD, &blob(name), &[], b"")
+            .headers()
+            .contains_key("x-ms-immutability-policy-mode")
+    );
+    assert_eq!(
+        header(
+            &server.send(
+                Method::HEAD,
+                &format!("{}?versionid={}", blob(name), encode(&v3)),
+                &[],
+                b"",
+            ),
+            "x-ms-immutability-policy-mode"
+        ),
+        "unlocked"
+    );
+
+    // Deleting current unprotected blob retires v4; historical v1 stays reachable and editable.
+    assert_eq!(
+        server.send(Method::DELETE, &blob(name), &[], b"").status(),
+        202
+    );
+    assert_eq!(status_of(server.get(&blob(name))), 404);
+    assert_eq!(set_hold(&v1_sel, "true").status(), 200);
+    assert_eq!(set_hold(&v1_sel, "false").status(), 200);
+
+    // Advance past v1 and v3 deadlines: deleting versions and container now succeeds.
+    server.advance(250);
+    assert_eq!(
+        server
+            .send(
+                Method::DELETE,
+                &format!("{}?versionid={}", blob(name), encode(&v1)),
+                &[],
+                b"",
+            )
+            .status(),
+        202
+    );
+    assert_eq!(
+        server
+            .send(
+                Method::DELETE,
+                &format!("{}?versionid={}", blob(name), encode(&v3)),
+                &[],
+                b"",
+            )
+            .status(),
+        202
+    );
+    assert_eq!(
+        server
+            .send(
+                Method::DELETE,
+                &format!("{CONTAINER}?restype=container"),
+                &[],
+                b"",
+            )
+            .status(),
+        202
+    );
+
+    // Unknown versionid is 404 BlobNotFound, and combining snapshot + versionid is 400.
+    server.create_container();
+    server.put(name, &[], b"fresh");
+    let missing_v = set_policy(
+        "&versionid=2020-01-01T00:00:00.0000000Z",
+        &http_date_in(60),
+        None,
+    );
+    assert_eq!(missing_v.status(), 404);
+    assert_eq!(error_code(missing_v), "BlobNotFound");
+    let both = set_policy(
+        "&snapshot=2020-01-01T00:00:00.0000000Z&versionid=2020-01-01T00:00:00.0000000Z",
+        &http_date_in(60),
+        None,
+    );
+    assert_eq!(both.status(), 400);
+    assert_eq!(error_code(both), "InvalidQueryParameterValue");
+}
+
+#[test]
+fn snapshot_immutability_policies_and_legal_holds_protect_snapshots_and_persist_across_restart() {
+    let location = tempfile::tempdir().unwrap();
+    let name = "snap.txt";
+    let (s1, s2, until);
+    {
+        let server = Emulator::start(Some(location.path()), &["--test-clock"]);
+        server.create_container();
+        server.put(name, &[], b"base");
+        s1 = server.snapshot(name);
+        s2 = server.snapshot(name);
+        until = http_date_in(3600);
+
+        let set_s1 = server.send(
+            Method::PUT,
+            &format!(
+                "{}?comp=immutabilityPolicies&snapshot={}",
+                blob(name),
+                encode(&s1)
+            ),
+            &[
+                ("x-ms-immutability-policy-until-date", &until),
+                ("x-ms-immutability-policy-mode", "Unlocked"),
+            ],
+            b"",
+        );
+        assert_eq!(set_s1.status(), 200);
+        assert_eq!(header(&set_s1, "x-ms-immutability-policy-mode"), "unlocked");
+
+        let hold_s2 = server.send(
+            Method::PUT,
+            &format!("{}?comp=legalhold&snapshot={}", blob(name), encode(&s2)),
+            &[("x-ms-legal-hold", "true")],
+            b"",
+        );
+        assert_eq!(hold_s2.status(), 200);
+        assert_eq!(header(&hold_s2, "x-ms-legal-hold"), "true");
+
+        // Base blob remains unprotected; snapshots report their own state on HEAD, GET, and List Blobs.
+        let base_head = server.send(Method::HEAD, &blob(name), &[], b"");
+        assert!(
+            !base_head
+                .headers()
+                .contains_key("x-ms-immutability-policy-mode")
+        );
+        assert!(!base_head.headers().contains_key("x-ms-legal-hold"));
+
+        let s1_head = server.send(
+            Method::HEAD,
+            &format!("{}?snapshot={}", blob(name), encode(&s1)),
+            &[],
+            b"",
+        );
+        assert_eq!(
+            header(&s1_head, "x-ms-immutability-policy-mode"),
+            "unlocked"
+        );
+        assert_eq!(
+            header(&s1_head, "x-ms-immutability-policy-until-date"),
+            until
+        );
+        assert_eq!(header(&s1_head, "x-ms-legal-hold"), "false");
+
+        let s2_get = server.get(&format!("{}?snapshot={}", blob(name), encode(&s2)));
+        assert_eq!(header(&s2_get, "x-ms-legal-hold"), "true");
+        assert!(
+            !s2_get
+                .headers()
+                .contains_key("x-ms-immutability-policy-mode")
+        );
+
+        let listed = server.list("include=snapshots,immutabilitypolicy,legalhold");
+        let chunks: Vec<&str> = listed.split("<Blob>").skip(1).collect();
+        assert_eq!(chunks.len(), 3, "{listed}");
+        assert!(chunks[0].contains(&format!("<Snapshot>{s1}</Snapshot>")));
+        assert!(chunks[0].contains("<ImmutabilityPolicyMode>unlocked</ImmutabilityPolicyMode>"));
+        assert!(chunks[1].contains(&format!("<Snapshot>{s2}</Snapshot>")));
+        assert!(chunks[1].contains("<LegalHold>true</LegalHold>"));
+        assert!(chunks[2].contains("<LegalHold>false</LegalHold>"));
+
+        // Protected snapshots block direct snapshot delete, x-ms-delete-snapshots, and Delete Container.
+        let del_s1 = server.send(
+            Method::DELETE,
+            &format!("{}?snapshot={}", blob(name), encode(&s1)),
+            &[],
+            b"",
+        );
+        assert_eq!(del_s1.status(), 409);
+        assert_eq!(error_code(del_s1), "BlobImmutableDueToPolicy");
+        let del_s2 = server.send(
+            Method::DELETE,
+            &format!("{}?snapshot={}", blob(name), encode(&s2)),
+            &[],
+            b"",
+        );
+        assert_eq!(del_s2.status(), 409);
+        assert_eq!(error_code(del_s2), "BlobImmutableDueToLegalHold");
+
+        for mode in ["include", "only"] {
+            let blocked = server.send(
+                Method::DELETE,
+                &blob(name),
+                &[("x-ms-delete-snapshots", mode)],
+                b"",
+            );
+            assert_eq!(blocked.status(), 409, "delete-snapshots={mode}");
+            assert_eq!(error_code(blocked), "BlobImmutableDueToLegalHold");
+        }
+        let del_ctr = server.send(
+            Method::DELETE,
+            &format!("{CONTAINER}?restype=container"),
+            &[],
+            b"",
+        );
+        assert_eq!(del_ctr.status(), 409);
+        assert_eq!(error_code(del_ctr), "BlobImmutableDueToLegalHold");
+
+        let missing_s = server.send(
+            Method::PUT,
+            &format!(
+                "{}?comp=legalhold&snapshot=2020-01-01T00:00:00.0000000Z",
+                blob(name)
+            ),
+            &[("x-ms-legal-hold", "true")],
+            b"",
+        );
+        assert_eq!(missing_s.status(), 404);
+        assert_eq!(error_code(missing_s), "BlobNotFound");
+    }
+
+    // Restart from disk: snapshot policy and legal hold persist, then clearing allows deletion.
+    let server = Emulator::start(Some(location.path()), &["--test-clock"]);
+    let s1_head = server.send(
+        Method::HEAD,
+        &format!("{}?snapshot={}", blob(name), encode(&s1)),
+        &[],
+        b"",
+    );
+    assert_eq!(
+        header(&s1_head, "x-ms-immutability-policy-until-date"),
+        until
+    );
+    let s2_head = server.send(
+        Method::HEAD,
+        &format!("{}?snapshot={}", blob(name), encode(&s2)),
+        &[],
+        b"",
+    );
+    assert_eq!(header(&s2_head, "x-ms-legal-hold"), "true");
+
+    assert_eq!(
+        server
+            .send(
+                Method::DELETE,
+                &format!(
+                    "{}?comp=immutabilityPolicies&snapshot={}",
+                    blob(name),
+                    encode(&s1)
+                ),
+                &[],
+                b"",
+            )
+            .status(),
+        200
+    );
+    assert_eq!(
+        server
+            .send(
+                Method::PUT,
+                &format!("{}?comp=legalhold&snapshot={}", blob(name), encode(&s2)),
+                &[("x-ms-legal-hold", "false")],
+                b"",
+            )
+            .status(),
+        200
+    );
+    assert_eq!(
+        server
+            .send(
+                Method::DELETE,
+                &blob(name),
+                &[("x-ms-delete-snapshots", "include")],
+                b"",
+            )
+            .status(),
+        202
+    );
+    assert_eq!(
+        server
+            .send(
+                Method::DELETE,
+                &format!("{CONTAINER}?restype=container"),
+                &[],
+                b"",
+            )
+            .status(),
+        202
+    );
+}

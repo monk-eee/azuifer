@@ -76,7 +76,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Deletes the current blob, a snapshot, or a version; x-ms-delete-snapshots include or only, otherwise SnapshotsPresent (Azure's code is BlobHasSnapshots). Requires the lease id while leased and supports conditions. Honors the account delete retention (soft delete, evaluated lazily against the clock) and versioning. Page and append blobs follow the same soft delete, version, and snapshot rules as block blobs. A legal hold or unexpired immutability policy refuses the delete. Deletes are synchronous. On an HNS account a directory with children answers 409 DirectoryIsNotEmpty (\"This operation is not permitted on a non-empty directory.\"), the code and message public AzCopy and SDK reports show for Azure; no recording of it exists here."
+      "notes": "Deletes the current blob, a snapshot, or a version; x-ms-delete-snapshots include or only, otherwise SnapshotsPresent (Azure's code is BlobHasSnapshots). Requires the lease id while leased and supports conditions. Honors the account delete retention (soft delete, evaluated lazily against the clock) and versioning. Page and append blobs follow the same soft delete, version, and snapshot rules as block blobs. A legal hold or unexpired immutability policy on the current blob, addressed version, or addressed snapshot (including x-ms-delete-snapshots include or only when any snapshot is protected) refuses the delete. Deletes are synchronous. On an HNS account a directory with children answers 409 DirectoryIsNotEmpty (\"This operation is not permitted on a non-empty directory.\"), the code and message public AzCopy and SDK reports show for Azure; no recording of it exists here."
     },
     {
       "name": "Delete Blob Immutability Policy",
@@ -89,7 +89,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Removes an unlocked or expired policy. A locked, unexpired policy is refused."
+      "notes": "Removes an unlocked or expired policy on the current blob, a retained version (versionid), or a snapshot (snapshot). A locked, unexpired policy is refused."
     },
     {
       "name": "Delete Container",
@@ -102,7 +102,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Deletes immediately and requires the lease id while a lease is active. With a DeleteRetentionPolicy on the account (one setting governs blob and container soft delete here; Azure keeps a separate container setting in the management plane) the container is kept under a hidden name for the retention days on the injected clock and can be restored. Azure's asynchronous deletion window (ContainerBeingDeleted) is not modeled."
+      "notes": "Deletes immediately and requires the lease id while a lease is active. Refuses deletion with 409 BlobImmutableDueToLegalHold or BlobImmutableDueToPolicy while the container holds any protected current blob, live version, or live snapshot. With a DeleteRetentionPolicy on the account (one setting governs blob and container soft delete here; Azure keeps a separate container setting in the management plane) the container is kept under a hidden name for the retention days on the injected clock and can be restored. Azure's asynchronous deletion window (ContainerBeingDeleted) is not modeled."
     },
     {
       "name": "Find Blobs by Tags",
@@ -332,7 +332,7 @@
         "Anonymous",
         "Bearer"
       ],
-      "notes": "Flat and hierarchical (delimiter with BlobPrefix) listings with prefix, marker, maxresults, and include of metadata, copy, uncommittedblobs, snapshots, versions, deleted, and tags; snapshots, versions, deleted, and tags cannot be combined with uncommittedblobs. Within a name, snapshots and versions list oldest first and the current blob last. Reports BlobType and, for page and append blobs, the sequence number and sealed state. Blob ETags in the XML are unquoted. Uncommitted blobs list with minimal properties. The permissions include answers NotImplemented. Anonymous access requires container-level public access. Markers are opaque local tokens; a nonempty request marker is echoed in the response."
+      "notes": "Flat and hierarchical (delimiter with BlobPrefix) listings with prefix, marker, maxresults, and include of metadata, copy, uncommittedblobs, snapshots, versions, deleted, tags, immutabilitypolicy, and legalhold; snapshots, versions, deleted, and tags cannot be combined with uncommittedblobs. Within a name, snapshots and versions list oldest first and the current blob last, with per-entry ImmutabilityPolicyUntilDate, ImmutabilityPolicyMode, and LegalHold elements. Reports BlobType and, for page and append blobs, the sequence number and sealed state. Blob ETags in the XML are unquoted. Uncommitted blobs list with minimal properties. The permissions include answers NotImplemented. Anonymous access requires container-level public access. Markers are opaque local tokens; a nonempty request marker is echoed in the response."
     },
     {
       "name": "List Containers",
@@ -527,7 +527,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Time-based policy in Unlocked or Locked mode on the current blob. Does not change the ETag. While a policy or legal hold applies, writes, property changes, and deletes are refused. Policies on snapshots and versions and container-level immutability are unsupported."
+      "notes": "Time-based policy in Unlocked or Locked mode on the current blob, a retained version (versionid), or a snapshot (snapshot), preserved across versioned overwrites (ADR-0039). Does not change the ETag. While a policy or legal hold applies, deletes are refused and, on non-versioned accounts, writes and property changes are refused. Container-level immutability, Put Blob immutability headers, and blob-version/snapshot SAS scopes are unsupported."
     },
     {
       "name": "Set Blob Legal Hold",
@@ -540,7 +540,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "x-ms-legal-hold true or false on the current blob; a hold blocks writes and deletes until cleared. Holds on snapshots and versions are unsupported."
+      "notes": "x-ms-legal-hold true or false on the current blob, a retained version (versionid), or a snapshot (snapshot), preserved across versioned overwrites (ADR-0039); a hold blocks deletes (and in-place writes on non-versioned accounts) until cleared."
     },
     {
       "name": "Set Blob Metadata",
@@ -692,7 +692,7 @@
   ],
   "live_azure_evidence": {
     "cassettes": 34,
-    "target_exchanges": 521,
+    "target_exchanges": 537,
     "recorded_exchanges": 187,
     "matched_exchanges": 187,
     "matched_operation_auth": {

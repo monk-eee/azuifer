@@ -2,6 +2,7 @@
 
 use super::{DAY_MS, HISTORY_BLOB};
 use crate::{
+    blob_immutability::{PolicyMode, Protection},
     blob_tags::Tags,
     domain::{BlobInfo, Include, ListRequest, Result},
     lease::{LeaseNeed, LeaseOwner},
@@ -110,12 +111,14 @@ impl Store {
             let lifecycle =
                 crate::store::expiry::load_container(db, key.account.as_str(), key.name.as_str())?;
             let sql = format!(
-                "SELECT {BLOB_COLUMNS}, name, 0, 9223372036854775807, version_id, NULL, NULL
+                "SELECT {BLOB_COLUMNS}, name, 0, 9223372036854775807, version_id, NULL, NULL,
+                        NULL, '', 0
                    FROM blobs WHERE account=?1 AND container=?2 AND name>=?3 AND instr(name, ?4)=1
                  UNION ALL
                  SELECT {HISTORY_BLOB}, name, kind,
                         CASE WHEN kind=3 THEN deleted_at * 10000 ELSE state_id END,
-                        state_id, deleted_at, expires_at
+                        state_id, deleted_at, expires_at,
+                        immutable_until, immutability_mode, legal_hold
                    FROM blob_history WHERE account=?1 AND container=?2 AND name>=?3
                     AND instr(name, ?4)=1 AND (deleted_at IS NULL OR expires_at > ?5)
                  ORDER BY {}, {}, {}",
@@ -178,10 +181,17 @@ impl Store {
                 if kind == 2 {
                     info.entity.version = Some(Ticks(state));
                 }
-                if kind == 0
-                    && let Some(found) = lifecycle.get(&name)
-                {
-                    info.lifecycle = *found;
+                if kind == 0 {
+                    if let Some(found) = lifecycle.get(&name) {
+                        info.lifecycle = *found;
+                    }
+                } else if matches!(kind, 1 | 2) {
+                    let mode: String = row.get(at + 7).map_err(db_error)?;
+                    info.lifecycle.protection = Protection {
+                        until: row.get(at + 6).map_err(db_error)?,
+                        mode: PolicyMode::from_stored(&mode),
+                        legal_hold: row.get::<_, i64>(at + 8).map_err(db_error)? != 0,
+                    };
                 }
                 let current = kind == 0;
                 let version = if current {

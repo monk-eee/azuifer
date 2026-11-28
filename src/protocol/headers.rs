@@ -41,6 +41,8 @@ pub(super) fn includes(value: Option<&str>) -> Result<Vec<Include>> {
             "versions" => Ok(Include::Versions),
             "deleted" => Ok(Include::Deleted),
             "tags" => Ok(Include::Tags),
+            "immutabilitypolicy" => Ok(Include::ImmutabilityPolicy),
+            "legalhold" => Ok(Include::LegalHold),
             _ => Err(Error::Unsupported),
         })
         .collect()
