@@ -14,6 +14,7 @@ mod listing;
 mod namespace;
 mod page_history;
 mod pages;
+mod readers;
 mod schema;
 mod service;
 mod snapshots;
@@ -29,6 +30,7 @@ use crate::lease::{LeaseId, LeaseKind, StoredLease};
 use crate::stamp::Ticks;
 use anyhow::Context as _;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use readers::{Readers, reclaim};
 use rusqlite::{Connection, OptionalExtension as _, Row, params};
 use std::{
     collections::HashSet,
@@ -72,6 +74,8 @@ enum Mode {
         _lock: File,
         /// Extents that snapshots, versions, or soft-deleted blobs still reference.
         pinned: snapshots::Pinned,
+        /// Extents that downloads in flight still read.
+        readers: Arc<Readers>,
     },
     Memory {
         limit: u64,
@@ -177,6 +181,7 @@ impl Store {
                     extents,
                     _lock: lock,
                     pinned: Default::default(),
+                    readers: Default::default(),
                 },
             )
         } else {
@@ -741,18 +746,6 @@ fn recover(db: &Connection, dir: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
-}
-
-fn reclaim(mode: &Mode, id: Uuid) {
-    if let Mode::Disk {
-        extents, pinned, ..
-    } = mode
-        && !snapshots::is_pinned(pinned, id)
-        && let Err(error) = fs::remove_file(extent(extents, id))
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!(kind = ?error.kind(), "content cleanup deferred until recovery");
-    }
 }
 
 fn require_directory(path: &Path) -> std::io::Result<()> {

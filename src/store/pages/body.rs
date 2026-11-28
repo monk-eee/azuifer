@@ -9,6 +9,7 @@ use crate::{
     checksum::Hasher,
     domain::{BlobInfo, BlobKey, ContentLength, Error, Result},
     ranges::{RangeMap, Segment},
+    store::readers::ReadPins,
 };
 use axum::body::Bytes;
 use futures_util::{StreamExt as _, TryStreamExt as _, stream::BoxStream};
@@ -36,8 +37,12 @@ enum Piece {
 }
 
 /// The bytes of a read: extent slices and zero-filled holes, in order. Extent files
-/// are opened only when streamed, so a fragmented blob does not hold many handles.
-pub(crate) struct RangeBody(Vec<Piece>);
+/// are opened only when streamed, so a fragmented blob does not hold many handles; the
+/// pins keep them from being reclaimed until the body is done with.
+pub(crate) struct RangeBody {
+    pieces: Vec<Piece>,
+    pins: Option<ReadPins>,
+}
 
 impl RangeBody {
     fn open(
@@ -51,6 +56,7 @@ impl RangeBody {
             .resolve(offset, length)
             .map_err(|_| internal("range overflow"))?;
         let mut pieces = Vec::with_capacity(segments.len());
+        let mut held = Vec::new();
         for segment in segments {
             pieces.push(match segment {
                 Segment::Hole { length, .. } => Piece::Zeros(length),
@@ -67,6 +73,7 @@ impl RangeBody {
                         if size < extent_offset + length {
                             return Err(internal("extent is shorter than its range"));
                         }
+                        held.push(id);
                         Piece::Extent {
                             path,
                             offset: extent_offset,
@@ -89,13 +96,20 @@ impl RangeBody {
                 },
             });
         }
-        Ok(Self(pieces))
+        let pins = match mode {
+            Mode::Disk {
+                extents, readers, ..
+            } => Some(ReadPins::new(readers, extents, held)),
+            Mode::Memory { .. } => None,
+        };
+        Ok(Self { pieces, pins })
     }
 
     /// Feeds every byte to `sink` in order, in bounded chunks.
     fn copy_into(self, sink: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()> {
         let mut buffer = vec![0u8; CHUNK];
-        for piece in self.0 {
+        let _pins = self.pins;
+        for piece in self.pieces {
             match piece {
                 Piece::Extent {
                     path,
@@ -141,9 +155,15 @@ impl RangeBody {
     }
 
     pub(crate) fn into_stream(self) -> BoxStream<'static, std::io::Result<Bytes>> {
-        futures_util::stream::iter(self.0)
+        let pins = self.pins;
+        futures_util::stream::iter(self.pieces)
             .map(piece_stream)
             .flatten()
+            .map(move |chunk| {
+                // The stream owns the pins, so they are released when it is dropped.
+                let _held = &pins;
+                chunk
+            })
             .boxed()
     }
 }
