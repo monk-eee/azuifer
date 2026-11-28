@@ -1,7 +1,7 @@
 //! Table service errors and their Azure wire shape.
 
 use super::edm::Metadata;
-use crate::{domain::Error, wire};
+use crate::{domain::Error, runtime_metrics, wire};
 use axum::http::StatusCode;
 
 pub(super) type Result<T> = std::result::Result<T, TableError>;
@@ -255,11 +255,16 @@ impl From<Error> for TableError {
 /// Logs the cause and reports the generic internal error.
 pub(super) fn internal(reason: &'static str) -> TableError {
     tracing::error!(reason, "table operation failed");
+    runtime_metrics::failure(
+        runtime_metrics::Store::Table,
+        runtime_metrics::Failure::Internal,
+    );
     TableError::new(Kind::Internal)
 }
 
 pub(super) fn db_error(error: rusqlite::Error) -> TableError {
     tracing::error!(code = ?error.sqlite_error_code(), "table metadata operation failed");
+    runtime_metrics::database_failure(runtime_metrics::Store::Table, &error);
     TableError::new(Kind::Internal)
 }
 

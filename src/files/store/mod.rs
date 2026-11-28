@@ -9,6 +9,7 @@
 mod content;
 mod fs;
 mod nodes;
+mod probe;
 mod shares;
 mod soft_delete;
 #[cfg(test)]
@@ -31,7 +32,7 @@ use super::{
     },
     name::EntryPath,
 };
-use crate::{clock::Clock, extent_readers::Readers};
+use crate::{clock::Clock, extent_readers::Readers, runtime_metrics};
 use anyhow::Context as _;
 use rusqlite::{Connection, OptionalExtension as _, Row, params};
 use std::{
@@ -181,14 +182,18 @@ impl Store {
         if let Mode::Disk { extents, .. } = &mode {
             content::recover(&db, extents).context("could not recover unreferenced content")?;
         }
-        Ok(Self(Arc::new(Inner {
+        let inner = Arc::new(Inner {
             db: Mutex::new(db),
             env: Env {
                 mode,
                 clock,
                 retention_days: std::sync::atomic::AtomicU32::new(0),
             },
-        })))
+        });
+        runtime_metrics::register(
+            Arc::downgrade(&inner) as std::sync::Weak<dyn runtime_metrics::Probe>
+        );
+        Ok(Self(inner))
     }
 
     pub(super) async fn run<T, F>(&self, action: F) -> Result<T>
@@ -198,9 +203,7 @@ impl Store {
     {
         let inner = self.0.clone();
         tokio::task::spawn_blocking(move || {
-            let mut db = inner
-                .db
-                .lock()
+            let mut db = runtime_metrics::lock(runtime_metrics::Store::Files, &inner.db)
                 .map_err(|_| internal("poisoned metadata lock"))?;
             action(&mut db, &inner.env)
         })
@@ -255,16 +258,22 @@ fn migrate(db: &Connection) -> anyhow::Result<()> {
 
 pub(super) fn db_error(error: rusqlite::Error) -> Error {
     tracing::error!(code = ?error.sqlite_error_code(), "file metadata operation failed");
+    runtime_metrics::database_failure(runtime_metrics::Store::Files, &error);
     Error::Internal
 }
 
 pub(super) fn io_error(error: std::io::Error) -> Error {
     tracing::error!(kind = ?error.kind(), "file content operation failed");
+    runtime_metrics::failure(runtime_metrics::Store::Files, runtime_metrics::Failure::Io);
     Error::Internal
 }
 
 pub(super) fn internal(reason: &'static str) -> Error {
     tracing::error!(reason, "file storage operation failed");
+    runtime_metrics::failure(
+        runtime_metrics::Store::Files,
+        runtime_metrics::Failure::Internal,
+    );
     Error::Internal
 }
 

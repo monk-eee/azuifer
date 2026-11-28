@@ -150,7 +150,17 @@ Use OpenTelemetry for traces of requests, authentication, metadata transactions,
 
 Support opt-in OTLP/gRPC, OTLP/HTTP, Prometheus, and structured console/file output. There is no unsolicited product telemetry; diagnostics are not transmitted to external collectors without explicit configuration. Redact sensitive values before export.
 
-Implemented surface: `--otlp-endpoint` (`AZUIFER_OTLP_ENDPOINT`, plain `http://` collectors) with `--otlp-protocol grpc|http` exports one server span per request, with `authenticate` and `storage` child spans on Blob, and request, latency, status, byte, and active-request metrics. `--prometheus` serves the same request metrics at `GET /metrics` on the admin listener. `--log-format json|text` and `--log-file` select the log output. Span attributes pass through a redactor that masks configured account keys, `sig=` and similar query values, and Authorization credentials. Queue depth, active leases, SQLite contention, garbage collection, and backend failure metrics are not yet emitted.
+Implemented surface: `--otlp-endpoint` (`AZUIFER_OTLP_ENDPOINT`, plain `http://` collectors) with `--otlp-protocol grpc|http` exports one server span per request, with `authenticate` and `storage` child spans on Blob, and request, latency, status, byte, and active-request metrics. `--prometheus` serves the same request metrics at `GET /metrics` on the admin listener. `--log-format json|text` and `--log-file` select the log output. Span attributes pass through a redactor that masks configured account keys, `sig=` and similar query values, and Authorization credentials. Both exporters also carry the store metrics, read from one source so they agree (OTLP names use dots, for example `azuifer.queue.messages`):
+
+| Prometheus series | Labels | Meaning |
+| --- | --- | --- |
+| `azuifer_queue_messages` | `account`, `queue`, `state` (`visible`, `invisible`) | Messages in each queue. A queue with no messages reports zero. |
+| `azuifer_active_leases` | `kind` (`blob`, `container`, `share`, `file`) | Leases held or still breaking, evaluated on the store clock. A DFS path is a blob. A kind appears once its store is running. |
+| `azuifer_store_lock_acquisitions_total`, `_contended_total`, `_wait_seconds_total` | `store` (`namespace`, `queue`, `table`, `files`) | Acquisitions of the metadata lock that serializes each store's SQLite connection, those that had to wait, and the time spent waiting. SQLite is never contended inside a process, so this lock is where operations queue. |
+| `azuifer_gc_extents_total`, `azuifer_gc_bytes_total` | `reason` (`reclaimed`, `recovered`) | Disk content files removed: `reclaimed` once nothing references or still reads them, `recovered` when startup found them unreferenced after a crash. In-memory content has no files. |
+| `azuifer_backend_failures_total` | `store` (`namespace`, `queue`, `table`, `files`, `content`), `kind` (`database`, `busy`, `io`, `internal`) | Storage failures answered with an internal error. `namespace` serves Blob and DFS; `content` is a streamed read that failed after its response began. |
+
+The counters restart with the process. Labels hold only these fixed values and account and queue names, so no credential reaches a metric; the log and exporter tests assert that.
 
 ## 12. Security requirements
 

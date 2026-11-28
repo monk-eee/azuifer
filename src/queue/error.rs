@@ -250,6 +250,7 @@ impl From<domain::Error> for QueueError {
 impl From<rusqlite::Error> for QueueError {
     fn from(error: rusqlite::Error) -> Self {
         tracing::error!(%error, "queue metadata operation failed");
+        crate::runtime_metrics::database_failure(crate::runtime_metrics::Store::Queue, &error);
         Self::Internal
     }
 }
