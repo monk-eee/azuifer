@@ -37,6 +37,7 @@ The [product specification](../specs/azuifer.md) describes the target. An ADR re
 | [ADR-0031: Check search rights on the directories of a recursive ACL change](0031-check-search-rights-in-recursive-acl-changes.md) | Proposed |
 | [ADR-0032: Check a copy source's SAS and convert binary security descriptors](0032-check-copy-source-sas-and-convert-binary-security-descriptors.md) | Proposed |
 | [ADR-0033: Report store state as runtime metrics](0033-report-store-state-as-runtime-metrics.md) | Proposed |
+| [ADR-0034: Refuse newer schemas and linked storage in every persistent store](0034-refuse-newer-schemas-and-linked-storage.md) | Proposed |
 
 Search the index before drafting a record. If a change needs a new decision, use the [template](template.md), pick the next four-digit number, and add the proposed record to the index. Keep separate decisions in separate records.
 

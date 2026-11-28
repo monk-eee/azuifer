@@ -13,6 +13,7 @@ mod model;
 mod protocol;
 mod service;
 mod store;
+pub(crate) use store::SCHEMA_VERSION;
 
 use crate::{auth::header, clock::Clock, config::Config, domain::ApiVersion, telemetry};
 use anyhow::Context as _;

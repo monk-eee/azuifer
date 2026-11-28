@@ -11,7 +11,13 @@ use super::{
     },
     service::AccessPolicy,
 };
-use crate::{domain::AccountName, runtime_metrics};
+use crate::{
+    domain::AccountName,
+    runtime_metrics,
+    store::guard::{
+        self, require_database, require_directory, require_file_if_present, require_known_schema,
+    },
+};
 use anyhow::Context as _;
 use rusqlite::{Connection, OptionalExtension as _, params, params_from_iter};
 use std::{
@@ -22,7 +28,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-const SCHEMA_VERSION: i64 = 1;
+pub(crate) const SCHEMA_VERSION: i64 = 1;
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS tables (
     account TEXT NOT NULL, key TEXT NOT NULL, name TEXT NOT NULL, acl TEXT NOT NULL DEFAULT '[]',
@@ -114,9 +120,7 @@ impl Store {
                 .open(lock_path)?;
             lock.try_lock()
                 .context("the Table storage directory is already in use")?;
-            for name in ["table.sqlite3", "table.sqlite3-wal", "table.sqlite3-shm"] {
-                require_file_if_present(&dir.join(name))?;
-            }
+            require_database(&dir, "table.sqlite3")?;
             let conn = Connection::open(dir.join("table.sqlite3"))
                 .context("could not open Table metadata")?;
             let journal: String =
@@ -131,11 +135,7 @@ impl Store {
             (Connection::open_in_memory()?, None)
         };
         conn.pragma_update(None, "foreign_keys", true)?;
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        anyhow::ensure!(
-            version <= SCHEMA_VERSION,
-            "the Table storage was written by a newer version"
-        );
+        require_known_schema(guard::user_version(&conn)?, SCHEMA_VERSION, "Table")?;
         conn.execute_batch(SCHEMA)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(Self(Arc::new(Inner {
@@ -626,31 +626,4 @@ fn apply_one(
             properties,
         }),
     })
-}
-
-fn require_directory(path: &Path) -> std::io::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_dir() || is_link(&metadata) {
-        return Err(std::io::Error::other("storage directory cannot be a link"));
-    }
-    Ok(())
-}
-
-fn require_file_if_present(path: &Path) -> std::io::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_file() && !is_link(&metadata) => Ok(()),
-        Ok(_) => Err(std::io::Error::other("storage file must be a regular file")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-fn is_link(metadata: &fs::Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt as _;
-        metadata.file_attributes() & 0x400 != 0
-    }
-    #[cfg(not(windows))]
-    metadata.is_symlink()
 }

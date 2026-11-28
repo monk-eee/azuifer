@@ -9,6 +9,7 @@ mod dfs_data;
 mod dfs_paths;
 mod dfs_tree;
 mod expiry;
+pub(crate) mod guard;
 mod immutability;
 mod listing;
 mod namespace;
@@ -34,6 +35,7 @@ use crate::runtime_metrics::{self, Failure};
 use crate::stamp::Ticks;
 use anyhow::Context as _;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use guard::{require_database, require_directory, require_file_if_present, sync_directory};
 use readers::reclaim;
 use rusqlite::{Connection, OptionalExtension as _, Row, params};
 use std::{
@@ -162,15 +164,8 @@ impl Store {
             let extents = root.join("content");
             fs::create_dir_all(&extents)?;
             require_directory(&extents)?;
-            #[cfg(unix)]
-            File::open(root)?.sync_all()?;
-            for name in [
-                "metadata.sqlite3",
-                "metadata.sqlite3-wal",
-                "metadata.sqlite3-shm",
-            ] {
-                require_file_if_present(&root.join(name))?;
-            }
+            sync_directory(root)?;
+            require_database(root, "metadata.sqlite3")?;
             let db = Connection::open(root.join("metadata.sqlite3"))
                 .context("could not open metadata")?;
             let journal: String = db.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
@@ -723,33 +718,6 @@ fn write_lease(db: &Connection, table: &str, key: &[&str], lease: &StoredLease) 
 
 fn extent(dir: &Path, id: Uuid) -> PathBuf {
     dir.join(format!("extent-{}", id.simple()))
-}
-
-fn require_directory(path: &Path) -> std::io::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_dir() || is_link(&metadata) {
-        return Err(std::io::Error::other("storage directory cannot be a link"));
-    }
-    Ok(())
-}
-
-fn require_file_if_present(path: &Path) -> std::io::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_file() && !is_link(&metadata) => Ok(()),
-        Ok(_) => Err(std::io::Error::other("storage file must be a regular file")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-fn is_link(metadata: &fs::Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt as _;
-        metadata.file_attributes() & 0x400 != 0
-    }
-    #[cfg(not(windows))]
-    metadata.is_symlink()
 }
 
 fn db_error(error: rusqlite::Error) -> Error {

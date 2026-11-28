@@ -409,7 +409,8 @@ async fn reopening_pre_nfs_metadata_keeps_smb_files_and_allows_new_writes() {
          ALTER TABLE nodes DROP COLUMN owner;
          ALTER TABLE nodes DROP COLUMN grp;
          ALTER TABLE nodes DROP COLUMN file_type;
-         ALTER TABLE nodes DROP COLUMN link_text;",
+         ALTER TABLE nodes DROP COLUMN link_text;
+         PRAGMA user_version = 0;",
     )
     .unwrap();
     drop(db);
@@ -427,6 +428,32 @@ async fn reopening_pre_nfs_metadata_keeps_smb_files_and_allows_new_writes() {
     }
     let store = Store::open(Some(backing), 0, Clock::new()).unwrap();
     assert_eq!(read(&store, "legacy", "original.txt").await, b"new!");
+    drop(store);
+    let db = Connection::open(backing.join("file").join("metadata.sqlite3")).unwrap();
+    let version: i64 = db
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, SCHEMA_VERSION, "the upgrade is stamped");
+}
+
+#[tokio::test]
+async fn a_file_database_from_a_newer_release_is_refused_and_not_stamped_down() {
+    let directory = tempfile::tempdir().unwrap();
+    drop(Store::open(Some(directory.path()), 0, Clock::new()).unwrap());
+    let database = directory.path().join("file").join("metadata.sqlite3");
+    Connection::open(&database)
+        .unwrap()
+        .pragma_update(None, "user_version", 77)
+        .unwrap();
+    let error = Store::open(Some(directory.path()), 0, Clock::new())
+        .err()
+        .expect("a newer database is refused");
+    assert!(error.to_string().contains("newer Azuifer"), "{error:#}");
+    let version: i64 = Connection::open(&database)
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 77);
 }
 
 #[tokio::test]

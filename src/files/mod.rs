@@ -11,6 +11,7 @@ mod response;
 mod sd;
 mod service;
 mod store;
+pub(crate) use store::SCHEMA_VERSION;
 mod time;
 mod xml;
 

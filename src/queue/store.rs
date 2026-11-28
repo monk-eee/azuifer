@@ -6,6 +6,9 @@ use crate::{
     clock::Clock,
     domain::AccountName,
     runtime_metrics::{self, Failure, Gauges, Probe},
+    store::guard::{
+        self, require_database, require_directory, require_file_if_present, require_known_schema,
+    },
 };
 use anyhow::Context as _;
 use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
@@ -16,7 +19,7 @@ use std::{
 };
 mod messages;
 
-const SCHEMA_VERSION: i64 = 1;
+pub(crate) const SCHEMA_VERSION: i64 = 1;
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS queues (
     account TEXT NOT NULL, name TEXT NOT NULL, metadata TEXT NOT NULL, acl TEXT NOT NULL,
@@ -69,15 +72,19 @@ impl Store {
         let (db, lock) = if let Some(root) = location {
             let dir = root.join("queue");
             fs::create_dir_all(&dir).context("could not create the queue storage directory")?;
+            require_directory(&dir)?;
+            let lock_path = dir.join("queue.lock");
+            require_file_if_present(&lock_path)?;
             let lock = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
                 .truncate(false)
-                .open(dir.join("queue.lock"))
+                .open(lock_path)
                 .context("could not open the queue lock file")?;
             lock.try_lock()
                 .context("the queue storage directory is already in use")?;
+            require_database(&dir, "queue.sqlite3")?;
             let db = Connection::open(dir.join("queue.sqlite3"))
                 .context("could not open queue metadata")?;
             let journal: String = db.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
@@ -91,11 +98,7 @@ impl Store {
             (Connection::open_in_memory()?, None)
         };
         db.pragma_update(None, "foreign_keys", true)?;
-        let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        anyhow::ensure!(
-            version <= SCHEMA_VERSION,
-            "queue storage was written by a newer Azuifer (schema {version})"
-        );
+        require_known_schema(guard::user_version(&db)?, SCHEMA_VERSION, "Queue")?;
         db.execute_batch(SCHEMA)?;
         db.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         let inner = Arc::new(Inner {

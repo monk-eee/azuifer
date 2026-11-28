@@ -10,6 +10,7 @@ mod error;
 mod model;
 mod protocol;
 mod store;
+pub(crate) use store::SCHEMA_VERSION;
 mod time;
 mod xml;
 
