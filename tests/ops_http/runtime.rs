@@ -3,7 +3,7 @@
 //! failures. Each test drives the built binary and asserts the counts that result.
 
 use super::*;
-use hmac::{Hmac, Mac as _};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use reqwest::Url;
 use std::collections::BTreeMap;
 

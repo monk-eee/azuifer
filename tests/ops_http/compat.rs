@@ -2,7 +2,7 @@
 //! what it logs.
 
 use super::*;
-use hmac::{Hmac, Mac as _};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use std::collections::BTreeMap;
 
 const ACCOUNT: &str = "devstoreaccount1";

@@ -98,7 +98,7 @@ fn status_json(client: &Client, server: &Server) -> serde_json::Value {
 
 /// Shared Key authorization for a body-less GET at a path-style Blob endpoint.
 fn shared_key_get(key: &str, path: &str, canonical_query: &str) -> (String, String) {
-    use hmac::{Hmac, Mac as _};
+    use hmac::{Hmac, KeyInit as _, Mac as _};
     let date = httpdate::fmt_http_date(std::time::SystemTime::now());
     let string_to_sign = format!(
         "GET\n\n\n\n\n\n\n\n\n\n\n\nx-ms-date:{date}\nx-ms-version:2023-11-03\n/devstoreaccount1{path}\n{canonical_query}"

@@ -2,7 +2,7 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use crc::{CRC_64_NVME, Crc};
-use hmac::{Hmac, Mac as _};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use md5::{Digest as _, Md5};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Method, Url, blocking::Client, header::HeaderMap};

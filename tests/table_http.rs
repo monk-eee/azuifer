@@ -1,5 +1,5 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use hmac::{Hmac, Mac as _};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Method, blocking::Client};
 use serde_json::{Value, json};

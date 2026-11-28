@@ -1,5 +1,5 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use hmac::{Hmac, Mac as _};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use reqwest::{Method, Url, blocking::Client, header::HeaderMap};
 use serde::Deserialize;
 use serde_json::{Value, json};
