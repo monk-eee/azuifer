@@ -236,3 +236,74 @@ impl DiskRead {
         Ok((Bytes::from(bytes), self))
     }
 }
+
+#[cfg(all(test, any(windows, target_os = "linux")))]
+mod tests {
+    use super::*;
+
+    fn open_extents(paths: &[Arc<Path>]) -> Vec<Arc<Path>> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            paths
+                .iter()
+                .filter(|path| {
+                    std::fs::OpenOptions::new()
+                        .read(true)
+                        .share_mode(0)
+                        .open(path)
+                        .is_err()
+                })
+                .cloned()
+                .collect()
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let descriptors: Vec<_> = std::fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter_map(|entry| std::fs::read_link(entry.unwrap().path()).ok())
+                .collect();
+            paths
+                .iter()
+                .filter(|path| {
+                    descriptors
+                        .iter()
+                        .any(|open| open.as_path() == path.as_ref())
+                })
+                .cloned()
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_paused_download_has_only_its_current_extent_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let paths: Vec<Arc<Path>> = (0..3)
+            .map(|i| Arc::from(root.join(i.to_string())))
+            .collect();
+        let size = CHUNK + 1;
+        for path in &paths {
+            std::fs::write(path, vec![b'x'; size]).unwrap();
+        }
+        let pieces = paths
+            .iter()
+            .map(|path| {
+                Piece::Disk(ExtentSlice {
+                    path: path.clone(),
+                    offset: 0,
+                    length: size as u64,
+                })
+            })
+            .collect();
+        let mut stream = ReadBody::new(pieces, Some(&Arc::default())).into_stream();
+        assert!(open_extents(&paths).is_empty());
+        for path in &paths {
+            assert_eq!(stream.next().await.unwrap().unwrap().len(), CHUNK);
+            assert_eq!(open_extents(&paths).as_slice(), std::slice::from_ref(path));
+            assert_eq!(stream.next().await.unwrap().unwrap().len(), 1);
+        }
+        assert!(stream.next().await.is_none());
+        assert!(open_extents(&paths).is_empty());
+    }
+}

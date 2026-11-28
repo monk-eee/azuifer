@@ -8,41 +8,17 @@ use super::{RangeSource, load_source_window};
 use crate::{
     checksum::Hasher,
     domain::{BlobInfo, BlobKey, ContentLength, Error, Result},
+    extent_readers::{ExtentSlice, Piece, ReadBody},
     ranges::{RangeMap, Segment},
-    store::readers::ReadPins,
 };
 use axum::body::Bytes;
-use futures_util::{StreamExt as _, TryStreamExt as _, stream::BoxStream};
+use futures_util::stream::BoxStream;
 use rusqlite::{Connection, params};
-use std::{
-    fs::File,
-    io::{Read as _, Seek as _, SeekFrom, Write as _},
-    ops::Range,
-    path::PathBuf,
-};
-use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
-use tokio_util::io::ReaderStream;
+use std::{io::Write as _, ops::Range, sync::Arc};
 use uuid::Uuid;
 
-const CHUNK: usize = 64 * 1024;
-
-enum Piece {
-    Extent {
-        path: PathBuf,
-        offset: u64,
-        length: u64,
-    },
-    Memory(Vec<u8>),
-    Zeros(u64),
-}
-
-/// The bytes of a read: extent slices and zero-filled holes, in order. Extent files
-/// are opened only when streamed, so a fragmented blob does not hold many handles; the
-/// pins keep them from being reclaimed until the body is done with.
-pub(crate) struct RangeBody {
-    pieces: Vec<Piece>,
-    pins: Option<ReadPins>,
-}
+/// The bytes of a read: extent slices and zero-filled holes, in order.
+pub(crate) struct RangeBody(ReadBody);
 
 impl RangeBody {
     fn open(
@@ -56,7 +32,6 @@ impl RangeBody {
             .resolve(offset, length)
             .map_err(|_| internal("range overflow"))?;
         let mut pieces = Vec::with_capacity(segments.len());
-        let mut held = Vec::new();
         for segment in segments {
             pieces.push(match segment {
                 Segment::Hole { length, .. } => Piece::Zeros(length),
@@ -73,12 +48,11 @@ impl RangeBody {
                         if size < extent_offset + length {
                             return Err(internal("extent is shorter than its range"));
                         }
-                        held.push(id);
-                        Piece::Extent {
-                            path,
+                        Piece::Disk(ExtentSlice {
+                            path: Arc::from(path),
                             offset: extent_offset,
                             length,
-                        }
+                        })
                     }
                     Mode::Memory { .. } => {
                         let bytes: Vec<u8> = db
@@ -96,103 +70,20 @@ impl RangeBody {
                 },
             });
         }
-        let pins = match mode {
-            Mode::Disk {
-                extents, readers, ..
-            } => Some(ReadPins::new(readers, extents, held)),
+        let readers = match mode {
+            Mode::Disk { readers, .. } => Some(readers),
             Mode::Memory { .. } => None,
         };
-        Ok(Self { pieces, pins })
-    }
-
-    /// Feeds every byte to `sink` in order, in bounded chunks.
-    fn copy_into(self, sink: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()> {
-        let mut buffer = vec![0u8; CHUNK];
-        let _pins = self.pins;
-        for piece in self.pieces {
-            match piece {
-                Piece::Extent {
-                    path,
-                    offset,
-                    length,
-                } => {
-                    let mut file = File::open(path).map_err(io_error)?;
-                    file.seek(SeekFrom::Start(offset)).map_err(io_error)?;
-                    let mut left = length;
-                    while left > 0 {
-                        let want = usize::try_from(left).unwrap_or(CHUNK).min(CHUNK);
-                        let read = file.read(&mut buffer[..want]).map_err(io_error)?;
-                        if read == 0 {
-                            return Err(internal("extent ended early"));
-                        }
-                        sink(&buffer[..read])?;
-                        left -= read as u64;
-                    }
-                }
-                Piece::Memory(bytes) => sink(&bytes)?,
-                Piece::Zeros(length) => {
-                    buffer.fill(0);
-                    let mut left = length;
-                    while left > 0 {
-                        let take = usize::try_from(left).unwrap_or(CHUNK).min(CHUNK);
-                        sink(&buffer[..take])?;
-                        left -= take as u64;
-                    }
-                }
-            }
-        }
-        Ok(())
+        Ok(Self(ReadBody::new(pieces, readers)))
     }
 
     /// Reads everything into memory; callers bound the size (a ranged checksum).
     pub(crate) fn into_vec(self) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        self.copy_into(&mut |chunk| {
-            bytes.extend_from_slice(chunk);
-            Ok(())
-        })?;
-        Ok(bytes)
+        self.0.into_vec().map_err(io_error)
     }
 
     pub(crate) fn into_stream(self) -> BoxStream<'static, std::io::Result<Bytes>> {
-        let pins = self.pins;
-        futures_util::stream::iter(self.pieces)
-            .map(piece_stream)
-            .flatten()
-            .map(move |chunk| {
-                // The stream owns the pins, so they are released when it is dropped.
-                let _held = &pins;
-                chunk
-            })
-            .boxed()
-    }
-}
-
-fn piece_stream(piece: Piece) -> BoxStream<'static, std::io::Result<Bytes>> {
-    match piece {
-        Piece::Extent {
-            path,
-            offset,
-            length,
-        } => futures_util::stream::once(async move {
-            let mut file = tokio::fs::File::open(path).await?;
-            file.seek(SeekFrom::Start(offset)).await?;
-            Ok::<_, std::io::Error>(ReaderStream::new(file.take(length)))
-        })
-        .try_flatten()
-        .boxed(),
-        Piece::Memory(bytes) => {
-            futures_util::stream::once(async move { Ok(Bytes::from(bytes)) }).boxed()
-        }
-        Piece::Zeros(length) => futures_util::stream::unfold(length, |left| async move {
-            if left == 0 {
-                return None;
-            }
-            let take = left.min(CHUNK as u64);
-            let chunk = Bytes::from(vec![0u8; usize::try_from(take).unwrap_or(CHUNK)]);
-            Some((Ok(chunk), left - take))
-        })
-        .boxed(),
+        self.0.into_stream()
     }
 }
 
@@ -230,20 +121,24 @@ pub(in crate::store) fn source_bytes(
         Mode::Disk { extents, .. } => {
             let temp = staging_file(extents).map_err(io_error)?;
             let mut sink = temp.reopen().map_err(io_error)?;
-            body.copy_into(&mut |chunk| {
-                hasher.update(chunk);
-                sink.write_all(chunk).map_err(io_error)
-            })?;
+            body.0
+                .copy_into(|chunk| {
+                    hasher.update(chunk);
+                    sink.write_all(chunk)
+                })
+                .map_err(io_error)?;
             sink.flush().map_err(io_error)?;
             UploadedData::Disk(temp)
         }
         Mode::Memory { .. } => {
             let mut bytes = Vec::new();
-            body.copy_into(&mut |chunk| {
-                hasher.update(chunk);
-                bytes.extend_from_slice(chunk);
-                Ok(())
-            })?;
+            body.0
+                .copy_into(|chunk| {
+                    hasher.update(chunk);
+                    bytes.extend_from_slice(chunk);
+                    Ok(())
+                })
+                .map_err(io_error)?;
             UploadedData::Memory(bytes)
         }
     };

@@ -573,14 +573,15 @@ fn doctor_does_not_credit_an_unrelated_port_or_storage_lock_to_a_healthy_instanc
         "--admin-port",
         admin_port,
     ]);
-    assert!(!output.status.success(), "{}", stdout(&output));
+    let text = stdout(&output);
+    assert!(!output.status.success(), "{text}");
     assert!(
-        stdout(&output).contains(&format!(
-            "{} is held by another process",
-            data.join("file").join("azuifer.lock").display()
-        )),
-        "{}",
-        stdout(&output)
+        text.lines()
+            .any(|line| line.starts_with("[FAIL] Directory lock: ")
+                && line
+                    .replace('\\', "/")
+                    .contains("file/azuifer.lock is held by another process")),
+        "{text}"
     );
 }
 

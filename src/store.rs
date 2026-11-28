@@ -26,11 +26,12 @@ use crate::clock::Clock;
 use crate::domain::{
     BlobInfo, BlobKey, ContainerKey, ContentHeaders, ContentLength, CopyInfo, Entity, Error, Result,
 };
+use crate::extent_readers::Readers;
 use crate::lease::{LeaseId, LeaseKind, StoredLease};
 use crate::stamp::Ticks;
 use anyhow::Context as _;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use readers::{Readers, reclaim};
+use readers::reclaim;
 use rusqlite::{Connection, OptionalExtension as _, Row, params};
 use std::{
     collections::HashSet,
