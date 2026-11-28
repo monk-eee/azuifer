@@ -4,6 +4,7 @@
 #![allow(clippy::single_range_in_vec_init)]
 
 use super::*;
+use crate::prng::Rng;
 
 type Map = RangeMap<u32>;
 
@@ -303,17 +304,6 @@ fn diff_merges_adjacent_changes_from_different_extents() {
     assert_eq!(later.diff(&earlier).changed, [0..10]);
 }
 
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self, bound: u64) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0 % bound
-    }
-}
-
 /// Byte-for-byte model: each byte remembers its extent and extent offset.
 #[derive(Clone)]
 struct Model {
@@ -322,10 +312,16 @@ struct Model {
 
 impl Model {
     fn ranges(&self) -> Vec<Range<u64>> {
+        self.ranges_in(0, u64::MAX)
+    }
+
+    /// The allocated ranges inside [offset, offset + length), clipped to it.
+    fn ranges_in(&self, offset: u64, length: u64) -> Vec<Range<u64>> {
         let mut ranges: Vec<Range<u64>> = Vec::new();
+        let end = offset.saturating_add(length);
         for (index, byte) in self.bytes.iter().enumerate() {
             let index = index as u64;
-            if byte.is_some() {
+            if byte.is_some() && index >= offset && index < end {
                 match ranges.last_mut() {
                     Some(last) if last.end == index => last.end += 1,
                     _ => ranges.push(index..index + 1),
@@ -375,17 +371,17 @@ impl Model {
 
 #[test]
 fn random_operations_match_a_byte_model() {
-    for seed in 1..=60u64 {
-        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    for seed in 1..=250u64 {
+        let mut rng = Rng::seeded(seed);
         let mut map = Map::new(0);
         let mut model = Model { bytes: Vec::new() };
         let mut snapshots: Vec<(Map, Model)> = Vec::new();
         for step in 0..200u32 {
-            let offset = rng.next(48);
-            let length = rng.next(24);
-            match rng.next(10) {
+            let offset = rng.below(48);
+            let length = rng.below(24);
+            match rng.below(10) {
                 0..=4 => {
-                    let extent_offset = rng.next(1000);
+                    let extent_offset = rng.below(1000);
                     map.write(offset, length, step, extent_offset).unwrap();
                     if length > 0 {
                         let end = (offset + length) as usize;
@@ -405,7 +401,7 @@ fn random_operations_match_a_byte_model() {
                     }
                 }
                 7 => {
-                    let size = rng.next(60);
+                    let size = rng.below(60);
                     map.resize(size);
                     model.bytes.resize(size as usize, None);
                 }
@@ -419,6 +415,36 @@ fn random_operations_match_a_byte_model() {
             let all = map.resolve(0, u64::MAX / 2).unwrap();
             assert_eq!(Model::expand(&all), model.bytes, "seed {seed} step {step}");
             assert_eq!(map.allocated_ranges(), model.ranges(), "seed {seed}");
+            assert_eq!(
+                map.allocated_ranges_in(offset, length),
+                model.ranges_in(offset, length),
+                "seed {seed} step {step} window"
+            );
+            let allocated = model.bytes.iter().flatten().count() as u64;
+            assert_eq!(map.allocated_bytes(), allocated, "seed {seed} step {step}");
+            let live: std::collections::BTreeSet<u32> = model
+                .bytes
+                .iter()
+                .flatten()
+                .map(|(extent, _)| *extent)
+                .collect();
+            assert_eq!(
+                map.extents()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                live,
+                "seed {seed} step {step}: an extent is referenced exactly while a byte maps to it"
+            );
+            let before = map.clone();
+            assert_eq!(
+                map.write(u64::MAX - length, length + 1, 0, 0),
+                Err(RangeError::Overflow)
+            );
+            assert_eq!(
+                map.clear(u64::MAX - length, length + 1),
+                Err(RangeError::Overflow)
+            );
+            assert_eq!(map, before, "a refused operation changes nothing");
             let window = map.resolve(offset, length).unwrap();
             let expected: Vec<_> = model
                 .bytes

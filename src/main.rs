@@ -35,6 +35,8 @@ mod lease;
 mod metrics;
 mod oauth;
 mod posix;
+#[cfg(test)]
+mod prng;
 mod protocol;
 mod queue;
 mod ranges;

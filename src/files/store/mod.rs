@@ -8,6 +8,8 @@
 
 mod content;
 mod fs;
+#[cfg(test)]
+mod model;
 mod nodes;
 mod probe;
 mod shares;

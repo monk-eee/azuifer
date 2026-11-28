@@ -31,6 +31,8 @@ const DAY_MS: i64 = 86_400_000;
 mod deletion;
 mod listing;
 #[cfg(test)]
+mod model;
+#[cfg(test)]
 mod tests;
 
 pub(crate) use deletion::Deletion;

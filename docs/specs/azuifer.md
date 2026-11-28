@@ -192,6 +192,7 @@ Minimum cross-service and persistence cases:
 - A failing Table partition batch leaves no partial writes.
 - Concurrent leases yield consistent conflicts.
 
+State-machine tests drive thousands of seeded random operation sequences against a simple oracle written from the documented rules rather than from the implementation, so a failure names its seed and step. The generator is in `src/prng.rs` and adds no dependency. They cover the range map (bytes, allocation, and every refused operation leaving the map unchanged); the blob lease state machine, including time-driven expiry and breaks and each lease-id check (`src/lease/model.rs`); blob snapshots, versions, soft delete, undelete and container restore, with restarts and the exact set of extent files on disk (`src/store/snapshots/model/`); and NFS file shares, with hard links, symbolic links, ranges, copies, renames, snapshots and quota, again with the exact set of extents (`src/files/store/model.rs`).
 ## 15. Reliability and performance
 
 Stream large payloads within bounded memory, apply backpressure, bound internal queues, and keep blocking SQLite and filesystem work off the async executor. Recover from abrupt termination and preserve committed metadata and content. Expose contention, support parallel test workers and quotas, and make time injectable for TTL, leases, and SAS expiry. Publish release-over-release benchmarks as regression measurements, not comparisons claiming Azure performance equivalence.

@@ -226,7 +226,6 @@ struct Runtime {
     locks: [Lock; Store::ALL.len()],
     failures: [[AtomicU64; Failure::ALL.len()]; Store::ALL.len()],
     removed: [Removed; Removal::ALL.len()],
-    probes: Mutex<Vec<Weak<dyn Probe>>>,
 }
 
 static RUNTIME: Runtime = Runtime {
@@ -244,8 +243,39 @@ static RUNTIME: Runtime = Runtime {
             bytes: AtomicU64::new(0),
         }
     }; Removal::ALL.len()],
-    probes: Mutex::new(Vec::new()),
 };
+
+/// The stores that report gauges, held weakly so a dropped store is forgotten.
+pub(crate) struct Probes(Mutex<Vec<Weak<dyn Probe>>>);
+
+static PROBES: Probes = Probes::new();
+
+impl Probes {
+    pub(crate) const fn new() -> Self {
+        Self(Mutex::new(Vec::new()))
+    }
+
+    pub(crate) fn register(&self, probe: Weak<dyn Probe>) {
+        let mut probes = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        probes.retain(|probe| probe.strong_count() > 0);
+        probes.push(probe);
+    }
+
+    fn gauges(&self) -> Gauges {
+        let live: Vec<Arc<dyn Probe>> = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect();
+        let mut gauges = Gauges::default();
+        for probe in live {
+            probe.sample(&mut gauges);
+        }
+        gauges
+    }
+}
 
 /// Locks `mutex`, counting the acquisition and the time spent waiting when another
 /// operation held it. Poisoning is reported exactly as `Mutex::lock` reports it.
@@ -297,27 +327,7 @@ pub(crate) fn removed(why: Removal, bytes: u64) {
 
 /// Registers a store for the gauges. It is forgotten once the store is dropped.
 pub(crate) fn register(probe: Weak<dyn Probe>) {
-    let mut probes = RUNTIME
-        .probes
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    probes.retain(|probe| probe.strong_count() > 0);
-    probes.push(probe);
-}
-
-fn gauges() -> Gauges {
-    let live: Vec<Arc<dyn Probe>> = RUNTIME
-        .probes
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .iter()
-        .filter_map(Weak::upgrade)
-        .collect();
-    let mut gauges = Gauges::default();
-    for probe in live {
-        probe.sample(&mut gauges);
-    }
-    gauges
+    PROBES.register(probe);
 }
 
 fn label(name: &'static str, value: &str) -> (&'static str, String) {
@@ -326,10 +336,14 @@ fn label(name: &'static str, value: &str) -> (&'static str, String) {
 
 /// Every series of one spec, as it stands now. Probe-backed specs query their stores.
 pub(crate) fn collect(spec: usize) -> Vec<Sampled> {
+    collect_in(&PROBES, spec)
+}
+
+fn collect_in(probes: &Probes, spec: usize) -> Vec<Sampled> {
     let mut out = Vec::new();
     match spec {
         QUEUE_MESSAGES => {
-            for ((account, queue), (visible, invisible)) in gauges().queues {
+            for ((account, queue), (visible, invisible)) in probes.gauges().queues {
                 for (state, count) in [("visible", visible), ("invisible", invisible)] {
                     out.push((
                         vec![
@@ -343,7 +357,7 @@ pub(crate) fn collect(spec: usize) -> Vec<Sampled> {
             }
         }
         ACTIVE_LEASES => {
-            for (kind, count) in gauges().leases {
+            for (kind, count) in probes.gauges().leases {
                 out.push((vec![label("kind", kind)], count as f64));
             }
         }
@@ -401,13 +415,17 @@ fn escape(value: &str) -> String {
 
 /// Appends every runtime series in the Prometheus text exposition format.
 pub(crate) fn render(out: &mut String) {
+    render_in(&PROBES, out);
+}
+
+fn render_in(probes: &Probes, out: &mut String) {
     for (index, spec) in SPECS.iter().enumerate() {
         let kind = match spec.kind {
             Kind::Counter => "counter",
             Kind::Gauge => "gauge",
         };
         family(out, spec.prometheus, kind, spec.help);
-        for (labels, value) in collect(index) {
+        for (labels, value) in collect_in(probes, index) {
             let labels = labels
                 .iter()
                 .map(|(name, value)| format!("{name}=\"{}\"", escape(value)))
@@ -498,19 +516,31 @@ mod tests {
         assert!(series(GC_BYTES, ("reason", "recovered")).unwrap() >= 7.0);
         assert!(series(GC_EXTENTS, ("reason", "reclaimed")).is_some());
 
+        // A registry of its own, so no store another test has open is sampled.
+        let probes = Probes::new();
+        let held = |spec, label| {
+            collect_in(&probes, spec)
+                .into_iter()
+                .find(|(labels, _)| {
+                    labels
+                        .iter()
+                        .any(|(k, v)| *k == label && v.starts_with("probe-"))
+                })
+                .map(|(_, value)| value)
+        };
         let probe = Arc::new(Fixed);
-        register(Arc::downgrade(&probe) as Weak<dyn Probe>);
-        assert_eq!(series(ACTIVE_LEASES, ("kind", "probe-test")), Some(2.0));
-        assert_eq!(series(QUEUE_MESSAGES, ("queue", "probe-q")), Some(3.0));
+        probes.register(Arc::downgrade(&probe) as Weak<dyn Probe>);
+        assert_eq!(held(ACTIVE_LEASES, "kind"), Some(2.0));
+        assert_eq!(held(QUEUE_MESSAGES, "queue"), Some(3.0));
         drop(probe);
-        assert_eq!(series(ACTIVE_LEASES, ("kind", "probe-test")), None);
+        assert_eq!(held(ACTIVE_LEASES, "kind"), None);
     }
 
     #[test]
     fn prometheus_output_escapes_label_values() {
         assert_eq!(escape("a\"b\\c\nd"), "a\\\"b\\\\c\\nd");
         let mut text = String::new();
-        render(&mut text);
+        render_in(&Probes::new(), &mut text);
         for spec in &SPECS {
             assert!(text.contains(&format!("# TYPE {} ", spec.prometheus)));
         }
