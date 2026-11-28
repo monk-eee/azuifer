@@ -2,13 +2,16 @@
 //! lazily, before the next metadata action, so every operation (Blob and DFS alike)
 //! sees it as gone on the shared clock (ADR-0012).
 
-use super::{BlobRow, Mode, Store, blob, blob_params, db_error, require_blob, snapshots};
+use super::{
+    BlobRow, Caller, Mode, Need, PathError, Store, blob, blob_params, db_error, dfs_paths,
+    internal, namespace, require_blob, snapshots,
+};
 use crate::{
     blob_expiry::ExpiryOption,
     blob_immutability::{PolicyMode, Protection},
     blob_lifecycle::{Incremental, Lifecycle},
     conditions::Guard,
-    domain::{AccountName, BlobKey, BlobPath, ContainerKey, ContainerName, Entity, Result},
+    domain::{AccountName, BlobKey, BlobPath, ContainerKey, ContainerName, Entity, Error, Result},
     lease::{LeaseNeed, LeaseOwner},
     stamp::Ticks,
 };
@@ -206,15 +209,35 @@ fn clear_raw(db: &Connection, account: &str, container: &str, name: &str) -> Res
 }
 
 impl Store {
-    /// Set Blob Expiry: sets, moves, or removes the deadline after which the blob is gone.
+    /// Set Blob Expiry / ADLS Gen2 Set Path Expiry: sets, moves, or removes the
+    /// deadline after which the blob is gone. On HNS accounts, enforces POSIX write
+    /// access and rejects existing directories rather than answering `BlobNotFound`.
     pub(crate) async fn set_expiry(
         &self,
         key: BlobKey,
         option: ExpiryOption,
         guard: Guard,
+        caller: Caller,
     ) -> Result<Entity> {
+        let hierarchical = self.hierarchical(&key.container);
         self.run(move |db, _, now| {
             let tx = db.transaction().map_err(db_error)?;
+            if hierarchical {
+                dfs_paths::check_access(
+                    &tx,
+                    &caller,
+                    &key.container,
+                    Some(key.path.as_str()),
+                    Need::WRITE,
+                )
+                .map_err(|error| match error {
+                    PathError::Shared(error) => error,
+                    _ => internal("unexpected path error during expiry authorization"),
+                })?;
+                if namespace::directory(&tx, &key.container, key.path.as_str())?.is_some() {
+                    return Err(Error::PathConflict);
+                }
+            }
             let row = require_blob(&tx, &key, now)?;
             row.lease
                 .check(guard.lease, LeaseNeed::Required, LeaseOwner::Blob, now)?;

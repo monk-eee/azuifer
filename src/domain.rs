@@ -626,8 +626,16 @@ pub(crate) enum ListEntry {
 }
 
 pub(crate) enum PathEntry {
-    File(Entity, ContentLength),
-    Directory(Entity),
+    File {
+        entity: Entity,
+        length: ContentLength,
+        created: u64,
+        expires: Option<i64>,
+    },
+    Directory {
+        entity: Entity,
+        created: u64,
+    },
 }
 
 pub(crate) struct BlobListing {

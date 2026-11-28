@@ -86,7 +86,7 @@ Stop the container with `docker stop azuifer-quickstart` when you're done.
 
 ## What works
 
-Azuifer implements **151 of 153 recognized operations**. Blob Rename Container and Table Atom payloads are recognized rejection boundaries, not implemented features.
+Azuifer implements **152 of 154 recognized operations**. Blob Rename Container and Table Atom payloads are recognized rejection boundaries, not implemented features.
 
 | Service | Available on Azuifer |
 | --- | --- |
@@ -94,7 +94,7 @@ Azuifer implements **151 of 153 recognized operations**. Blob Rename Container a
 | Queue | Queues, metadata, ACLs, service properties, and messages with visibility timeouts, pop receipts, and TTL |
 | Table | Tables, ACLs, every entity operation, OData `$filter` and `$select`, paging, ETag concurrency, and atomic entity-group batches |
 | Azure Files | Shares, snapshots, directories, files, ranges, rename, copy, leases, service properties, and SMB permissions including version-gated binary security descriptors. NFS shares support POSIX properties, hard links, and symbolic links over FileREST, not the NFS protocol. |
-| Data Lake (DFS) | HNS filesystems with append and flush, reads with ranged MD5, Create Path expiry, atomic rename, recursive delete, leases, POSIX ACL inheritance and recursive ACL changes with traversal checks. Blob and DFS share content and ETags. |
+| Data Lake (DFS) | HNS filesystems with append and flush, reads with ranged MD5, Create Path and Set Path Expiry (`PUT ?comp=expiry`) with DFS `HEAD` and `List Paths` expiry visibility, atomic rename, recursive delete, leases, POSIX ACL inheritance and recursive ACL changes with traversal checks. Blob and DFS share content and ETags. |
 | Authentication | Shared Key, Shared Key Lite, account and service SAS (including DFS directory SAS), user-delegation SAS, and bearer tokens (`--oauth`), over HTTP or HTTPS (`--tls-generate`, PEM, or PFX), at path-style or host-style endpoints. DFS checks bearer callers against POSIX ACLs |
 | Storage | In-memory or SQLite metadata with persistent payloads, per service |
 | Operations | `status`, `doctor`, and `reset` commands, Prometheus metrics, opt-in OpenTelemetry export, and a Compose example |
@@ -107,7 +107,7 @@ The [required CI check](https://github.com/monk-eee/azuifer/actions/workflows/ru
 
 See [how to run the same matrix locally](docs/compatibility/blob.md#azure-cli). CI also runs official Azure SDK suites in [Python](.github/workflows/rust.yml), [.NET](tests/dotnet_sdk/Program.cs), [JavaScript](tests/js_sdk/probe.js), [Java](tests/java_sdk/src/main/java/probe/Probe.java), and [Go](tests/go_sdk/main.go). They exercise all five services, including NFS FileREST links and shared Blob/DFS workflows. Those jobs show client interoperability with Azuifer, not wire equivalence with Azure.
 
-The [Azure contract harness](docs/compatibility/azure-contracts.md) has **51 reviewed Azure cassettes** and **270 of 1,277 planned exchanges matched**. The baseline recordings cover Blob, Queue, and Table; live DFS and FileREST are still pending. The [wire ledger](docs/compatibility/wire-discrepancies.json) tracks 31 pinned discrepancies between documentation, SDK behavior, and live responses. The regular Rust suite replays the fixtures without Azure credentials.
+The [Azure contract harness](docs/compatibility/azure-contracts.md) has **51 reviewed Azure cassettes** and **270 of 1,294 planned exchanges matched**. The baseline recordings cover Blob, Queue, and Table; live DFS and FileREST are still pending. The [wire ledger](docs/compatibility/wire-discrepancies.json) tracks 31 pinned discrepancies between documentation, SDK behavior, and live responses. The regular Rust suite replays the fixtures without Azure credentials.
 
 From the built binary, run `azuifer conformance export --format markdown` for the operation states and the matching evidence by service, operation, and auth mode. The default format is JSON. From the quickstart image:
 

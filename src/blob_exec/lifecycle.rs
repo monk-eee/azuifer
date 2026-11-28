@@ -21,9 +21,12 @@ pub(super) async fn execute(
 ) -> Result<Response> {
     let store = &app.store;
     match operation {
-        LifecycleOperation::SetExpiry(key, option, guard) => {
-            entity_response(StatusCode::OK, store.set_expiry(key, option, guard).await?)
-        }
+        LifecycleOperation::SetExpiry(key, option, guard) => entity_response(
+            StatusCode::OK,
+            store
+                .set_expiry(key, option, guard, ctx.credentials.dfs_caller())
+                .await?,
+        ),
         LifecycleOperation::SetImmutabilityPolicy(key, selector, request, guard) => {
             let protection = store
                 .set_immutability_policy(key, selector, request, guard)

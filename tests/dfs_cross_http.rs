@@ -9,6 +9,7 @@ use reqwest::{
     Method, Url,
     blocking::{Client, Response},
 };
+use serde_json::Value;
 use sha2::Sha256;
 use std::{
     collections::BTreeMap,
@@ -834,5 +835,192 @@ fn shared_state_survives_a_restart_through_both_protocols() {
             .dfs("HEAD", &format!("{LAKE}/dir"), &[], b"")
             .status(),
         404
+    );
+}
+
+#[test]
+fn set_path_expiry_agrees_across_blob_and_dfs_and_never_expire_clears_deadline() {
+    const EPOCH_AS_FILETIME: u64 = 116_444_736_000_000_000;
+    const TICKS_PER_SECOND: u64 = 10_000_000;
+
+    let server = Emulator::start_with_clock();
+    server.filesystem();
+    server.dfs_file("shared/from-dfs.txt", b"dfs payload");
+    server.put_blob("shared/from-blob.txt", &[], b"blob payload");
+
+    let dfs_deadline = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(60));
+    let dfs_deadline_secs = httpdate::parse_http_date(&dfs_deadline)
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert_eq!(
+        server
+            .dfs(
+                "PUT",
+                &format!("{LAKE}/shared/from-dfs.txt?comp=expiry"),
+                &[
+                    ("x-ms-expiry-option", "Absolute"),
+                    ("x-ms-expiry-time", &dfs_deadline),
+                ],
+                b"",
+            )
+            .status(),
+        200
+    );
+    assert_eq!(
+        server
+            .blob(
+                "PUT",
+                &format!("{LAKE}/shared/from-blob.txt?comp=expiry"),
+                &[
+                    ("x-ms-expiry-option", "RelativeToNow"),
+                    ("x-ms-expiry-time", "120000"),
+                ],
+                b"",
+            )
+            .status(),
+        200
+    );
+
+    // DFS HEAD, DFS getStatus, DFS List Paths, and Blob HEAD all report the same deadlines.
+    let blob_a = server.blob("HEAD", &format!("{LAKE}/shared/from-dfs.txt"), &[], b"");
+    let dfs_a = server.dfs("HEAD", &format!("{LAKE}/shared/from-dfs.txt"), &[], b"");
+    let status_a = server.dfs(
+        "HEAD",
+        &format!("{LAKE}/shared/from-dfs.txt?action=getStatus"),
+        &[],
+        b"",
+    );
+    assert_eq!(header(&blob_a, "x-ms-expiry-time"), dfs_deadline);
+    assert_eq!(header(&dfs_a, "x-ms-expiry-time"), dfs_deadline);
+    assert_eq!(header(&status_a, "x-ms-expiry-time"), dfs_deadline);
+
+    let blob_b = server.blob("HEAD", &format!("{LAKE}/shared/from-blob.txt"), &[], b"");
+    let dfs_b = server.dfs("HEAD", &format!("{LAKE}/shared/from-blob.txt"), &[], b"");
+    let b_expiry = header(&blob_b, "x-ms-expiry-time");
+    assert_eq!(header(&dfs_b, "x-ms-expiry-time"), b_expiry);
+
+    let listed: Value = serde_json::from_str(
+        &server
+            .dfs(
+                "GET",
+                &format!("{LAKE}?resource=filesystem&recursive=true&directory=shared"),
+                &[],
+                b"",
+            )
+            .text()
+            .unwrap(),
+    )
+    .unwrap();
+    let find = |name: &str| {
+        listed["paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    let a_ticks: u64 = find("shared/from-dfs.txt")["expiryTime"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        (a_ticks - EPOCH_AS_FILETIME) / TICKS_PER_SECOND,
+        dfs_deadline_secs
+    );
+    assert!(
+        find("shared/from-blob.txt")["expiryTime"]
+            .as_str()
+            .is_some()
+    );
+
+    // Clearing with NeverExpire removes the expiry on both DFS and Blob.
+    assert_eq!(
+        server
+            .dfs(
+                "PUT",
+                &format!("{LAKE}/shared/from-blob.txt?comp=expiry"),
+                &[("x-ms-expiry-option", "NeverExpire")],
+                b"",
+            )
+            .status(),
+        200
+    );
+    assert!(
+        !server
+            .dfs("HEAD", &format!("{LAKE}/shared/from-blob.txt"), &[], b"")
+            .headers()
+            .contains_key("x-ms-expiry-time")
+    );
+    assert!(
+        !server
+            .blob("HEAD", &format!("{LAKE}/shared/from-blob.txt"), &[], b"")
+            .headers()
+            .contains_key("x-ms-expiry-time")
+    );
+    let listed_cleared: Value = serde_json::from_str(
+        &server
+            .dfs(
+                "GET",
+                &format!("{LAKE}?resource=filesystem&recursive=true&directory=shared"),
+                &[],
+                b"",
+            )
+            .text()
+            .unwrap(),
+    )
+    .unwrap();
+    let b_after = listed_cleared["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "shared/from-blob.txt")
+        .unwrap();
+    assert!(b_after.get("expiryTime").is_none());
+
+    // Advance past the 60s deadline: from-dfs.txt disappears from both endpoints.
+    server.advance(70);
+    dfs_error(
+        server.dfs("HEAD", &format!("{LAKE}/shared/from-dfs.txt"), &[], b""),
+        404,
+        "PathNotFound",
+    );
+    dfs_error(
+        server.blob("HEAD", &format!("{LAKE}/shared/from-dfs.txt"), &[], b""),
+        404,
+        "BlobNotFound",
+    );
+    let blob_list = server
+        .blob(
+            "GET",
+            &format!("{LAKE}?restype=container&comp=list&prefix=shared/"),
+            &[],
+            b"",
+        )
+        .text()
+        .unwrap();
+    assert!(!blob_list.contains("from-dfs.txt"), "{blob_list}");
+    assert!(blob_list.contains("from-blob.txt"), "{blob_list}");
+
+    // Advance past from-blob.txt's old 120s deadline: NeverExpire keeps it alive on both endpoints.
+    server.advance(80);
+    assert_eq!(
+        server
+            .dfs("GET", &format!("{LAKE}/shared/from-blob.txt"), &[], b"")
+            .bytes()
+            .unwrap()
+            .as_ref(),
+        b"blob payload"
+    );
+    assert_eq!(
+        server
+            .blob("GET", &format!("{LAKE}/shared/from-blob.txt"), &[], b"")
+            .bytes()
+            .unwrap()
+            .as_ref(),
+        b"blob payload"
     );
 }

@@ -71,6 +71,24 @@ impl Credentials {
             _ => None,
         }
     }
+
+    /// How HNS POSIX access checks treat the caller: Shared Key and key-backed SAS
+    /// bypass ACLs (a user-delegation SAS carries the delegating user), and so do
+    /// bearer tokens with a data role; a bearer token without one is checked against
+    /// the ACLs by its object id.
+    pub(crate) fn dfs_caller(&self) -> crate::store::Caller {
+        match self {
+            Self::Key => crate::store::Caller::Superuser,
+            Self::Sas(token) => token
+                .delegated_oid()
+                .map_or(crate::store::Caller::Superuser, |oid| {
+                    crate::store::Caller::Principal(Some(oid.to_owned()))
+                }),
+            Self::Bearer(principal) if principal.has_roles() => crate::store::Caller::Superuser,
+            Self::Bearer(principal) => crate::store::Caller::Principal(principal.oid.clone()),
+            Self::Anonymous => crate::store::Caller::Principal(None),
+        }
+    }
 }
 
 pub(crate) struct Presented<'a> {

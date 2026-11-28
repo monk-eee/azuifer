@@ -3095,3 +3095,412 @@ fn create_path_refuses_an_expiry_too_far_ahead_to_report() {
     );
     assert_eq!(server.dfs("HEAD", &file, &[], b"").status(), 404);
 }
+
+fn blob_error(response: Response, status: u16, code: &str) {
+    assert_eq!(response.status().as_u16(), status);
+    assert_eq!(response.headers()["x-ms-error-code"], code);
+    let body = response.text().unwrap();
+    assert!(
+        body.contains(&format!("<Code>{code}</Code>")),
+        "expected XML error code {code}, got {body}"
+    );
+}
+
+fn filetime_to_unix_secs(ticks: &str) -> u64 {
+    const EPOCH_AS_FILETIME: u64 = 116_444_736_000_000_000;
+    const TICKS_PER_SECOND: u64 = 10_000_000;
+    let raw: u64 = ticks.parse().expect("decimal FILETIME ticks");
+    assert!(raw >= EPOCH_AS_FILETIME, "ticks before Unix epoch: {raw}");
+    (raw - EPOCH_AS_FILETIME) / TICKS_PER_SECOND
+}
+
+fn http_date_unix_secs(value: &str) -> u64 {
+    httpdate::parse_http_date(value)
+        .expect("RFC 1123 HTTP date")
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+#[test]
+fn set_path_expiry_rejects_directories_and_surfaces_expiry_on_dfs_head_and_list() {
+    let server = Emulator::start(&["--test-clock"]);
+    server.filesystem();
+    server.directory("dir");
+    server.file("dir/a.txt", b"expiring");
+    server.file("dir/plain.txt", b"keep");
+
+    // PATCH ?action=setExpiry does not exist in Azure ADLS Gen2; real Set Path Expiry is PUT ?comp=expiry.
+    dfs_error(
+        server.dfs(
+            "PATCH",
+            &format!("{LAKE}/dir/plain.txt?action=setExpiry"),
+            &[
+                ("x-ms-expiry-option", "RelativeToNow"),
+                ("x-ms-expiry-time", "60000"),
+            ],
+            b"",
+        ),
+        501,
+        "NotImplemented",
+    );
+
+    // PUT ?comp=expiry against an existing HNS directory must be rejected (not 404 BlobNotFound).
+    for headers in [
+        vec![
+            ("x-ms-expiry-option", "RelativeToNow"),
+            ("x-ms-expiry-time", "60000"),
+        ],
+        vec![("x-ms-expiry-option", "NeverExpire")],
+    ] {
+        blob_error(
+            server.dfs("PUT", &format!("{LAKE}/dir?comp=expiry"), &headers, b""),
+            409,
+            "BlobOperationNotSupported",
+        );
+        blob_error(
+            server.blob("PUT", &format!("{LAKE}/dir?comp=expiry"), &headers, b""),
+            409,
+            "BlobOperationNotSupported",
+        );
+    }
+
+    // Set Absolute expiry via PUT ?comp=expiry on the DFS listener and verify DFS HEAD & List Paths.
+    let absolute = httpdate::fmt_http_date(server.now() + Duration::from_secs(120));
+    let absolute_secs = http_date_unix_secs(&absolute);
+    let set = server.dfs(
+        "PUT",
+        &format!("{LAKE}/dir/a.txt?comp=expiry"),
+        &[
+            ("x-ms-expiry-option", "Absolute"),
+            ("x-ms-expiry-time", &absolute),
+        ],
+        b"",
+    );
+    assert_eq!(set.status(), 200);
+
+    for suffix in ["", "?action=getStatus", "?action=getAccessControl"] {
+        let head = server.dfs("HEAD", &format!("{LAKE}/dir/a.txt{suffix}"), &[], b"");
+        assert_eq!(head.status(), 200, "{suffix}");
+        assert_eq!(header(&head, "x-ms-expiry-time"), absolute, "{suffix}");
+        assert!(
+            head.headers().contains_key("x-ms-creation-time"),
+            "missing x-ms-creation-time on {suffix}"
+        );
+    }
+    let plain_head = server.dfs("HEAD", &format!("{LAKE}/dir/plain.txt"), &[], b"");
+    assert_eq!(plain_head.status(), 200);
+    assert!(!plain_head.headers().contains_key("x-ms-expiry-time"));
+    assert!(plain_head.headers().contains_key("x-ms-creation-time"));
+
+    let dir_head = server.dfs("HEAD", &format!("{LAKE}/dir"), &[], b"");
+    assert_eq!(dir_head.status(), 200);
+    assert!(!dir_head.headers().contains_key("x-ms-expiry-time"));
+    assert!(dir_head.headers().contains_key("x-ms-creation-time"));
+
+    let a_created = http_date_unix_secs(&header(
+        &server.dfs("HEAD", &format!("{LAKE}/dir/a.txt"), &[], b""),
+        "x-ms-creation-time",
+    ));
+    let listing = json_body(server.dfs(
+        "GET",
+        &format!("{LAKE}?resource=filesystem&recursive=true"),
+        &[],
+        b"",
+    ));
+    let entry = |name: &str| {
+        listing["paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["name"] == name)
+            .unwrap_or_else(|| panic!("missing {name} in {listing}"))
+            .clone()
+    };
+    let dir_entry = entry("dir");
+    assert!(dir_entry["creationTime"].as_str().is_some());
+    assert!(dir_entry.get("expiryTime").is_none());
+
+    let a_entry = entry("dir/a.txt");
+    assert_eq!(
+        filetime_to_unix_secs(a_entry["creationTime"].as_str().unwrap()),
+        a_created
+    );
+    assert_eq!(
+        filetime_to_unix_secs(a_entry["expiryTime"].as_str().unwrap()),
+        absolute_secs
+    );
+
+    let plain_entry = entry("dir/plain.txt");
+    assert!(plain_entry["creationTime"].as_str().is_some());
+    assert!(plain_entry.get("expiryTime").is_none());
+
+    // RelativeToCreation and NeverExpire round-trip on DFS HEAD and List Paths.
+    assert_eq!(
+        server
+            .dfs(
+                "PUT",
+                &format!("{LAKE}/dir/plain.txt?comp=expiry"),
+                &[
+                    ("x-ms-expiry-option", "RelativeToCreation"),
+                    ("x-ms-expiry-time", "600000"),
+                ],
+                b"",
+            )
+            .status(),
+        200
+    );
+    assert!(
+        server
+            .dfs("HEAD", &format!("{LAKE}/dir/plain.txt"), &[], b"")
+            .headers()
+            .contains_key("x-ms-expiry-time")
+    );
+    assert_eq!(
+        server
+            .dfs(
+                "PUT",
+                &format!("{LAKE}/dir/plain.txt?comp=expiry"),
+                &[("x-ms-expiry-option", "NeverExpire")],
+                b"",
+            )
+            .status(),
+        200
+    );
+    assert!(
+        !server
+            .dfs("HEAD", &format!("{LAKE}/dir/plain.txt"), &[], b"")
+            .headers()
+            .contains_key("x-ms-expiry-time")
+    );
+
+    // Advance past dir/a.txt's deadline: file is removed, while directory and plain file remain.
+    server.advance(130);
+    dfs_error(
+        server.dfs("HEAD", &format!("{LAKE}/dir/a.txt"), &[], b""),
+        404,
+        "PathNotFound",
+    );
+    let after = json_body(server.dfs(
+        "GET",
+        &format!("{LAKE}?resource=filesystem&recursive=true"),
+        &[],
+        b"",
+    ));
+    assert_eq!(path_names(&after), ["dir", "dir/plain.txt"]);
+}
+
+#[test]
+fn set_path_expiry_enforces_posix_acls_for_bearer_and_user_delegation_sas() {
+    let server = Emulator::start(&["--oauth", "basic", "--test-clock"]);
+    server.filesystem();
+    server.directory("d");
+    server.directory("d/sub");
+    server.file("d/f.txt", b"acl-protected");
+    let user = server.token(OID);
+    let expiry_headers = [
+        ("x-ms-expiry-option", "RelativeToNow"),
+        ("x-ms-expiry-time", "600000"),
+    ];
+
+    // No root/parent execute or file write -> denied on both DFS and Blob endpoints.
+    blob_error(
+        server.dfs_as(
+            &user,
+            "PUT",
+            &format!("{LAKE}/d/f.txt?comp=expiry"),
+            &expiry_headers,
+        ),
+        403,
+        "AuthorizationPermissionMismatch",
+    );
+    blob_error(
+        server.send(
+            &server.blob,
+            "PUT",
+            &format!("{LAKE}/d/f.txt?comp=expiry"),
+            &expiry_headers,
+            b"",
+            &user,
+        ),
+        403,
+        "AuthorizationPermissionMismatch",
+    );
+
+    // Ancestor execute + read-only on the file is still insufficient: write right is required.
+    grant(&server, "", "user::rwx,group::r-x,other::--x");
+    grant(
+        &server,
+        "d",
+        &format!("user::rwx,user:{OID}:r-x,group::r-x,other::---"),
+    );
+    grant(
+        &server,
+        "d/f.txt",
+        &format!("user::rw-,user:{OID}:r--,group::r--,other::---"),
+    );
+    blob_error(
+        server.dfs_as(
+            &user,
+            "PUT",
+            &format!("{LAKE}/d/f.txt?comp=expiry"),
+            &expiry_headers,
+        ),
+        403,
+        "AuthorizationPermissionMismatch",
+    );
+
+    // Granting write on the file allows PUT ?comp=expiry.
+    grant(
+        &server,
+        "d/f.txt",
+        &format!("user::rw-,user:{OID}:rw-,group::r--,other::---"),
+    );
+    assert_eq!(
+        server
+            .dfs_as(
+                &user,
+                "PUT",
+                &format!("{LAKE}/d/f.txt?comp=expiry"),
+                &expiry_headers
+            )
+            .status(),
+        200
+    );
+    assert!(
+        server
+            .dfs("HEAD", &format!("{LAKE}/d/f.txt"), &[], b"")
+            .headers()
+            .contains_key("x-ms-expiry-time")
+    );
+
+    // Removing execute on the parent directory blocks the caller again despite file write.
+    grant(
+        &server,
+        "d",
+        &format!("user::rwx,user:{OID}:rw-,group::r-x,other::---"),
+    );
+    blob_error(
+        server.dfs_as(
+            &user,
+            "PUT",
+            &format!("{LAKE}/d/f.txt?comp=expiry"),
+            &[("x-ms-expiry-option", "NeverExpire")],
+        ),
+        403,
+        "AuthorizationPermissionMismatch",
+    );
+    grant(
+        &server,
+        "d",
+        &format!("user::rwx,user:{OID}:r-x,group::r-x,other::---"),
+    );
+
+    // Directory target: denied by ACL when lacking write on directory, rejected as conflict once granted.
+    blob_error(
+        server.dfs_as(
+            &user,
+            "PUT",
+            &format!("{LAKE}/d/sub?comp=expiry"),
+            &expiry_headers,
+        ),
+        403,
+        "AuthorizationPermissionMismatch",
+    );
+    grant(
+        &server,
+        "d/sub",
+        &format!("user::rwx,user:{OID}:rwx,group::r-x,other::---"),
+    );
+    blob_error(
+        server.dfs_as(
+            &user,
+            "PUT",
+            &format!("{LAKE}/d/sub?comp=expiry"),
+            &expiry_headers,
+        ),
+        409,
+        "BlobOperationNotSupported",
+    );
+
+    // User-delegation SAS with sp=w is still gated by the delegating user's POSIX ACL.
+    let body = format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?><KeyInfo><Start>{}</Start><Expiry>{}</Expiry></KeyInfo>",
+        in_seconds(&server, -60),
+        in_seconds(&server, 3600)
+    );
+    let key = server.send(
+        &server.blob,
+        "POST",
+        &format!("/{ACCOUNT}?restype=service&comp=userdelegationkey"),
+        &[],
+        body.as_bytes(),
+        &user,
+    );
+    assert_eq!(key.status(), 200);
+    let xml = key.text().unwrap();
+    let field = |name: &str| {
+        let open = format!("<{name}>");
+        let start = xml.find(&open).unwrap() + open.len();
+        xml[start..start + xml[start..].find('<').unwrap()].to_owned()
+    };
+    let (oid, tid, start, expiry) = (
+        field("SignedOid"),
+        field("SignedTid"),
+        field("SignedStart"),
+        field("SignedExpiry"),
+    );
+    let secret = STANDARD.decode(field("Value")).unwrap();
+    let canonical = format!("/blob/{ACCOUNT}/lake/d/f.txt");
+    let se = in_seconds(&server, 600);
+    let signed = [
+        "w", "", &se, &canonical, &oid, &tid, &start, &expiry, "b", VERSION, "", "", "", "", "",
+        VERSION, "b", "", "", "", "", "", "", "",
+    ]
+    .join("\n");
+    let udsas = Auth::Sas(format!(
+        "sv={VERSION}&sr=b&sp=w&se={}&skoid={oid}&sktid={tid}&skt={}&ske={}&sks=b&skv={VERSION}&sig={}",
+        encode(&se),
+        encode(&start),
+        encode(&expiry),
+        encode(&sign_with(&secret, &signed))
+    ));
+
+    grant(
+        &server,
+        "d/f.txt",
+        &format!("user::rw-,user:{OID}:r--,group::r--,other::---"),
+    );
+    blob_error(
+        server.dfs_as(
+            &udsas,
+            "PUT",
+            &format!("{LAKE}/d/f.txt?comp=expiry"),
+            &[("x-ms-expiry-option", "NeverExpire")],
+        ),
+        403,
+        "AuthorizationPermissionMismatch",
+    );
+    grant(
+        &server,
+        "d/f.txt",
+        &format!("user::rw-,user:{OID}:rw-,group::r--,other::---"),
+    );
+    assert_eq!(
+        server
+            .dfs_as(
+                &udsas,
+                "PUT",
+                &format!("{LAKE}/d/f.txt?comp=expiry"),
+                &[("x-ms-expiry-option", "NeverExpire")],
+            )
+            .status(),
+        200
+    );
+    assert!(
+        !server
+            .dfs("HEAD", &format!("{LAKE}/d/f.txt"), &[], b"")
+            .headers()
+            .contains_key("x-ms-expiry-time")
+    );
+}

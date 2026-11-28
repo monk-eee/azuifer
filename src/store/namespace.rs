@@ -101,11 +101,18 @@ fn list(
 ) -> Result<Page<(PathEntry, Attributes)>> {
     let mut query = db
         .prepare(
-            "SELECT id, modified, etag, length, name, directory, posix_owner, posix_group, posix_acl, posix_sticky
-         FROM namespace_entries
-         WHERE account=?1 AND container=?2 AND name>?3 AND name>=?4 AND instr(name, ?4)=1
-           AND (?5 OR instr(substr(name, length(?4)+1), '/')=0)
-         ORDER BY name LIMIT ?6",
+            "SELECT e.id, e.modified, e.etag, e.length, e.name, e.directory,
+                    e.posix_owner, e.posix_group, e.posix_acl, e.posix_sticky,
+                    COALESCE(NULLIF(b.created, 0), e.modified),
+                    l.expires_at
+         FROM namespace_entries e
+         LEFT JOIN blobs b
+           ON e.directory = 0 AND b.account = e.account AND b.container = e.container AND b.name = e.name
+         LEFT JOIN blob_lifecycle l
+           ON e.directory = 0 AND l.account = e.account AND l.container = e.container AND l.name = e.name
+         WHERE e.account=?1 AND e.container=?2 AND e.name>?3 AND e.name>=?4 AND instr(e.name, ?4)=1
+           AND (?5 OR instr(substr(e.name, length(?4)+1), '/')=0)
+         ORDER BY e.name LIMIT ?6",
         )
         .map_err(db_error)?;
     let rows = query
@@ -121,11 +128,20 @@ fn list(
             |row| {
                 let entity = entity_row(row)?;
                 let directory: bool = row.get(5)?;
+                let created = row_uint(row, 10)?;
                 let (entry, kind) = if directory {
-                    (PathEntry::Directory(entity), PathKind::Directory)
+                    (
+                        PathEntry::Directory { entity, created },
+                        PathKind::Directory,
+                    )
                 } else {
                     (
-                        PathEntry::File(entity, ContentLength(row_uint(row, 3)?)),
+                        PathEntry::File {
+                            entity,
+                            length: ContentLength(row_uint(row, 3)?),
+                            created,
+                            expires: row.get(11)?,
+                        },
                         PathKind::File,
                     )
                 };
