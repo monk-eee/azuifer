@@ -31,7 +31,7 @@ use super::{
     },
     name::EntryPath,
 };
-use crate::clock::Clock;
+use crate::{clock::Clock, extent_readers::Readers};
 use anyhow::Context as _;
 use rusqlite::{Connection, OptionalExtension as _, Row, params};
 use std::{
@@ -106,8 +106,14 @@ pub(super) struct Env {
 }
 
 pub(super) enum Mode {
-    Disk { extents: PathBuf, _lock: File },
-    Memory { limit: u64 },
+    Disk {
+        extents: PathBuf,
+        readers: Arc<Readers>,
+        _lock: File,
+    },
+    Memory {
+        limit: u64,
+    },
 }
 
 impl Store {
@@ -155,6 +161,7 @@ impl Store {
                 db,
                 Mode::Disk {
                     extents,
+                    readers: Arc::default(),
                     _lock: lock,
                 },
             )

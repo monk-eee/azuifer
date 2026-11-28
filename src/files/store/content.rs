@@ -3,24 +3,21 @@
 use super::{Env, Mode, Store, db_error, from_sql, fs, internal, io_error, to_sql};
 use crate::{
     checksum::{Checksum, Checksums, Hasher},
+    extent_readers::{ExtentSlice, Piece, ReadBody},
     files::error::{Error, Result},
     ranges::{Mapping, RangeMap, Segment},
 };
 use axum::body::Bytes;
-use futures_util::{StreamExt as _, stream::BoxStream};
+use futures_util::stream::BoxStream;
 use rusqlite::{Connection, params};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::File,
-    io::{Read as _, Seek as _, SeekFrom},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use tempfile::NamedTempFile;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio_util::io::ReaderStream;
+use tokio::io::AsyncWriteExt as _;
 use uuid::Uuid;
-
-const ZERO_CHUNK: u64 = 64 * 1024;
 
 /// A request body being streamed into staging.
 pub(crate) struct Upload {
@@ -305,13 +302,14 @@ impl Reclaim {
     }
 }
 
-/// Removes on-disk extents after the transaction that dropped their last reference committed.
+/// Retires unreferenced extents after commit; in-flight downloads keep their pins.
 pub(super) fn discard(env: &Env, ids: &[String]) {
-    if let Mode::Disk { extents, .. } = &env.mode {
+    if let Mode::Disk {
+        extents, readers, ..
+    } = &env.mode
+    {
         for id in ids {
-            if let Err(error) = std::fs::remove_file(extent_path(extents, id)) {
-                tracing::warn!(kind = ?error.kind(), "file content cleanup deferred until recovery");
-            }
+            readers.reclaim(&extent_path(extents, id));
         }
     }
 }
@@ -340,18 +338,12 @@ pub(super) fn recover(db: &Connection, dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-enum Piece {
-    Disk(File, u64),
-    Memory(Vec<u8>),
-    Zeros(u64),
-}
-
 /// The bytes of a read: extent slices and zero-filled holes, streamed in order.
-pub(crate) struct FileBody(Vec<Piece>);
+pub(crate) struct FileBody(ReadBody);
 
 impl FileBody {
     pub(crate) fn empty() -> Self {
-        Self(Vec::new())
+        Self(ReadBody::default())
     }
 
     /// Resolves `[offset, offset + length)` of a file's map into readable pieces.
@@ -376,15 +368,17 @@ impl FileBody {
                     ..
                 } => match &env.mode {
                     Mode::Disk { extents, .. } => {
-                        let mut file =
-                            File::open(extent_path(extents, &extent)).map_err(io_error)?;
-                        let size = file.metadata().map_err(io_error)?.len();
+                        let path = extent_path(extents, &extent);
+                        fs::require_file_if_present(&path).map_err(io_error)?;
+                        let size = std::fs::metadata(&path).map_err(io_error)?.len();
                         if size < extent_offset + length {
                             return Err(internal("extent is shorter than its range"));
                         }
-                        file.seek(SeekFrom::Start(extent_offset))
-                            .map_err(io_error)?;
-                        Piece::Disk(file, length)
+                        Piece::Disk(ExtentSlice {
+                            path: Arc::from(path),
+                            offset: extent_offset,
+                            length,
+                        })
                     }
                     Mode::Memory { .. } => {
                         let bytes: Vec<u8> = db
@@ -402,60 +396,23 @@ impl FileBody {
                 },
             });
         }
-        Ok(Self(pieces))
+        let readers = match &env.mode {
+            Mode::Disk { readers, .. } => Some(readers),
+            Mode::Memory { .. } => None,
+        };
+        Ok(Self(ReadBody::new(pieces, readers)))
     }
 
     /// Reads everything into memory; callers bound the size (MD5 of a ranged read).
     pub(super) fn into_vec(self) -> Result<Vec<u8>> {
-        let mut out = Vec::new();
-        for piece in self.0 {
-            match piece {
-                Piece::Disk(file, length) => {
-                    let before = out.len();
-                    file.take(length).read_to_end(&mut out).map_err(io_error)?;
-                    if (out.len() - before) as u64 != length {
-                        return Err(internal("extent ended early"));
-                    }
-                }
-                Piece::Memory(bytes) => out.extend_from_slice(&bytes),
-                Piece::Zeros(length) => {
-                    let length =
-                        usize::try_from(length).map_err(|_| internal("range too large"))?;
-                    out.resize(out.len() + length, 0);
-                }
-            }
-        }
-        Ok(out)
+        self.0.into_vec().map_err(io_error)
     }
 
     pub(super) fn from_vec(bytes: Vec<u8>) -> Self {
-        Self(vec![Piece::Memory(bytes)])
+        Self(ReadBody::new(vec![Piece::Memory(bytes)], None))
     }
 
     pub(crate) fn into_stream(self) -> BoxStream<'static, std::io::Result<Bytes>> {
-        futures_util::stream::iter(self.0)
-            .map(piece_stream)
-            .flatten()
-            .boxed()
-    }
-}
-
-fn piece_stream(piece: Piece) -> BoxStream<'static, std::io::Result<Bytes>> {
-    match piece {
-        Piece::Disk(file, length) => {
-            ReaderStream::new(tokio::fs::File::from_std(file).take(length)).boxed()
-        }
-        Piece::Memory(bytes) => {
-            futures_util::stream::once(async move { Ok(Bytes::from(bytes)) }).boxed()
-        }
-        Piece::Zeros(length) => futures_util::stream::unfold(length, |left| async move {
-            if left == 0 {
-                return None;
-            }
-            let take = left.min(ZERO_CHUNK);
-            let chunk = Bytes::from(vec![0u8; usize::try_from(take).unwrap_or(0)]);
-            Some((Ok(chunk), left - take))
-        })
-        .boxed(),
+        self.0.into_stream()
     }
 }

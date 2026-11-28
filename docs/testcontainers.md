@@ -184,4 +184,6 @@ docker exec <container> /azuifer status
 docker exec <container> /azuifer doctor --bind 0.0.0.0 --in-memory
 ```
 
+`doctor` uses `/status` to check which listeners and storage locks belong to the running instance. An occupied port or lock is not considered healthy just because an admin listener responds. The status reports a persistent data directory as an absolute path.
+
 Add `--prometheus` to the command to serve metrics at `http://<host>:<admin port>/metrics`. Set `--otlp-endpoint http://<collector>:4317` to send traces and metrics to a collector on the container network.

@@ -26,6 +26,7 @@ mod conformance;
 mod delegation;
 mod dfs;
 mod domain;
+mod extent_readers;
 mod files;
 #[cfg(test)]
 mod hostile;
