@@ -23,6 +23,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     time::Duration,
 };
+use tokio::time::Instant;
 use uuid::Uuid;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -54,7 +55,10 @@ impl Rule {
         ensure!(!entry.contains('*'), "wildcards are written as *.domain");
         let (host, port) = split_host_port(&entry)?;
         ensure!(!host.is_empty(), "an allowed copy source cannot be empty");
-        Ok(Self::Exact { host, port })
+        Ok(Self::Exact {
+            host: normalize_literal(&host),
+            port,
+        })
     }
 
     fn matches(&self, host: &str, port: u16) -> bool {
@@ -79,6 +83,11 @@ impl Rule {
                 .flatten(),
         }
     }
+}
+
+fn normalize_literal(host: &str) -> String {
+    host.parse::<Ipv6Addr>()
+        .map_or_else(|_| host.to_owned(), |address| address.to_string())
 }
 
 /// `host`, `host:port`, `[v6]`, or `[v6]:port`, lowercased and without brackets.
@@ -205,11 +214,11 @@ impl Target {
     pub(crate) fn new(source: &CopySource) -> Self {
         let (scheme, host, port, path, query) = source.parts();
         let port = port.unwrap_or(if scheme == "https" { 443 } else { 80 });
-        let host = host.trim_matches(['[', ']']).to_owned();
+        let host = host.trim_matches(['[', ']']);
         let bracketed = if host.contains(':') {
             format!("[{host}]")
         } else {
-            host.clone()
+            host.to_owned()
         };
         let display = format!("{scheme}://{bracketed}:{port}{path}");
         let url = match query {
@@ -217,7 +226,7 @@ impl Target {
             None => display.clone(),
         };
         Self {
-            host,
+            host: normalize_literal(host),
             port,
             url,
             display,
@@ -240,13 +249,10 @@ async fn resolve(host: &str, port: u16) -> Result<Vec<IpAddr>> {
     if let Ok(address) = host.parse::<IpAddr>() {
         return Ok(vec![address]);
     }
-    let addresses: Vec<SocketAddr> =
-        tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::lookup_host((host, port)))
-            .await
-            .map_err(|_| Error::CopySourceDenied)?
-            .map_err(|_| Error::CopySourceDenied)?
-            .collect();
-    Ok(addresses.into_iter().map(|address| address.ip()).collect())
+    let addresses = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|_| Error::CopySourceDenied)?;
+    Ok(addresses.map(|address| address.ip()).collect())
 }
 
 /// Checks the guard and opens the source. `range` is a `Range` header value for a
@@ -258,16 +264,38 @@ pub(crate) async fn open(
     limit: u64,
     timeout: Duration,
 ) -> Result<Remote> {
+    open_with_resolution(
+        allowlist,
+        target,
+        range,
+        limit,
+        timeout,
+        resolve(&target.host, target.port),
+    )
+    .await
+}
+
+async fn open_with_resolution(
+    allowlist: &Allowlist,
+    target: &Target,
+    range: Option<&str>,
+    limit: u64,
+    timeout: Duration,
+    resolution: impl Future<Output = Result<Vec<IpAddr>>>,
+) -> Result<Remote> {
     let rule = allowlist
         .rule(&target.host, target.port)
         .ok_or(Error::Unsupported)?;
-    let addresses = resolve(&target.host, target.port).await?;
+    let started = Instant::now();
+    let deadline = started + timeout;
+    let addresses = tokio::time::timeout_at(started + timeout.min(CONNECT_TIMEOUT), resolution)
+        .await
+        .map_err(|_| Error::CopySourceDenied)??;
     let address = rule.admit(&addresses).ok_or(Error::CopySourceDenied)?;
     let mut builder = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(timeout)
         .user_agent("azuifer-copy");
     if target.host.parse::<IpAddr>().is_err() {
         // Connect to the address that passed the guard, not to a second lookup.
@@ -278,7 +306,12 @@ pub(crate) async fn open(
     if let Some(range) = range {
         request = request.header("range", range);
     }
-    let response = request.send().await.map_err(|error| {
+    // Reqwest applies the remaining budget through the last response body byte.
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or(Error::CopySourceDenied)?;
+    let response = request.timeout(remaining).send().await.map_err(|error| {
         tracing::warn!(
             timeout = error.is_timeout(),
             "external copy source unreachable"
@@ -392,6 +425,26 @@ mod tests {
     }
 
     #[test]
+    fn exact_ipv6_rules_accept_equivalent_notation_only_on_the_configured_port() {
+        let compressed = "[2001:db8::42]";
+        let expanded = "[2001:0DB8:0000:0000:0000:0000:0000:0042]";
+        for (configured, requested) in [(expanded, compressed), (compressed, expanded)] {
+            let list = allow(&format!("{configured}:8443"));
+            let target = |host, port| {
+                Target::new(
+                    &CopySource::parse(&format!("https://{host}:{port}/archive/example")).unwrap(),
+                )
+            };
+            let intended = target(requested, 8443);
+            assert!(list.rule(&intended.host, intended.port).is_some());
+            let wrong_port = target(requested, 443);
+            assert!(list.rule(&wrong_port.host, wrong_port.port).is_none());
+            let different = target("[2001:db8::43]", 8443);
+            assert!(list.rule(&different.host, different.port).is_none());
+        }
+    }
+
+    #[test]
     fn only_public_addresses_pass_the_guard() {
         for private in [
             "127.0.0.1",
@@ -472,6 +525,27 @@ mod tests {
     }
 
     const TIMEOUT: Duration = Duration::from_secs(5);
+
+    #[tokio::test]
+    async fn resolving_a_source_consumes_the_fetch_time_budget() {
+        let target =
+            Target::new(&CopySource::parse("https://source.example.test/archive/example").unwrap());
+        let list = allow("source.example.test");
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            open_with_resolution(
+                &list,
+                &target,
+                None,
+                100,
+                Duration::from_millis(25),
+                std::future::pending(),
+            ),
+        )
+        .await
+        .expect("copy must time out without waiting for the resolver");
+        assert_eq!(result.err(), Some(Error::CopySourceDenied));
+    }
 
     #[tokio::test]
     async fn an_allowlisted_host_is_read_with_its_range_and_sas_passed_through() {
