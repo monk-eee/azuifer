@@ -6,7 +6,7 @@
 mod query_avro;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use hmac::{Hmac, Mac as _};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use reqwest::{
     Method, Url,
     blocking::{Client, Response},

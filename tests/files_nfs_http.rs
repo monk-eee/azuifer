@@ -3,7 +3,7 @@
 //! `files_http.rs` so the two files merge independently.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use hmac::{Hmac, Mac as _};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use reqwest::{Method, Url, blocking::Client, header::HeaderMap};
 use sha2::Sha256;
 use std::{

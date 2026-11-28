@@ -4,7 +4,7 @@
 //! coherent across both protocols. DFS operation details are in `dfs_http.rs`.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use hmac::{Hmac, Mac as _};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use reqwest::{
     Method, Url,
     blocking::{Client, Response},

@@ -7,7 +7,7 @@
 //! content file that has gone missing must answer an error and leave the server running.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use hmac::{Hmac, Mac as _};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use reqwest::{Url, blocking::Client};
 use rusqlite::Connection;
 use std::{

@@ -374,7 +374,7 @@ fn metadata_response(metadata: &Metadata, count: i64) -> Result<Response> {
 mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
-    use hmac::{Hmac, Mac as _};
+    use hmac::{Hmac, KeyInit as _, Mac as _};
     use sha2::Sha256;
     use std::time::Duration;
 

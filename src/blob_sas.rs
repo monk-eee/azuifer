@@ -410,7 +410,7 @@ mod tests {
     use super::*;
     use crate::oauth::Principal;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
-    use hmac::{Hmac, Mac as _};
+    use hmac::{Hmac, KeyInit as _, Mac as _};
     use sha2::Sha256;
 
     const KEY: [u8; 32] = [7; 32];
