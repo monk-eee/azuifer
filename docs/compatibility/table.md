@@ -68,6 +68,7 @@ The [entity lifecycle](../../tests/contracts/cassettes/table-entity-lifecycle.js
 
 - Unit tests live beside the code in `src/table/` (filter parser and evaluator, Edm serialization, string-to-sign and SAS, batch parsing, ETags).
 - [HTTP suite](../../tests/table_http.rs) runs the real binary: table lifecycle, every entity operation, ETag concurrency, batches, paging, limits, authentication, ACLs, and restart persistence. The [addressing suite](../../tests/addressing_http.rs) covers host-style Shared Key, SAS and the secondary host.
+- The [service concurrency suite](../../tests/service_concurrency_auth_http.rs) races changesets and individual writes in one partition and reads back the winners after a crash. A stale-ETag changeset must leave no rows behind.
 - The [SDK and CLI script](../../tests/table_sdk.py) drives the `azure-data-tables` Python SDK against the binary. The Python [CI job](../../.github/workflows/rust.yml) uses `--skip-az`. Omit that flag locally to run the optional `az storage table` and `az storage entity` checks as well:
 
 ```sh
