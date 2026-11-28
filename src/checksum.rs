@@ -30,16 +30,12 @@ impl Hasher {
     }
 
     pub(crate) fn finish(self, expected: Option<Checksum>) -> Result<Checksums> {
-        let md5: [u8; 16] = self.md5.finalize().into();
-        let crc64 = self.crc64.finalize();
-        match expected {
-            Some(Checksum::Md5(expected)) if expected != md5 => return Err(Error::Md5Mismatch),
-            Some(Checksum::Crc64(expected)) if expected != crc64 => {
-                return Err(Error::Crc64Mismatch);
-            }
-            _ => (),
-        }
-        Ok(Checksums { md5, crc64 })
+        let checksums = Checksums {
+            md5: self.md5.finalize().into(),
+            crc64: self.crc64.finalize(),
+        };
+        checksums.verify(expected)?;
+        Ok(checksums)
     }
 }
 
@@ -49,6 +45,15 @@ pub(crate) struct Checksums {
 }
 
 impl Checksums {
+    /// Compares the digests of the bytes seen with the one the request declared.
+    pub(crate) fn verify(&self, expected: Option<Checksum>) -> Result<()> {
+        match expected {
+            Some(Checksum::Md5(expected)) if expected != self.md5 => Err(Error::Md5Mismatch),
+            Some(Checksum::Crc64(expected)) if expected != self.crc64 => Err(Error::Crc64Mismatch),
+            _ => Ok(()),
+        }
+    }
+
     pub(crate) fn md5_text(&self) -> String {
         STANDARD.encode(self.md5)
     }

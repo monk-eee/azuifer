@@ -1642,6 +1642,232 @@ fn page_and_append_blocks_can_be_read_from_a_same_instance_url() {
 }
 
 #[test]
+fn from_url_source_checksums_are_verified_before_anything_commits() {
+    in_both_modes(|server| {
+        server.create_container();
+        let mut source = vec![b'a'; 512];
+        source.extend([b'b'; 1024]);
+        assert_eq!(server.put_block_blob(BLOCK, &source).status(), 201);
+        let window = vec![b'b'; 1024];
+        let (md5, crc) = (md5_text(&window), crc64_text(&window));
+        let (other_md5, other_crc) = (md5_text(b"other"), crc64_text(b"other"));
+        let slice = ("x-ms-source-range", "bytes=512-1535");
+
+        assert_eq!(server.create_page(PAGE, 4096, &[]).status(), 201);
+        let page = |range: &'static str, extra: &[(&str, &str)]| {
+            let mut headers = vec![slice, ("x-ms-range", range)];
+            headers.extend_from_slice(extra);
+            server.put_from_url(PAGE, "comp=page", &headers)
+        };
+        error(
+            page("bytes=0-1023", &[("x-ms-source-content-md5", &other_md5)]),
+            400,
+            "Md5Mismatch",
+        );
+        error(
+            page("bytes=0-1023", &[("x-ms-source-content-crc64", &other_crc)]),
+            400,
+            "Crc64Mismatch",
+        );
+        for malformed in [
+            vec![
+                ("x-ms-source-content-md5", md5.as_str()),
+                ("x-ms-source-content-crc64", crc.as_str()),
+            ],
+            vec![("x-ms-source-content-md5", "not base64!")],
+            vec![("x-ms-source-content-md5", crc.as_str())],
+            vec![("x-ms-source-content-crc64", md5.as_str())],
+        ] {
+            error(page("bytes=0-1023", &malformed), 400, "InvalidHeaderValue");
+        }
+        assert!(
+            ranges(server.page_ranges(PAGE, "", &[])).is_empty(),
+            "a rejected source writes no pages"
+        );
+        assert_eq!(
+            page("bytes=0-1023", &[("x-ms-source-content-md5", &md5)]).status(),
+            201
+        );
+        assert_eq!(
+            page("bytes=2048-3071", &[("x-ms-source-content-crc64", &crc)]).status(),
+            201
+        );
+        assert_eq!(
+            ranges(server.page_ranges(PAGE, "", &[])),
+            [(0, 1023), (2048, 3071)]
+        );
+
+        assert_eq!(server.create_append(APPEND, &[]).status(), 201);
+        let append = |extra: &[(&str, &str)]| {
+            let mut headers = vec![slice];
+            headers.extend_from_slice(extra);
+            server.put_from_url(APPEND, "comp=appendblock", &headers)
+        };
+        error(
+            append(&[("x-ms-source-content-md5", &other_md5)]),
+            400,
+            "Md5Mismatch",
+        );
+        error(
+            append(&[("x-ms-source-content-crc64", &other_crc)]),
+            400,
+            "Crc64Mismatch",
+        );
+        error(
+            append(&[
+                ("x-ms-source-content-md5", &md5),
+                ("x-ms-source-content-crc64", &crc),
+            ]),
+            400,
+            "InvalidHeaderValue",
+        );
+        assert_eq!(header_text(&server.head(APPEND), "content-length"), "0");
+        let first = append(&[("x-ms-source-content-md5", &md5)]);
+        assert_eq!(first.status(), 201);
+        assert_eq!(header_text(&first, "x-ms-blob-append-offset"), "0");
+        let second = append(&[("x-ms-source-content-crc64", &crc)]);
+        assert_eq!(header_text(&second, "x-ms-blob-append-offset"), "1024");
+        assert_eq!(
+            body(server.read(APPEND, None)),
+            [window.clone(), window.clone()].concat()
+        );
+
+        let staged = "/testaccount/container/staged.txt";
+        let block = "comp=block&blockid=QUFBQQ%3D%3D";
+        let stage = |extra: &[(&str, &str)]| {
+            let mut headers = vec![slice];
+            headers.extend_from_slice(extra);
+            server.put_from_url(staged, block, &headers)
+        };
+        let uncommitted = || {
+            body(server.request(
+                Method::GET,
+                &format!("{staged}?comp=blocklist&blocklisttype=uncommitted"),
+                &[],
+                b"",
+            ))
+        };
+        error(
+            stage(&[("x-ms-source-content-md5", &other_md5)]),
+            400,
+            "Md5Mismatch",
+        );
+        error(
+            stage(&[("x-ms-source-content-crc64", &other_crc)]),
+            400,
+            "Crc64Mismatch",
+        );
+        assert!(!String::from_utf8(uncommitted()).unwrap().contains("<Name>"));
+        assert_eq!(stage(&[("x-ms-source-content-md5", &md5)]).status(), 201);
+        assert!(
+            String::from_utf8(uncommitted())
+                .unwrap()
+                .contains("<Name>QUFBQQ==</Name>")
+        );
+
+        let whole = md5_text(&source);
+        let created = "/testaccount/container/created.txt";
+        let create = |extra: &[(&str, &str)]| {
+            let mut headers = vec![("x-ms-blob-type", "BlockBlob")];
+            headers.extend_from_slice(extra);
+            server.put_from_url(created, "", &headers)
+        };
+        error(
+            create(&[("x-ms-source-content-md5", &other_md5)]),
+            400,
+            "Md5Mismatch",
+        );
+        assert_eq!(server.head(created).status(), 404, "nothing was created");
+        error(
+            create(&[("x-ms-source-content-crc64", &crc)]),
+            501,
+            "NotImplemented",
+        );
+        assert_eq!(create(&[("x-ms-source-content-md5", &whole)]).status(), 201);
+        assert_eq!(body(server.read(created, None)), source);
+    });
+}
+
+#[test]
+fn copy_blob_seals_an_append_destination_only_when_asked() {
+    in_both_modes(|server| {
+        server.create_container();
+        assert_eq!(server.create_append(APPEND, &[]).status(), 201);
+        assert_eq!(server.append(APPEND, b"one", &[]).status(), 201);
+        assert_eq!(server.append(APPEND, b"two", &[]).status(), 201);
+        let copy = |target: &str, source: &str, seal: &str| {
+            server.request(
+                Method::PUT,
+                target,
+                &[
+                    ("x-ms-copy-source", &server.source_url(source)),
+                    ("x-ms-seal-blob", seal),
+                ],
+                b"",
+            )
+        };
+
+        let sealed = "/testaccount/container/sealed.txt";
+        let started = copy(sealed, APPEND, "true");
+        assert_eq!(started.status(), 202);
+        assert_eq!(header_text(&started, "x-ms-copy-status"), "success");
+        assert!(!has_header(&started, "x-ms-blob-sealed"));
+        let head = server.head(sealed);
+        assert_eq!(header_text(&head, "x-ms-blob-type"), "AppendBlob");
+        assert_eq!(header_text(&head, "x-ms-blob-sealed"), "true");
+        assert_eq!(header_text(&head, "x-ms-blob-committed-block-count"), "2");
+        assert_eq!(body(server.read(sealed, None)), b"onetwo");
+        error(server.append(sealed, b"!", &[]), 409, "BlobIsSealed");
+        assert!(!has_header(&server.head(APPEND), "x-ms-blob-sealed"));
+        assert_eq!(server.append(APPEND, b"!", &[]).status(), 201);
+
+        let open = "/testaccount/container/open.txt";
+        assert_eq!(copy(open, sealed, "false").status(), 202);
+        assert!(!has_header(&server.head(open), "x-ms-blob-sealed"));
+        assert_eq!(server.append(open, b"!", &[]).status(), 201);
+
+        assert_eq!(server.create_page(PAGE, 512, &[]).status(), 201);
+        assert_eq!(server.put_block_blob(BLOCK, b"block").status(), 201);
+        for source in [PAGE, BLOCK] {
+            let target = "/testaccount/container/refused.bin";
+            error(copy(target, source, "true"), 400, "InvalidHeaderValue");
+            assert_eq!(server.head(target).status(), 404, "nothing was copied");
+            assert_eq!(copy(target, source, "false").status(), 202);
+            assert_eq!(
+                server.request(Method::DELETE, target, &[], b"").status(),
+                202
+            );
+        }
+        error(
+            copy("/testaccount/container/x", APPEND, "maybe"),
+            400,
+            "InvalidHeaderValue",
+        );
+        error(
+            server.append(APPEND, b"x", &[("x-ms-seal-blob", "true")]),
+            501,
+            "NotImplemented",
+        );
+        assert!(!has_header(&server.head(APPEND), "x-ms-blob-sealed"));
+    });
+}
+
+impl Emulator {
+    /// A PUT with an empty body whose `x-ms-copy-source` names the block blob.
+    fn put_from_url(&self, path: &str, query: &str, extra: &[(&str, &str)]) -> Response {
+        let url = self.source_url(BLOCK);
+        let mut headers = vec![("x-ms-copy-source", url.as_str())];
+        headers.extend_from_slice(extra);
+        let target = if query.is_empty() {
+            path.to_owned()
+        } else {
+            format!("{path}?{query}")
+        };
+        self.request(Method::PUT, &target, &headers, b"")
+    }
+}
+
+#[test]
 fn a_sas_with_add_permission_can_append_but_not_write_pages() {
     let server = Emulator::start(None, &[]);
     server.create_container();

@@ -498,6 +498,7 @@ impl Store {
 
     /// Same-instance Copy Blob of a page or append blob (or of a snapshot or version
     /// of one): the destination shares the source's extents and keeps its type.
+    /// An append copy is sealed only when seal is Some(true); any other type refuses it.
     /// Returns `None`, changing nothing, when the source is a block blob. `make`
     /// builds the destination write from the source.
     pub(crate) async fn copy_ranges<F>(
@@ -506,6 +507,7 @@ impl Store {
         selector: Option<Selector>,
         source_guard: Guard,
         dest: BlobKey,
+        seal: Option<bool>,
         make: F,
     ) -> Result<Option<Copied>>
     where
@@ -544,8 +546,9 @@ impl Store {
             let kind = match src.info.kind {
                 BlobKind::Append { committed, .. } => BlobKind::Append {
                     committed,
-                    sealed: false,
+                    sealed: seal == Some(true),
                 },
+                _ if seal == Some(true) => return Err(Error::InvalidHeader),
                 other => other,
             };
             check_tier(kind, options.tier)?;

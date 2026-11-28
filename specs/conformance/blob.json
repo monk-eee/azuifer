@@ -39,7 +39,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "The 2023-11-03 Bearer cassette replays a same-account HTTPS source with explicit source authorization, checks offset and block count, and reads back appended bytes. The local source Bearer header is not forwarded to a remote host. x-ms-source-content-md5 and crc64 are not accepted."
+      "notes": "The 2023-11-03 Bearer cassette replays a same-account HTTPS source with explicit source authorization, checks offset and block count, and reads back appended bytes. The local source Bearer header is not forwarded to a remote host. x-ms-source-content-md5 or -crc64 is compared with the bytes read from the source window before anything is appended. A mismatch answers 400 Md5Mismatch or Crc64Mismatch and changes nothing, and both headers together answer 400 InvalidHeaderValue (ADR-0036). The mismatch codes are unverified against Azure until B-47 is recorded."
     },
     {
       "name": "Copy Blob",
@@ -52,7 +52,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Sources on this listener (path-style or host-style URLs); other hosts answer NotImplemented unless the operator allowlists them with --allow-external-copy-sources (ADR-0024), in which case the source is fetched synchronously with SSRF guards. Completes synchronously with x-ms-copy-status: success and a copy id. The source may name a snapshot or version of a block blob and can be read with same-account Shared Key or bearer credentials, a read SAS on the source URL, or public access. Copy properties preserve the source scheme and omit the query. Source and destination conditions and leases apply. Block blob bytes are copied rather than shared; page and append blob copies keep their type and share extents, and a copied append blob is not sealed. Sealed copies are unsupported; incremental copy is a separate operation."
+      "notes": "Sources on this listener (path-style or host-style URLs); other hosts answer NotImplemented unless the operator allowlists them with --allow-external-copy-sources (ADR-0024), in which case the source is fetched synchronously with SSRF guards. Completes synchronously with x-ms-copy-status: success and a copy id. The source may name a snapshot or version of a block blob and can be read with same-account Shared Key or bearer credentials, a read SAS on the source URL, or public access. Copy properties preserve the source scheme and omit the query. Source and destination conditions and leases apply. Block blob bytes are copied rather than shared; page and append blob copies keep their type and share extents, and a copied append blob is unsealed unless x-ms-seal-blob: true seals it (ADR-0036); that header on a page or block blob source answers 400 InvalidHeaderValue and copies nothing. Whether Azure seals a copy of a sealed source by default, and the code for the refusal, are unverified until B-48 is recorded. Incremental copy is a separate operation."
     },
     {
       "name": "Create Container",
@@ -378,7 +378,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "B-23 verifies a full same-account HTTPS copy with x-ms-copy-source-authorization and request properties. x-ms-copy-source-blob-properties selects source or request properties, and x-ms-copy-source-tag-option can copy tags. Source conditions apply. Tag behavior is not covered by the cassette; encryption and source MD5 validation are unsupported."
+      "notes": "B-23 verifies a full same-account HTTPS copy with x-ms-copy-source-authorization and request properties. x-ms-copy-source-blob-properties selects source or request properties, and x-ms-copy-source-tag-option can copy tags. Source conditions apply. Tag behavior is not covered by the cassette; encryption is unsupported. x-ms-source-content-md5 is compared with the source bytes before the blob is written (400 Md5Mismatch, nothing created; unverified against Azure until B-47 is recorded). x-ms-source-content-crc64 is refused with NotImplemented because Azure documents no source CRC64 header for this operation (ADR-0036)."
     },
     {
       "name": "Put Block",
@@ -404,7 +404,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "The 2023-11-03 Bearer cassette stages a range from a same-account HTTPS source using explicit source authorization, commits it, and reads the selected bytes. Source MD5 and CRC64 validation headers are unsupported."
+      "notes": "The 2023-11-03 Bearer cassette stages a range from a same-account HTTPS source using explicit source authorization, commits it, and reads the selected bytes. x-ms-source-content-md5 or -crc64 is compared with the bytes read from the source window before the block is staged. A mismatch answers 400 Md5Mismatch or Crc64Mismatch and changes nothing, and both headers together answer 400 InvalidHeaderValue (ADR-0036). The mismatch codes are unverified against Azure until B-47 is recorded."
     },
     {
       "name": "Put Block List",
@@ -443,7 +443,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "The 2023-11-03 Bearer cassette writes a range from a same-account HTTPS source using explicit source authorization, verifies sparse read-back, and rejects a source range past EOF with 416 CannotVerifyCopySource. x-ms-source-content-md5 and crc64 are not accepted."
+      "notes": "The 2023-11-03 Bearer cassette writes a range from a same-account HTTPS source using explicit source authorization, verifies sparse read-back, and rejects a source range past EOF with 416 CannotVerifyCopySource. x-ms-source-content-md5 or -crc64 is compared with the bytes read from the source window before any page is written. A mismatch answers 400 Md5Mismatch or Crc64Mismatch and changes nothing, and both headers together answer 400 InvalidHeaderValue (ADR-0036). The mismatch codes are unverified against Azure until B-47 is recorded."
     },
     {
       "name": "Query Blob Contents",
@@ -501,7 +501,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "B-18 verifies conditional seal on a flat append blob: 200, changed ETag, sealed flag, and 409 BlobIsSealed on another append without changing the existing bytes. Sealing an already sealed blob is idempotent locally. This does not cover versioning, soft delete, or sealing through Copy Blob."
+      "notes": "B-18 verifies conditional seal on a flat append blob: 200, changed ETag, sealed flag, and 409 BlobIsSealed on another append without changing the existing bytes. Sealing an already sealed blob is idempotent locally. This does not cover versioning or soft delete. Copy Blob seals its destination with x-ms-seal-blob (see Copy Blob); Append Block has no seal header."
     },
     {
       "name": "Set Blob Expiry",
@@ -692,7 +692,7 @@
   ],
   "live_azure_evidence": {
     "cassettes": 34,
-    "target_exchanges": 500,
+    "target_exchanges": 521,
     "recorded_exchanges": 187,
     "matched_exchanges": 187,
     "matched_operation_auth": {

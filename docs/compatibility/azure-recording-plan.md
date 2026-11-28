@@ -6,12 +6,12 @@ The target is the five Azure Storage REST services, using the operations and aut
 
 | Service | Operations | Advertised operation/auth pairs | Unsupported operations | Journey exchanges | Extra grid exchanges | Target |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Blob | 55 | 303 | 1 | 256 | 244 | 500 |
+| Blob | 55 | 303 | 1 | 277 | 244 | 521 |
 | DFS | 18 | 106 | 0 | 117 | 86 | 203 |
 | FileREST | 44 | 197 | 0 | 169 | 153 | 322 |
 | Queue | 17 | 72 | 0 | 49 | 52 | 101 |
 | Table | 19 | 72 | 1 | 65 | 52 | 117 |
-| **Total** | **153** | **750** | **2** | **656** | **587** | **1,243** |
+| **Total** | **153** | **750** | **2** | **677** | **587** | **1,264** |
 
 This is a finite coverage target, not a claim that every possible input is covered. It tests each advertised operation/auth pair once and adds separate exchanges for meaningful branches: conditions, checksums and limits, continuations, post-mutation state, failure atomicity, expiry, feature switches, and shared Blob/DFS state. It does not multiply every branch by every credential. Add a row when an API version, profile, or new variant changes contract behavior. Keep newer-version evidence separate until that version is adopted; a client reaching the emulator through version fallback is not evidence for the newer version. SMB and NFS wire exchanges, control-plane APIs, infrastructure performance, and emulator-only fault injection are out of scope.
 
@@ -58,7 +58,7 @@ The current target supports `flat`, same-account Blob `copy` with an authorized 
 
 Corporate storage controls (for example Secure Future Initiative restrictions)
 can disallow Shared Key and public blob access. This affects what an approved
-target can record, not Azuifer's advertised scope or the full **1,243-exchange**
+target can record, not Azuifer's advertised scope or the full **1,264-exchange**
 target. The `Auth` and `Profile` columns describe separate prerequisites:
 
 | Requirement | What can be recorded |
@@ -128,6 +128,8 @@ either singleton or changing account settings.
 | B-44 | flat | Bearer | Reject a truncated container-scoped Submit Batch part before executing subrequests, checking status and request correlation | 1 | [fixture](../../tests/contracts/cassettes/blob-batch-truncated-part.json) |
 | B-45 | copy | Bearer | Abort a genuinely pending copy on a target that reliably queues; verify the aborted destination | 2 | pending |
 | B-46 | flat | Bearer | Reject a container-properties HEAD on a synthetic invalid dollar-prefixed name | 1 | [fixture](../../tests/contracts/cassettes/blob-invalid-system-container-name.json) |
+| B-47 | copy | Bearer | Put Blob From URL with a matching source MD5; Put Blob From URL with a wrong source MD5; read the destination to confirm none exists; Put Block From URL with a matching source MD5; Put Block From URL with a matching source CRC64; Put Block From URL with a wrong source CRC64; Get Block List uncommitted; Put Page From URL with a matching source MD5; Put Page From URL with a wrong source MD5; Put Page From URL with both source hash headers; Get Page Ranges; Append Block From URL with a matching source CRC64; Append Block From URL with a wrong source MD5; read the append blob | 14 | pending |
+| B-48 | copy | Bearer | Copy Blob of an append blob with x-ms-seal-blob true; Get Blob Properties of the destination; Append Block to the sealed destination; Copy Blob of the sealed destination with x-ms-seal-blob false; Get Blob Properties of the second copy; Copy Blob of a page blob with x-ms-seal-blob true; read the destination to confirm none exists | 7 | pending |
 
 ### DFS and Blob/DFS
 

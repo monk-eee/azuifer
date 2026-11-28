@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -77,6 +78,18 @@ class FixtureTests(unittest.TestCase):
         self.assertIn(old, text)
         path.write_text(text.replace(old, new, 1), encoding="utf-8")
 
+    def bump(self, relative: str, pattern: str) -> int:
+        """Add one to the first number the pattern captures and return the new value."""
+        path = self.root / relative
+        text = path.read_text(encoding="utf-8")
+        match = re.search(pattern, text)
+        self.assertIsNotNone(match, pattern)
+        value = int(match.group(1).replace(",", "")) + 1
+        path.write_text(
+            text[: match.start(1)] + f"{value:,}" + text[match.end(1) :], encoding="utf-8"
+        )
+        return value
+
     def errors(self) -> list[str]:
         return MODULE.audit(self.root)
 
@@ -112,27 +125,28 @@ class FixtureTests(unittest.TestCase):
         self.assert_error("`src/gone.rs` does not exist")
 
     def test_operation_count_contradicting_the_manifests_is_reported(self) -> None:
-        self.replace("README.md", "151 of 153", "152 of 153")
-        self.assert_error("README.md: implemented operations claims 152")
+        value = self.bump("README.md", r"implements \*\*(\d+) of \d+ recognized operations")
+        self.assert_error(f"README.md: implemented operations claims {value}")
 
     def test_exchange_and_cassette_counts_are_checked(self) -> None:
-        self.replace("docs/compatibility/azure-contracts.md", "270 of 1,243", "271 of 1,243")
-        self.assert_error("azure-contracts.md: planned exchanges claims 271")
-        self.replace("README.md", "51 reviewed Azure cassettes", "52 reviewed Azure cassettes")
-        self.assert_error("README.md: cassettes and exchanges claims 52")
+        contracts = "docs/compatibility/azure-contracts.md"
+        value = self.bump(contracts, r"tracks \*\*(\d+) of [\d,]+ planned exchanges matched")
+        self.assert_error(f"azure-contracts.md: planned exchanges claims {value}")
+        value = self.bump("README.md", r"\*\*(\d+) reviewed Azure cassettes\*\*")
+        self.assert_error(f"README.md: cassettes and exchanges claims {value}")
 
     def test_recording_plan_rows_are_checked(self) -> None:
-        self.replace("docs/compatibility/azure-recording-plan.md", "| DFS | 18 |", "| DFS | 19 |")
+        self.bump("docs/compatibility/azure-recording-plan.md", r"\| DFS \| (\d+) \|")
         self.assert_error("DFS row says")
 
     def test_wire_discrepancy_count_is_checked_against_the_ledger(self) -> None:
-        self.replace("README.md", "tracks 31 pinned", "tracks 30 pinned")
-        self.assert_error("wire discrepancies claims 30")
+        value = self.bump("README.md", r"tracks (\d+) pinned")
+        self.assert_error(f"wire discrepancies claims {value}")
         ledger = self.root / "docs" / "compatibility" / "wire-discrepancies.json"
         data = json.loads(ledger.read_text(encoding="utf-8"))
         data["entries"].pop()
         ledger.write_text(json.dumps(data), encoding="utf-8")
-        self.assert_error("30 entries but the manifests count 31")
+        self.assert_error(f"{len(data['entries'])} entries but the manifests count {value - 1}")
 
     def test_exact_rating_without_evidence_is_reported(self) -> None:
         path = self.root / "specs" / "conformance" / "queue.json"

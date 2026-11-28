@@ -282,6 +282,48 @@ def copying(ctx):
     require(appended.download_blob().readall() == b"a" * 512, "append from url content")
 
 
+@check("from-URL source checksums and sealed copies")
+def source_checksums_and_seal(ctx):
+    data = b"a" * 512 + b"b" * 512
+    source = ctx.blob("checksummed.bin")
+    source.upload_blob(data)
+    good = hashlib.md5(data[512:]).digest()
+    wrong = hashlib.md5(b"other").digest()
+
+    page = ctx.blob("checksummed.vhd")
+    page.create_page_blob(2048)
+    expect("Md5Mismatch", lambda: page.upload_pages_from_url(
+        source.url, offset=0, length=512, source_offset=512, source_content_md5=wrong))
+    require(ranges(page) == [], "a rejected source writes no pages")
+    page.upload_pages_from_url(source.url, offset=0, length=512, source_offset=512, source_content_md5=good)
+    require(page.download_blob(offset=0, length=512).readall() == b"b" * 512, "verified page content")
+
+    log = ctx.blob("checksummed.log")
+    log.create_append_blob()
+    expect("Md5Mismatch", lambda: log.append_block_from_url(
+        source.url, source_offset=512, source_length=512, source_content_md5=wrong))
+    require(log.get_blob_properties().size == 0, "a rejected source appends nothing")
+    log.append_block_from_url(source.url, source_offset=512, source_length=512, source_content_md5=good)
+    require(log.download_blob().readall() == b"b" * 512, "verified append content")
+
+    block = ctx.blob("checksummed.block")
+    expect("Md5Mismatch", lambda: block.stage_block_from_url(
+        "QQ==", source.url, source_offset=512, source_length=512, source_content_md5=wrong))
+    block.stage_block_from_url(
+        "QQ==", source.url, source_offset=512, source_length=512, source_content_md5=good)
+    committed, uncommitted = block.get_block_list("uncommitted")
+    require([item.id for item in uncommitted] == ["QQ=="], f"staged blocks {uncommitted}")
+
+    sealed = ctx.blob("sealed-copy.log")
+    sealed.start_copy_from_url(log.url, seal_destination_blob=True)
+    require(sealed.get_blob_properties().is_append_blob_sealed, "the copy is sealed")
+    expect("BlobIsSealed", lambda: sealed.append_block(b"!"))
+    require(not log.get_blob_properties().is_append_blob_sealed, "the source stays open")
+    log.append_block(b"!")
+    expect("InvalidHeaderValue", lambda: ctx.blob("sealed-copy.bin").start_copy_from_url(
+        source.url, seal_destination_blob=True))
+
+
 @check("a SAS with add permission can append but not write pages")
 def sas(ctx):
     append = ctx.blob("sas.log")
