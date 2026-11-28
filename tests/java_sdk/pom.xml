@@ -17,14 +17,14 @@
     <dependency><groupId>com.azure</groupId><artifactId>azure-data-tables</artifactId><version>12.6.1</version></dependency>
     <dependency><groupId>com.azure</groupId><artifactId>azure-storage-file-share</artifactId><version>12.33.2</version></dependency>
     <dependency><groupId>com.azure</groupId><artifactId>azure-storage-file-datalake</artifactId><version>12.30.2</version></dependency>
-    <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-nop</artifactId><version>2.0.16</version></dependency>
+    <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-nop</artifactId><version>2.0.20</version></dependency>
   </dependencies>
   <build>
     <plugins>
       <plugin>
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>exec-maven-plugin</artifactId>
-        <version>3.5.0</version>
+        <version>3.7.0</version>
         <configuration><mainClass>probe.Probe</mainClass></configuration>
       </plugin>
     </plugins>
