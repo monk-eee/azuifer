@@ -212,7 +212,13 @@ async fn run_one(
         .map_err(|_| Error::InvalidInput)?
         .into_parts();
     parts.headers.extend(request.headers.clone());
-    let parsed = protocol::parse_batched(&parts, &app.config, app.clock.now(), version)?;
+    let parsed = protocol::parse_batched(
+        &parts,
+        &app.config,
+        app.clock.now(),
+        ctx.request_id,
+        version,
+    )?;
     if parsed.target.account() != ctx.account {
         return Err(Error::AuthenticationFailed);
     }

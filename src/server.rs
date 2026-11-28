@@ -351,7 +351,7 @@ async fn handle(app: &App, parts: &Parts, body: Body, request_id: &str) -> Resul
         https: app.config.tls.is_some(),
     };
     let parsed = async {
-        let parsed = protocol::parse(parts, &app.config, now)?;
+        let parsed = protocol::parse(parts, &app.config, now, request_id)?;
         if parsed.requested_version != app.config.api_version {
             tracing::info!(
                 %request_id,

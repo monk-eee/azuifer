@@ -123,7 +123,7 @@ Use Rustup and a C compiler for bundled SQLite: Command Line Tools on macOS, GCC
 cargo run --locked -- serve --in-memory
 ```
 
-Native runs use the same ports. Use `--location ./data` for persistence or `--skip-api-version-check` for clients that send a newer API version than the `2023-11-03` baseline; older versions are served with baseline behavior. SDKs that accept `UseDevelopmentStorage=true` can use it with the loopback endpoints.
+Native runs use the same ports. Use `--location ./data` for persistence or `--skip-api-version-check` for clients that send a newer API version than the `2023-11-03` baseline; older versions are served with baseline behavior. SDKs that accept `UseDevelopmentStorage=true` can use it with the loopback endpoints. A browser build of an Azure SDK sends an `x-ms-useragent` header that the strict Blob and DFS parsers refuse; `--compatibility-mode lenient` lets it through and logs it ([ADR-0038](docs/adr.d/0038-named-compatibility-mode.md)).
 
 ## Project docs
 

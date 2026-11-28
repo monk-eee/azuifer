@@ -112,6 +112,23 @@ pub(crate) fn status(admin_url: &str, json: bool, ready: bool) -> Result<()> {
     if status.otlp {
         println!("OTLP:      exporting traces and metrics");
     }
+    if let Some(compatibility) = &status.compatibility {
+        let ignored: Vec<&str> = compatibility
+            .ignored_headers
+            .iter()
+            .chain(&compatibility.ignored_query_parameters)
+            .map(String::as_str)
+            .collect();
+        if ignored.is_empty() {
+            println!("Compat:    {}", compatibility.mode);
+        } else {
+            println!(
+                "Compat:    {} (ignores unknown {})",
+                compatibility.mode,
+                ignored.join(", ")
+            );
+        }
+    }
     Ok(())
 }
 

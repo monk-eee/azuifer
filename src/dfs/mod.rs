@@ -185,7 +185,7 @@ async fn handle(
             );
         }
         let caller = authenticated.credentials.dfs_caller();
-        let parsed = request::parse(parts, &authenticated, &app.config, &caller)?;
+        let parsed = request::parse(parts, &authenticated, &app.config, &caller, request_id)?;
         let connection = Connection {
             now,
             client_ip: parts

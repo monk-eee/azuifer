@@ -41,6 +41,7 @@ The [product specification](../specs/azuifer.md) describes the target. An ADR re
 | [ADR-0035: ADLS Gen2 Set Path Expiry over `PUT ?comp=expiry` and DFS expiry visibility](0035-dfs-set-path-expiry.md) | Proposed |
 | [ADR-0036: Verify From-URL source checksums and seal on Copy Blob](0036-blob-source-checksums-and-copy-seal.md) | Proposed |
 | [ADR-0037: Check Put Range From URL source checksums and read other accounts' files with their SAS](0037-files-copy-checksums-and-cross-account-sources.md) | Proposed |
+| [ADR-0038: Name a compatibility mode that ignores only listed unknown request names](0038-named-compatibility-mode.md) | Proposed |
 
 Search the index before drafting a record. If a change needs a new decision, use the [template](template.md), pick the next four-digit number, and add the proposed record to the index. Keep separate decisions in separate records.
 

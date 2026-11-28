@@ -15,6 +15,7 @@ use crate::{
     auth::{Query, header},
     blob_auth::Target,
     blob_sas::{Need as SasNeed, Public},
+    compat::Relax,
     conditions::{self, Conditions, Guard, STANDARD as CONDITION_HEADERS},
     config::Config,
     domain::{
@@ -153,6 +154,7 @@ struct Input<'a> {
     headers: &'a HeaderMap,
     config: &'a Config,
     caller: &'a Caller,
+    relax: Relax<'a>,
 }
 
 pub(super) fn parse(
@@ -160,6 +162,7 @@ pub(super) fn parse(
     auth: &Authenticated,
     config: &Config,
     caller: &Caller,
+    request_id: &str,
 ) -> std::result::Result<Parsed, DfsError> {
     if !config.hns_accounts.contains(auth.target.account()) {
         return Err(DfsError::NamespaceDisabled);
@@ -181,6 +184,7 @@ pub(super) fn parse(
         headers: &headers,
         config,
         caller,
+        relax: Relax::new(&config.compat, "dfs", request_id),
     };
     match &auth.target {
         Target::Account(account) => input.account(account.clone()),
@@ -195,7 +199,14 @@ impl Input<'_> {
     }
 
     fn check(&self, params: &[&str], headers: &[&[&str]]) -> Result<()> {
-        protocol::check(self.query, self.headers, params, headers, false)
+        protocol::check(
+            self.query,
+            self.headers,
+            params,
+            headers,
+            false,
+            &self.relax,
+        )
     }
 
     /// Most operations carry no body.

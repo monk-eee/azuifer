@@ -5,6 +5,9 @@ use std::{
     process::{Child, Command, Output, Stdio},
 };
 
+#[path = "cli_commands/compat.rs"]
+mod compat;
+
 fn azuifer() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_azuifer"));
     for (name, _) in std::env::vars_os() {
@@ -131,6 +134,7 @@ fn status_reports_a_running_instance() {
         text.contains(&format!("Metrics:   {}/metrics", server.admin)),
         "{text}"
     );
+    assert!(text.contains("Compat:    strict\n"), "{text}");
 
     let output = run(&["status", "--admin-url", &server.admin, "--json"]);
     let json: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
