@@ -600,6 +600,71 @@ mod tests {
         assert!(oauth.authenticate(&token, &request(at(0))).is_ok());
     }
 
+    #[tokio::test]
+    async fn a_remote_jwks_refresh_replaces_keys_only_after_success() {
+        use axum::{Router, http::StatusCode, routing::get};
+        use std::{collections::VecDeque, sync::Mutex};
+
+        let replies = Arc::new(Mutex::new(VecDeque::from([
+            (StatusCode::OK, jwks("k1")),
+            (StatusCode::SERVICE_UNAVAILABLE, String::new()),
+            (StatusCode::OK, r#"{"keys":[]}"#.to_owned()),
+            (StatusCode::OK, jwks("k2")),
+        ])));
+        let app = Router::new().route(
+            "/keys",
+            get(move || {
+                let replies = replies.clone();
+                async move { replies.lock().unwrap().pop_front().unwrap() }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/keys", listener.local_addr().unwrap());
+        let stop = CancellationToken::new();
+        let shutdown = stop.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown.cancelled_owned())
+                .await
+                .unwrap();
+        });
+        let oauth = OAuth::resolve(
+            OAuthOptions {
+                mode: Some(Mode::Jwks),
+                jwks: Some(url),
+                issuer: Some("https://issuer.test/".into()),
+                ..OAuthOptions::default()
+            },
+            FileSettings::default(),
+            true,
+        )
+        .unwrap();
+        let claims = claims(
+            "https://issuer.test/",
+            r#""https://storage.azure.com""#,
+            60,
+            "",
+        );
+        let old = sign(HEADER, &claims);
+        let new = sign(r#"{"alg":"RS256","kid":"k2"}"#, &claims);
+        let accepted = |token| oauth.authenticate(token, &request(at(0))).is_ok();
+
+        oauth.load_keys().await.unwrap();
+        assert!(accepted(&old));
+        assert!(!accepted(&new));
+        for _ in 0..2 {
+            assert!(oauth.load_keys().await.is_err());
+            assert!(accepted(&old));
+            assert!(!accepted(&new));
+        }
+        oauth.load_keys().await.unwrap();
+        assert!(accepted(&new));
+        assert!(!accepted(&old));
+
+        stop.cancel();
+        server.await.unwrap();
+    }
+
     #[test]
     fn roles_limit_jwks_tokens_by_service_and_access() {
         let oauth = jwks_mode(&[]);
