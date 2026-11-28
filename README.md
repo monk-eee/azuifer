@@ -134,6 +134,7 @@ Native runs use the same ports. Use `--location ./data` for persistence or `--sk
 | [Contributing](CONTRIBUTING.md) | How to propose, validate, and review changes |
 | [Releases](docs/releases.md) | Native archives, the Azure Linux image, and Docker Hub opt-in |
 | [Benchmarks](docs/benchmarks.md) | Local performance and memory regression reports across releases |
+| [Code of conduct](CODE_OF_CONDUCT.md) | Community standards and how to report conduct concerns privately |
 | [Security policy](SECURITY.md) | How to report a security issue privately |
 | [Agent instructions](AGENTS.md) | Constraints for automated contributors |
 
