@@ -5,6 +5,8 @@ use crate::{
     acl,
     blob_auth::Credentials,
     blob_copy, blob_external,
+    blob_lifecycle::LifecycleOperation,
+    blob_page::PageOperation,
     blob_sas::Connection,
     blob_snapshot,
     checksum::{Checksums, Hasher},
@@ -17,6 +19,7 @@ use crate::{
     server::App,
     service_props::ServiceProperties,
     store::{LeaseResult, PathRead, SourceBytes, Upload, Uploaded},
+    telemetry::CopyTrace,
     wire::{self, Xml},
 };
 use axum::{
@@ -38,6 +41,29 @@ pub(crate) struct Context<'a> {
     pub(crate) credentials: &'a Credentials,
     pub(crate) connection: &'a Connection,
     pub(crate) request_id: &'a str,
+}
+
+pub(crate) fn copy_trace(app: &App, op: &Operation, ctx: &Context<'_>) -> Option<CopyTrace> {
+    let (name, source) = match op {
+        Operation::CopyBlob(_, _, source) => ("Copy Blob", source),
+        Operation::PutBlobFromUrl(_, _, source) => ("Put Blob From URL", source),
+        Operation::PutBlockFromUrl(_, _, _, source) => ("Put Block From URL", source),
+        Operation::Page(PageOperation::PutPageFromUrl(_, _, source)) => {
+            ("Put Page From URL", source)
+        }
+        Operation::Page(PageOperation::AppendBlockFromUrl(_, _, source)) => {
+            ("Append Block From URL", source)
+        }
+        Operation::Lifecycle(LifecycleOperation::IncrementalCopy(copy)) => {
+            ("Incremental Copy Blob", &copy.source)
+        }
+        _ => return None,
+    };
+    Some(if is_external(app, ctx, source) {
+        CopyTrace::External(name)
+    } else {
+        CopyTrace::Local(name)
+    })
 }
 
 pub(crate) async fn execute(

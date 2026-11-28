@@ -14,7 +14,7 @@ mod protocol;
 mod service;
 mod store;
 
-use crate::{auth::header, clock::Clock, config::Config, domain::ApiVersion};
+use crate::{auth::header, clock::Clock, config::Config, domain::ApiVersion, telemetry};
 use anyhow::Context as _;
 use axum::{
     Router,
@@ -26,6 +26,7 @@ use axum::{
 use error::{Kind, Result, TableError};
 use std::{net::SocketAddr, sync::Arc, time::SystemTime};
 use store::Store;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 /// A batch may carry 4 MiB of operations; the rest is multipart framing.
@@ -163,10 +164,15 @@ async fn handle(
         now,
         https: app.config.tls.is_some(),
     };
-    let credential = match auth::bearer(&app.config.oauth, &presented)? {
-        Some(credential) => credential,
-        None => auth::authenticate(&app.store, &presented).await?,
-    };
+    let authenticate = telemetry::authenticate_span();
+    let credential = async {
+        match auth::bearer(&app.config.oauth, &presented)? {
+            Some(credential) => Ok(credential),
+            None => auth::authenticate(&app.store, &presented).await,
+        }
+    }
+    .instrument(authenticate.clone())
+    .await?;
     let bytes = read_body(app, parts, body).await?;
     let method = protocol::effective_method(&parts.method, headers)?;
     if secondary && method != axum::http::Method::GET {
@@ -184,9 +190,12 @@ async fn handle(
         }
         target => protocol::build(&method, target, &query, headers, &bytes)?,
     };
-    request
-        .operation
-        .check_access(&mut |access, table, key| credential.authorize(access, table, key))?;
+    authenticate.in_scope(|| {
+        request
+            .operation
+            .check_access(&mut |access, table, key| credential.authorize(access, table, key))
+    })?;
+    drop(authenticate);
     let host = headers
         .get(HOST)
         .and_then(|value| value.to_str().ok())
@@ -230,7 +239,7 @@ async fn handle(
     ) {
         format.return_content = true;
     }
-    let result = handlers::execute(&ctx, request).await;
+    let result = telemetry::storage(handlers::execute(&ctx, request), None).await;
     let mut response = if catalog {
         result.unwrap_or_else(|error| {
             handlers::catalog_error_response(error, format.level, request_id, now)

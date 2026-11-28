@@ -19,6 +19,7 @@ use crate::{
     config::{Config, PERMIT_WAIT},
     domain::{ContainerCreate, Error, Metadata, PublicAccess, Result},
     store::{Append, Caller, Store},
+    telemetry,
     wire::{self, empty, entity_response, set},
 };
 use anyhow::Context as _;
@@ -35,6 +36,7 @@ use request::{DELETE_BATCH, Operation, View};
 use std::{net::SocketAddr, sync::Arc};
 use token::Continuation;
 use tokio::sync::Semaphore;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 struct App {
@@ -169,44 +171,49 @@ async fn handle(
     request_id: &str,
 ) -> std::result::Result<Response, DfsError> {
     let now = app.clock.now();
-    let authenticated = auth::authenticate(parts, &app.config, now)?;
-    if matches!(authenticated.credentials, Credentials::Anonymous) {
-        return Err(Error::AuthenticationFailed.into());
+    let (operation, caller) = async {
+        let authenticated = auth::authenticate(parts, &app.config, now)?;
+        if matches!(authenticated.credentials, Credentials::Anonymous) {
+            return Err(Error::AuthenticationFailed.into());
+        }
+        if authenticated.requested_version != app.config.api_version {
+            tracing::info!(
+                %request_id,
+                requested_api_version = authenticated.requested_version.as_str(),
+                effective_api_version = app.config.api_version.as_str(),
+                "using the configured DFS protocol baseline"
+            );
+        }
+        let caller = auth::caller(&authenticated.credentials);
+        let parsed = request::parse(parts, &authenticated, &app.config, &caller)?;
+        let connection = Connection {
+            now,
+            client_ip: parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|info| info.0.ip()),
+            https: app.config.tls.is_some(),
+        };
+        blob_auth::authorize(
+            &app.store,
+            Authorization {
+                credentials: &authenticated.credentials,
+                target: &authenticated.target,
+                need: &parsed.sas,
+                connection: &connection,
+            },
+        )
+        .await?;
+        for check in parsed.access {
+            app.store
+                .authorize_path(caller.clone(), check.key, check.path, check.need)
+                .await?;
+        }
+        Ok::<_, DfsError>((parsed.operation, caller))
     }
-    if authenticated.requested_version != app.config.api_version {
-        tracing::info!(
-            %request_id,
-            requested_api_version = authenticated.requested_version.as_str(),
-            effective_api_version = app.config.api_version.as_str(),
-            "using the configured DFS protocol baseline"
-        );
-    }
-    let caller = auth::caller(&authenticated.credentials);
-    let parsed = request::parse(parts, &authenticated, &app.config, &caller)?;
-    let connection = Connection {
-        now,
-        client_ip: parts
-            .extensions
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|info| info.0.ip()),
-        https: app.config.tls.is_some(),
-    };
-    blob_auth::authorize(
-        &app.store,
-        Authorization {
-            credentials: &authenticated.credentials,
-            target: &authenticated.target,
-            need: &parsed.sas,
-            connection: &connection,
-        },
-    )
+    .instrument(telemetry::authenticate_span())
     .await?;
-    for check in parsed.access {
-        app.store
-            .authorize_path(caller.clone(), check.key, check.path, check.need)
-            .await?;
-    }
-    execute(app, parsed.operation, body, caller).await
+    telemetry::storage(execute(app, operation, body, caller), None).await
 }
 
 async fn receive(app: &App, body: Body, upload: &mut crate::store::Upload) -> Result<()> {

@@ -19,6 +19,7 @@ use crate::{
     clock::Clock,
     config::{Config, PERMIT_WAIT},
     domain::ApiVersion,
+    telemetry::{self, CopyTrace},
 };
 use anyhow::Context as _;
 use auth::{Credentials, Signed};
@@ -31,11 +32,12 @@ use axum::{
 };
 use error::{Error, Result};
 use futures_util::StreamExt as _;
-use request::{Headers, Query, Target};
+use request::{Headers, Operation, Query, Target};
 use response::{error_response, set};
 use std::{net::SocketAddr, sync::Arc};
 use store::{ShareRef, Store};
 use tokio::sync::Semaphore;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 /// The Azure Files REST API version this service implements.
@@ -124,42 +126,47 @@ async fn handle(app: &Arc<App>, parts: &Parts, body: Body) -> Result<Response> {
     let headers = Headers(&parts.headers);
     let (path, host) = address::resolve("file", parts);
     let target = Target::parse(&path, headers.flag("x-ms-allow-trailing-dot")?)?;
-    let keys = app
-        .config
-        .accounts
-        .get(&target.account)
-        .ok_or(Error::AuthenticationFailed)?;
-    let credentials = auth::credentials(&parts.headers, &query)?;
-    check_version(app, &headers, matches!(credentials, Credentials::Sas))?;
-    let operation = request::route(&parts.method, &target, &query, &headers)?;
-    tracing::info!(operation = operation.name(), "file operation");
-    let signed = Signed {
-        account: &target.account,
-        keys,
-        method: &parts.method,
-        raw_path: parts.uri.path(),
-        query: &query,
-        headers: &parts.headers,
-        now: app.clock.now(),
-        share: target.share.as_ref().map(name::ShareName::as_str),
-        path: &target.decoded,
-    };
-    let overrides = match &credentials {
-        Credentials::Sas => {
-            let policy = stored_policy(app, &target, &query).await?;
-            let grant = auth::verify_sas(&signed, policy.as_ref())?;
-            grant.authorize(&operation.needs())?;
-            grant.overrides
-        }
-        Credentials::Bearer(token) => {
-            auth::verify_bearer(&app.config.oauth, token, &signed)?;
-            auth::Overrides::default()
-        }
-        header => {
-            auth::verify_header(header, &signed)?;
-            auth::Overrides::default()
-        }
-    };
+    let (operation, overrides) = async {
+        let keys = app
+            .config
+            .accounts
+            .get(&target.account)
+            .ok_or(Error::AuthenticationFailed)?;
+        let credentials = auth::credentials(&parts.headers, &query)?;
+        check_version(app, &headers, matches!(credentials, Credentials::Sas))?;
+        let operation = request::route(&parts.method, &target, &query, &headers)?;
+        tracing::info!(operation = operation.name(), "file operation");
+        let signed = Signed {
+            account: &target.account,
+            keys,
+            method: &parts.method,
+            raw_path: parts.uri.path(),
+            query: &query,
+            headers: &parts.headers,
+            now: app.clock.now(),
+            share: target.share.as_ref().map(name::ShareName::as_str),
+            path: &target.decoded,
+        };
+        let overrides = match &credentials {
+            Credentials::Sas => {
+                let policy = stored_policy(app, &target, &query).await?;
+                let grant = auth::verify_sas(&signed, policy.as_ref())?;
+                grant.authorize(&operation.needs())?;
+                grant.overrides
+            }
+            Credentials::Bearer(token) => {
+                auth::verify_bearer(&app.config.oauth, token, &signed)?;
+                auth::Overrides::default()
+            }
+            header => {
+                auth::verify_header(header, &signed)?;
+                auth::Overrides::default()
+            }
+        };
+        Ok::<_, Error>((operation, overrides))
+    }
+    .instrument(telemetry::authenticate_span())
+    .await?;
     let version = headers
         .get("x-ms-version")?
         .or_else(|| query.get("sv"))
@@ -175,7 +182,13 @@ async fn handle(app: &Arc<App>, parts: &Parts, body: Body) -> Result<Response> {
         headers,
         overrides,
     };
-    let mut response = ops::execute(context, body).await?;
+    let copy = match operation {
+        Operation::CopyFile | Operation::PutRangeFromUrl => {
+            Some(CopyTrace::Local(operation.name()))
+        }
+        _ => None,
+    };
+    let mut response = telemetry::storage(ops::execute(context, body), copy).await?;
     if parts.method == Method::GET && response.headers().contains_key("x-ms-type") {
         let stream = std::mem::replace(response.body_mut(), Body::empty()).into_data_stream();
         *response.body_mut() = Body::from_stream(stream.map(move |item| {
