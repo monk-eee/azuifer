@@ -184,7 +184,7 @@ async fn handle(
                 "using the configured DFS protocol baseline"
             );
         }
-        let caller = auth::caller(&authenticated.credentials);
+        let caller = authenticated.credentials.dfs_caller();
         let parsed = request::parse(parts, &authenticated, &app.config, &caller)?;
         let connection = Connection {
             now,

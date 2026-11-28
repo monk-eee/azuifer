@@ -17,7 +17,7 @@ Azure Files serves a separate share namespace, with [NFS properties and links an
 
 ## Read the evidence
 
-Run `azuifer conformance export --format markdown` to see which of the 153 recognized operations are implemented (151) and which have recorded Azure scenarios. The [recording plan](docs/compatibility/azure-recording-plan.md) tracks pending account profiles and the [Azure cassette guide](docs/compatibility/azure-contracts.md) explains what a match proves. The five official SDK suites and four-version Azure CLI matrix in [CI](.github/workflows/rust.yml) test clients against Azuifer; they do not add live Azure matches.
+Run `azuifer conformance export --format markdown` to see which of the 154 recognized operations are implemented (152) and which have recorded Azure scenarios. The [recording plan](docs/compatibility/azure-recording-plan.md) tracks pending account profiles and the [Azure cassette guide](docs/compatibility/azure-contracts.md) explains what a match proves. The five official SDK suites and four-version Azure CLI matrix in [CI](.github/workflows/rust.yml) test clients against Azuifer; they do not add live Azure matches.
 
 ## First contribution
 

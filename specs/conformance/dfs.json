@@ -76,7 +76,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Lists files and directories recursively or one level at a time, optionally scoped to a directory, with owner, group, and permissions, and opaque local continuation tokens in binary name order. upn is accepted but ignored. contentLength is a string and isDirectory is the string \"true\", present only for directories."
+      "notes": "Lists files and directories recursively or one level at a time, optionally scoped to a directory, with owner, group, permissions, creationTime, and expiryTime (decimal Windows FILETIME 100 ns ticks strings; expiryTime is omitted when unset, unverified against Azure's unset representation), and opaque local continuation tokens in binary name order. upn is accepted but ignored. contentLength is a string and isDirectory is the string \"true\", present only for directories."
     },
     {
       "name": "Create Path",
@@ -154,7 +154,7 @@
         "UserDelegationSAS",
         "Bearer"
       ],
-      "notes": "Supports getProperties, getStatus, and getAccessControl. Returns the resource type, ETag, content properties, x-ms-properties, owner, group, permissions, ACL, and lease state. A directory also carries x-ms-meta-hdi_isfolder: true, which Azure's DFS endpoint does not send; AzCopy needs it on path-style endpoints, where Blob calls arrive on the DFS URL (requests with restype or comp go to Blob)."
+      "notes": "Supports getProperties, getStatus, and getAccessControl. Returns the resource type, ETag, content properties, x-ms-properties, x-ms-creation-time, x-ms-expiry-time (when set on a file), owner, group, permissions, ACL, and lease state. A directory's x-ms-creation-time reflects its modified timestamp and also carries x-ms-meta-hdi_isfolder: true, which Azure's DFS endpoint does not send; AzCopy needs it on path-style endpoints, where Blob calls arrive on the DFS URL (requests with restype or comp go to Blob)."
     },
     {
       "name": "Set Path Properties",
@@ -222,6 +222,19 @@
       "notes": "Acquire, renew, release, break, and change over the shared Blob lease state machine."
     },
     {
+      "name": "Set Path Expiry",
+      "state": "known-difference",
+      "authorization": [
+        "SharedKey",
+        "SharedKeyLite",
+        "AccountSAS",
+        "ServiceSAS",
+        "UserDelegationSAS",
+        "Bearer"
+      ],
+      "notes": "PUT ?comp=expiry (the real ADLS Gen2 Set Path Expiry route shared with Blob; PATCH ?action=setExpiry does not exist in Azure) sets RelativeToCreation, RelativeToNow, Absolute, or NeverExpire on HNS files in the shared blob_lifecycle table (ADR-0035). Enforces POSIX execute+write ACLs for non-role bearer and user-delegation SAS callers, rejects existing HNS directories with 409 BlobOperationNotSupported (exact Azure status/code unverified until D-16), and surfaces deadlines on DFS HEAD, DFS List Paths, and Blob HEAD/List Blobs."
+    },
+    {
       "name": "Delete Path",
       "state": "known-difference",
       "authorization": [
@@ -237,7 +250,7 @@
   ],
   "live_azure_evidence": {
     "cassettes": 0,
-    "target_exchanges": 203,
+    "target_exchanges": 220,
     "recorded_exchanges": 0,
     "matched_exchanges": 0,
     "matched_operation_auth": {},

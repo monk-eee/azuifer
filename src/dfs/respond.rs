@@ -2,9 +2,11 @@
 
 use super::{error::JSON, request::View};
 use crate::{
+    blob_expiry,
     domain::{ContainerInfo, Entity, Metadata, Page, PathEntry, Result},
     posix::Attributes,
-    respond::lease_headers,
+    respond::{http_date, lease_headers},
+    stamp::Ticks,
     store::{PathRead, PathView},
     wire::{self, entity_response, json_response, modified, set},
 };
@@ -85,10 +87,16 @@ pub(super) fn list_paths(entity: Entity, page: Page<(PathEntry, Attributes)>) ->
         .items
         .into_iter()
         .map(|(name, (entry, attributes))| {
-            let (entity, directory, length) = match entry {
-                PathEntry::File(entity, length) => (entity, false, length.0),
-                PathEntry::Directory(entity) => (entity, true, 0),
+            let (entity, directory, length, created, expires) = match entry {
+                PathEntry::File {
+                    entity,
+                    length,
+                    created,
+                    expires,
+                } => (entity, false, length.0, created, expires),
+                PathEntry::Directory { entity, created } => (entity, true, 0, created, None),
             };
+            let creation_time = Ticks::from_seconds(created).filetime()?.to_string();
             // Azure sends every number and boolean as a string, and omits isDirectory for files.
             let mut path = serde_json::json!({
                 "name": name,
@@ -98,7 +106,12 @@ pub(super) fn list_paths(entity: Entity, page: Page<(PathEntry, Attributes)>) ->
                 "owner": attributes.owner,
                 "group": attributes.group,
                 "permissions": attributes.mode().render(),
+                "creationTime": creation_time,
             });
+            if let Some(expires) = expires {
+                let expiry_time = Ticks::from_millis(expires).filetime()?.to_string();
+                path["expiryTime"] = serde_json::Value::from(expiry_time);
+            }
             if directory {
                 path["isDirectory"] = serde_json::Value::from("true");
             }
@@ -134,12 +147,14 @@ pub(super) fn path_view(view: PathView, body: bool, kind: View) -> Result<Respon
             // Clients given a path-style (IP) endpoint cannot move to a `blob` host, so
             // AzCopy asks this listener for the Blob view and tests for a folder by metadata.
             headers.insert("x-ms-meta-hdi_isfolder", HeaderValue::from_static("true"));
+            set(headers, "x-ms-creation-time", &http_date(entity.modified)?)?;
             properties_header(headers, &directory_properties)?;
             attribute_headers(headers, &attributes, with_acl)?;
             Ok(response)
         }
         PathRead::File(download) => {
             let (lease, content) = (download.info.lease, download.info.headers.clone());
+            let (created, expires) = (download.info.created, download.info.lifecycle.expires);
             let range_checksum = download.range_checksum.clone();
             let (mut response, metadata) = wire::download_response(*download)?;
             let headers = response.headers_mut();
@@ -161,6 +176,14 @@ pub(super) fn path_view(view: PathView, body: bool, kind: View) -> Result<Respon
             attribute_headers(headers, &attributes, with_acl)?;
             if !body {
                 lease_headers(headers, lease)?;
+                set(headers, "x-ms-creation-time", &http_date(created)?)?;
+                if let Some(expires) = expires {
+                    set(
+                        headers,
+                        "x-ms-expiry-time",
+                        &blob_expiry::http_time(expires)?,
+                    )?;
+                }
             }
             Ok(response)
         }

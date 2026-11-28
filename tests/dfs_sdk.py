@@ -25,7 +25,7 @@ import sys
 import tempfile
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+from azure.core.exceptions import HttpResponseError, ResourceExistsError, ResourceNotFoundError
 from azure.storage.blob import BlobServiceClient
 from azure.storage.filedatalake import DataLakeServiceClient
 
@@ -234,6 +234,53 @@ def expiry_flow(server, service, fs):
     check("expired file is gone for Blob", not blobs.get_blob_client("lake", "ttl/renamed.txt").exists())
     check("later deadline still holds", fs.get_file_client("ttl/absolute.txt").exists())
     check("plain file never expires", fs.get_file_client("ttl/plain.txt").exists())
+
+    # Set Path Expiry (`PUT ?comp=expiry`) through DataLakeFileClient.set_file_expiry.
+    plain = fs.get_file_client("ttl/plain.txt")
+    target = (datetime.now(timezone.utc) + timedelta(minutes=20)).replace(microsecond=0)
+    plain.set_file_expiry("Absolute", expires_on=target)
+    plain_props = plain.get_file_properties()
+    check("set_file_expiry Absolute sets properties expiry_time",
+          plain_props.expiry_time is not None
+          and abs((plain_props.expiry_time - target).total_seconds()) <= 1,
+          (plain_props.expiry_time, target))
+    listed_ttl = {p.name: p for p in fs.get_paths(path="ttl", recursive=True)}
+    check("get_paths reflects expiry_time and creation_time",
+          listed_ttl["ttl/plain.txt"].creation_time is not None
+          and listed_ttl["ttl/plain.txt"].expiry_time is not None
+          and abs((listed_ttl["ttl/plain.txt"].expiry_time - target).total_seconds()) <= 1,
+          (listed_ttl["ttl/plain.txt"].creation_time, listed_ttl["ttl/plain.txt"].expiry_time))
+
+    plain.set_file_expiry("NeverExpire")
+    check("set_file_expiry NeverExpire clears properties expiry_time",
+          plain.get_file_properties().expiry_time is None)
+    listed_cleared = {p.name: p for p in fs.get_paths(path="ttl", recursive=True)}
+    check("get_paths clears expiry_time after NeverExpire",
+          listed_cleared["ttl/plain.txt"].expiry_time is None)
+
+    plain.set_file_expiry("RelativeToCreation", expires_on=3_600_000)
+    rel_props = plain.get_file_properties()
+    check("set_file_expiry RelativeToCreation sets expiry_time",
+          rel_props.expiry_time is not None)
+
+    plain.set_file_expiry("RelativeToNow", expires_on=45_000)
+    listed_rel = {p.name: p for p in fs.get_paths(path="ttl", recursive=True)}
+    check("get_paths reflects RelativeToNow expiry_time",
+          listed_rel["ttl/plain.txt"].expiry_time is not None)
+
+    try:
+        fs.get_file_client("ttl").set_file_expiry("RelativeToNow", expires_on=60_000)
+        check("set_file_expiry rejects directory", False)
+    except HttpResponseError as exc:
+        code = exc.response.headers.get("x-ms-error-code") if exc.response is not None else None
+        check("set_file_expiry rejects directory",
+              exc.status_code == 409 and code == "BlobOperationNotSupported",
+              (exc.status_code, code))
+
+    server.advance(60)
+    check("set_file_expiry removes file on DFS after deadline", not plain.exists())
+    check("set_file_expiry removes file on Blob after deadline",
+          not blobs.get_blob_client("lake", "ttl/plain.txt").exists())
     fs.delete_directory("ttl")
 
 

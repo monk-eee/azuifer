@@ -7,11 +7,11 @@ The target is the five Azure Storage REST services, using the operations and aut
 | Service | Operations | Advertised operation/auth pairs | Unsupported operations | Journey exchanges | Extra grid exchanges | Target |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Blob | 55 | 303 | 1 | 277 | 244 | 521 |
-| DFS | 18 | 106 | 0 | 117 | 86 | 203 |
+| DFS | 19 | 112 | 0 | 129 | 91 | 220 |
 | FileREST | 44 | 197 | 0 | 182 | 153 | 335 |
 | Queue | 17 | 72 | 0 | 49 | 52 | 101 |
 | Table | 19 | 72 | 1 | 65 | 52 | 117 |
-| **Total** | **153** | **750** | **2** | **690** | **587** | **1,277** |
+| **Total** | **154** | **756** | **2** | **702** | **592** | **1,294** |
 
 This is a finite coverage target, not a claim that every possible input is covered. It tests each advertised operation/auth pair once and adds separate exchanges for meaningful branches: conditions, checksums and limits, continuations, post-mutation state, failure atomicity, expiry, feature switches, and shared Blob/DFS state. It does not multiply every branch by every credential. Add a row when an API version, profile, or new variant changes contract behavior. Keep newer-version evidence separate until that version is adopted; a client reaching the emulator through version fallback is not evidence for the newer version. SMB and NFS wire exchanges, control-plane APIs, infrastructure performance, and emulator-only fault injection are out of scope.
 
@@ -58,7 +58,7 @@ The current target supports `flat`, same-account Blob `copy` with an authorized 
 
 Corporate storage controls (for example Secure Future Initiative restrictions)
 can disallow Shared Key and public blob access. This affects what an approved
-target can record, not Azuifer's advertised scope or the full **1,277-exchange**
+target can record, not Azuifer's advertised scope or the full **1,294-exchange**
 target. The `Auth` and `Profile` columns describe separate prerequisites:
 
 | Requirement | What can be recorded |
@@ -137,7 +137,10 @@ Rows D-11 through D-14 track the live verification still owed by
 [ADR-0030](../adr.d/0030-read-path-range-checksums-and-create-path-expiry.md).
 D-15 tracks [ADR-0031](../adr.d/0031-check-search-rights-in-recursive-acl-changes.md):
 use a bearer owner without an ACL-bypassing data role and a separate approved
-verifier to read the ACLs on unreachable entries.
+verifier to read the ACLs on unreachable entries. D-16 tracks
+[ADR-0035](../adr.d/0035-dfs-set-path-expiry.md) for ADLS Gen2 `Set Path Expiry`
+(`PUT ?comp=expiry`) directory rejection, POSIX ACL write enforcement, and DFS
+`HEAD` / `List Paths` expiry visibility.
 
 | ID | Profile | Auth | Ordered exchanges | Count | Evidence |
 | --- | --- | --- | --- | ---: | --- |
@@ -156,6 +159,7 @@ verifier to read the ACLs on unreachable entries.
 | D-13 | hns | Bearer | Send expiry headers on directory creation; check whether the directory exists; try RelativeToCreation on a file; check the resulting file and deadline if present; send a past Absolute time; send a nonnumeric relative time; combine NeverExpire with a time; send an unknown option; send a time without an option; send an option without a time | 10 | pending |
 | D-14 | hns | Bearer | Create a file with a future deadline; rename it; check the old name is gone; read the deadline on the new name through Blob HEAD; read the renamed file before the deadline; after the deadline check DFS visibility; check Blob visibility | 7 | pending |
 | D-15 | hns | Bearer | Set Access Control Recursive with `forceFlag=false` on a tree with an intermediate directory at mode `0600` and record the first denial; verify an unvisited sibling's ACL; repeat on an equivalent tree with `forceFlag=true` and record failed entries, diagnostics and continuation; verify a blocked child's ACL; verify a reachable sibling's ACL; recursively set an ACL that removes execute on the requested directory of a fresh tree; verify the child ACL from that same call; repeat with the requested directory now not searchable; check the child's ACL after the repeat | 9 | pending |
+| D-16 | hns | Bearer | `Set Path Expiry` on a file with RelativeToNow; read x-ms-expiry-time and x-ms-creation-time through DFS HEAD; read x-ms-expiry-time and x-ms-creation-time through DFS HEAD action=getStatus; list the filesystem with DFS List Paths to record expiryTime and creationTime on the expiring file, a plain file, and a directory; send PUT ?comp=expiry against an existing directory and record the status and error code; deny PUT ?comp=expiry for a non-role bearer caller with read-only ACL on the file; after granting file write ACL, set an Absolute expiry as that bearer caller; deny PUT ?comp=expiry for a write user-delegation SAS after revoking file write ACL; clear expiry with NeverExpire after restoring write ACL; verify x-ms-expiry-time is absent on DFS HEAD; list the filesystem with DFS List Paths to verify cleared expiryTime representation; after setting a short expiry and waiting past the deadline, verify DFS HEAD returns not found | 12 | pending |
 
 ### FileREST
 

@@ -10,7 +10,6 @@ use crate::{
     config::Config,
     domain::{ApiVersion, BlobKey, BlobPath, Error, Result},
     protocol,
-    store::Caller,
 };
 use axum::http::request::Parts;
 use std::time::SystemTime;
@@ -95,19 +94,4 @@ fn sas_target(target: &Target, query: &Query) -> Option<Target> {
         container: key.clone(),
         path,
     }))
-}
-
-/// How the POSIX access check treats the caller: Shared Key and SAS bypass the ACLs
-/// (a user-delegation SAS carries the delegating user), and so do bearer tokens with a
-/// data role; a bearer token without one is checked against the ACLs by its object id.
-pub(super) fn caller(credentials: &Credentials) -> Caller {
-    match credentials {
-        Credentials::Key => Caller::Superuser,
-        Credentials::Sas(token) => token.delegated_oid().map_or(Caller::Superuser, |oid| {
-            Caller::Principal(Some(oid.to_owned()))
-        }),
-        Credentials::Bearer(principal) if principal.has_roles() => Caller::Superuser,
-        Credentials::Bearer(principal) => Caller::Principal(principal.oid.clone()),
-        Credentials::Anonymous => Caller::Principal(None),
-    }
 }

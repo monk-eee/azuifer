@@ -5,6 +5,8 @@ use crate::domain::{Error, Result};
 
 const TICKS_PER_SECOND: i64 = 10_000_000;
 const TICKS_PER_MILLI: i64 = 10_000;
+/// 100 ns intervals from the Windows FILETIME epoch (1601-01-01T00:00:00Z) to the Unix epoch.
+const FILETIME_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct Ticks(pub(crate) i64);
@@ -16,6 +18,15 @@ impl Ticks {
 
     pub(crate) fn from_seconds(seconds: u64) -> Self {
         Self(i64::try_from(seconds).map_or(i64::MAX, |s| s.saturating_mul(TICKS_PER_SECOND)))
+    }
+
+    /// Windows FILETIME ticks (100 ns intervals since 1601-01-01T00:00:00Z), as
+    /// DFS List Paths returns for `creationTime` and `expiryTime`.
+    pub(crate) fn filetime(self) -> Result<i64> {
+        self.0
+            .checked_add(FILETIME_EPOCH_TICKS)
+            .filter(|&ticks| ticks >= 0)
+            .ok_or(Error::Internal)
     }
 
     /// Parses the wire form. Fractions of one to seven digits are accepted, so a
@@ -161,6 +172,27 @@ mod tests {
         assert!(
             Ticks::parse("2023-11-14T22:13:20.0000002Z").unwrap()
                 > Ticks::parse("2023-11-14T22:13:20.0000001Z").unwrap()
+        );
+    }
+
+    #[test]
+    fn filetime_converts_unix_ticks_and_rejects_out_of_range() {
+        assert_eq!(
+            Ticks::from_seconds(0).filetime(),
+            Ok(116_444_736_000_000_000)
+        );
+        assert_eq!(
+            Ticks::from_seconds(1_700_000_000).filetime(),
+            Ok(133_444_736_000_000_000)
+        );
+        assert_eq!(
+            Ticks::from_millis(1_700_000_000_123).filetime(),
+            Ok(133_444_736_001_230_000)
+        );
+        assert_eq!(Ticks(i64::MAX).filetime(), Err(Error::Internal));
+        assert_eq!(
+            Ticks(-FILETIME_EPOCH_TICKS - 1).filetime(),
+            Err(Error::Internal)
         );
     }
 }
