@@ -72,6 +72,7 @@ errors! {
     NoPendingCopyOperation(StatusCode::CONFLICT, "NoPendingCopyOperation", "There is currently no pending copy operation."),
     CannotVerifyCopySource(StatusCode::NOT_FOUND, "CannotVerifyCopySource", "Could not verify the copy source within the specified time."),
     CopySourceNotAuthorized(StatusCode::FORBIDDEN, "CannotVerifyCopySource", "Could not verify the copy source: the shared access signature on the source URL is invalid, expired, or does not allow reading it."),
+    SnapshotAcrossSharesNotSupported(StatusCode::BAD_REQUEST, "SnapshotAcrossSharesNotSupported", "The file snapshot source account and share must be the same as that of the destination."),
     LeaseAlreadyPresent(StatusCode::CONFLICT, "LeaseAlreadyPresent", "There is already a lease present."),
     LeaseIsBreakingAndCannotBeAcquired(StatusCode::CONFLICT, "LeaseIsBreakingAndCannotBeAcquired", "The lease ID matched, but the lease is currently in breaking state and cannot be acquired until it is broken."),
     LeaseIsBreakingAndCannotBeChanged(StatusCode::CONFLICT, "LeaseIsBreakingAndCannotBeChanged", "The lease ID matched, but the lease is currently in breaking state and cannot be changed."),

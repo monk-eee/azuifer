@@ -1,6 +1,7 @@
 //! FileREST HTTP protocol tests against the real binary.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use crc::{CRC_64_NVME, Crc};
 use hmac::{Hmac, Mac as _};
 use md5::{Digest as _, Md5};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -1566,10 +1567,21 @@ fn permissions_are_stored_per_share_and_referenced_by_key() {
 }
 
 fn service_sas(permissions: &str, expiry: &str, resource: &str, path: &str) -> String {
+    service_sas_for(ACCOUNT, &KEY, permissions, expiry, resource, path)
+}
+
+fn service_sas_for(
+    account: &str,
+    key: &[u8],
+    permissions: &str,
+    expiry: &str,
+    resource: &str,
+    path: &str,
+) -> String {
     let (kind, canonical) = (
         if path.is_empty() { "s" } else { "f" },
         format!(
-            "/file/{ACCOUNT}/{resource}{}",
+            "/file/{account}/{resource}{}",
             if path.is_empty() {
                 String::new()
             } else {
@@ -1580,15 +1592,25 @@ fn service_sas(permissions: &str, expiry: &str, resource: &str, path: &str) -> S
     let message = format!("{permissions}\n\n{expiry}\n{canonical}\n\n\n\n{VERSION}\n\n\n\n\n");
     format!(
         "sv={VERSION}&sr={kind}&sp={permissions}&se={expiry}&sig={}",
-        utf8_percent_encode(&sign(&message, &KEY), NON_ALPHANUMERIC)
+        utf8_percent_encode(&sign(&message, key), NON_ALPHANUMERIC)
     )
 }
 
 fn account_sas(permissions: &str, types: &str, expiry: &str) -> String {
-    let message = format!("{ACCOUNT}\n{permissions}\nf\n{types}\n\n{expiry}\n\n\n{VERSION}\n\n");
+    account_sas_for(ACCOUNT, &KEY, permissions, types, expiry)
+}
+
+fn account_sas_for(
+    account: &str,
+    key: &[u8],
+    permissions: &str,
+    types: &str,
+    expiry: &str,
+) -> String {
+    let message = format!("{account}\n{permissions}\nf\n{types}\n\n{expiry}\n\n\n{VERSION}\n\n");
     format!(
         "sv={VERSION}&ss=f&srt={types}&sp={permissions}&se={expiry}&sig={}",
-        utf8_percent_encode(&sign(&message, &KEY), NON_ALPHANUMERIC)
+        utf8_percent_encode(&sign(&message, key), NON_ALPHANUMERIC)
     )
 }
 
@@ -2470,4 +2492,269 @@ fn a_source_url_sas_must_allow_reading_the_source() {
     expect(range(&plain), 201);
     expect(range(&url(&valid)), 201);
     assert_eq!(get(&emulator, "from", "range.txt", None).body, b"hello");
+}
+
+fn md5_of(bytes: &[u8]) -> String {
+    STANDARD.encode(Md5::digest(bytes))
+}
+
+fn crc64_text(bytes: &[u8]) -> String {
+    STANDARD.encode(Crc::<u64>::new(&CRC_64_NVME).checksum(bytes).to_le_bytes())
+}
+
+#[test]
+fn put_range_from_url_checks_the_source_crc64_before_writing() {
+    let emulator = Emulator::start(None, &[]);
+    share(&emulator, "from");
+    file(&emulator, "from", "a.txt", 10);
+    put(&emulator, "from", "a.txt", 0, b"helloworld");
+    file(&emulator, "from", "dest.txt", 10);
+    let source = format!("{}/{ACCOUNT}/from/a.txt", emulator.base);
+    let write = |range: &str, extra: &[(&str, &str)]| {
+        let mut headers = vec![
+            ("x-ms-copy-source", source.as_str()),
+            ("x-ms-source-range", "bytes=0-4"),
+            ("x-ms-range", range),
+            ("x-ms-write", "update"),
+        ];
+        headers.extend_from_slice(extra);
+        emulator.send(
+            "PUT",
+            &format!("/{ACCOUNT}/from/dest.txt?comp=range"),
+            &headers,
+            b"",
+        )
+    };
+    let dest = || get(&emulator, "from", "dest.txt", None).body;
+    let (good, other) = (crc64_text(b"hello"), crc64_text(b"other"));
+
+    expect_error(
+        write("bytes=5-9", &[("x-ms-source-content-crc64", &other)]),
+        400,
+        "Crc64Mismatch",
+    );
+    expect_error(
+        write(
+            "bytes=5-9",
+            &[("x-ms-source-content-crc64", &STANDARD.encode([1u8; 16]))],
+        ),
+        400,
+        "InvalidHeaderValue",
+    );
+    assert_eq!(dest(), [0u8; 10], "a rejected source writes nothing");
+
+    let written = expect(
+        write("bytes=5-9", &[("x-ms-source-content-crc64", &good)]),
+        201,
+    );
+    assert_eq!(written.header("x-ms-content-crc64"), good);
+    assert_eq!(dest(), b"\0\0\0\0\0hello");
+
+    expect_error(
+        write("bytes=0-4", &[("x-ms-source-if-match-crc64", &other)]),
+        412,
+        "ConditionNotMet",
+    );
+    expect_error(
+        write("bytes=0-4", &[("x-ms-source-if-none-match-crc64", &good)]),
+        412,
+        "ConditionNotMet",
+    );
+    assert_eq!(&dest()[..5], [0u8; 5], "a failed condition writes nothing");
+    expect(
+        write("bytes=0-4", &[("x-ms-source-if-match-crc64", &good)]),
+        201,
+    );
+    expect(
+        write("bytes=0-4", &[("x-ms-source-if-none-match-crc64", &other)]),
+        201,
+    );
+    // Azure defines no source MD5 for Files, so the header is ignored like any other.
+    expect(
+        write(
+            "bytes=0-4",
+            &[("x-ms-source-content-md5", &md5_of(b"other"))],
+        ),
+        201,
+    );
+    assert_eq!(dest(), b"hellohello");
+}
+
+const OTHER: &str = "otheraccount";
+const OTHER_KEY: [u8; 32] = [43; 32];
+
+/// Starts the emulator with a second configured account named `OTHER`.
+fn start_with_other_account(location: Option<&Path>, config: &Path) -> Emulator {
+    let accounts = format!(
+        "[[accounts]]\nname = \"{OTHER}\"\nkeys = [\"{}\"]\n",
+        STANDARD.encode(OTHER_KEY)
+    );
+    std::fs::write(config, accounts).unwrap();
+    Emulator::start(location, &["--config", config.to_str().unwrap()])
+}
+
+/// A request to the second account, authorized by an account SAS of its own.
+fn as_other(
+    emulator: &Emulator,
+    method: &str,
+    target: &str,
+    extra: &[(&str, &str)],
+    body: &[u8],
+) -> Reply {
+    let sas = account_sas_for(OTHER, &OTHER_KEY, "rwdlc", "sco", "2099-01-01T00:00:00Z");
+    let joiner = if target.contains('?') { '&' } else { '?' };
+    let mut headers = BTreeMap::from([("x-ms-version".to_owned(), VERSION.to_owned())]);
+    for (name, value) in extra {
+        headers.insert((*name).to_owned(), (*value).to_owned());
+    }
+    emulator.dispatch(
+        Method::from_bytes(method.as_bytes()).unwrap(),
+        emulator.url(&format!("{target}{joiner}{sas}")),
+        headers,
+        body,
+        method == "PUT",
+    )
+}
+
+#[test]
+fn copies_read_another_account_only_with_a_sas_of_that_account() {
+    let root = tempfile::tempdir().unwrap();
+    for (mode, location) in [("memory", None), ("disk", Some(root.path().join("data")))] {
+        let config = root.path().join(format!("accounts-{mode}.toml"));
+        let emulator = start_with_other_account(location.as_deref(), &config);
+        share(&emulator, "dst");
+        file(&emulator, "dst", "range.txt", 5);
+        expect(
+            as_other(
+                &emulator,
+                "PUT",
+                &format!("/{OTHER}/src?restype=share"),
+                &[],
+                b"",
+            ),
+            201,
+        );
+        let created = [("x-ms-type", "file"), ("x-ms-content-length", "5")];
+        let file_path = format!("/{OTHER}/src/a.txt");
+        expect(as_other(&emulator, "PUT", &file_path, &created, b""), 201);
+        let write = [("x-ms-range", "bytes=0-4"), ("x-ms-write", "update")];
+        expect(
+            as_other(
+                &emulator,
+                "PUT",
+                &format!("{file_path}?comp=range"),
+                &write,
+                b"hello",
+            ),
+            201,
+        );
+
+        let far = "2099-01-01T00:00:00Z";
+        let url = |sas: &str| format!("{}/{OTHER}/src/a.txt?{sas}", emulator.base);
+        let copy = |name: &str, source: &str| {
+            emulator.send(
+                "PUT",
+                &format!("/{ACCOUNT}/dst/{name}"),
+                &[("x-ms-copy-source", source)],
+                b"",
+            )
+        };
+        let range = |source: &str| {
+            emulator.send(
+                "PUT",
+                &format!("/{ACCOUNT}/dst/range.txt?comp=range"),
+                &[
+                    ("x-ms-copy-source", source),
+                    ("x-ms-source-range", "bytes=0-4"),
+                    ("x-ms-range", "bytes=0-4"),
+                    ("x-ms-write", "update"),
+                ],
+                b"",
+            )
+        };
+        let valid = service_sas_for(OTHER, &OTHER_KEY, "r", far, "src", "a.txt");
+
+        let started = expect(copy("ok.txt", &url(&valid)), 202);
+        assert_eq!(started.header("x-ms-copy-status"), "success", "{mode}");
+        assert_eq!(
+            get(&emulator, "dst", "ok.txt", None).body,
+            b"hello",
+            "{mode}"
+        );
+        expect(range(&url(&valid)), 201);
+        assert_eq!(
+            get(&emulator, "dst", "range.txt", None).body,
+            b"hello",
+            "{mode}"
+        );
+        let host_style = format!("http://{OTHER}.file.core.windows.net/src/a.txt?{valid}");
+        expect(copy("host.txt", &host_style), 202);
+        let properties = expect(
+            emulator.send("HEAD", &format!("/{ACCOUNT}/dst/ok.txt"), &[], b""),
+            200,
+        );
+        assert!(
+            !properties.header("x-ms-copy-source").contains("sig="),
+            "the recorded source omits the SAS"
+        );
+
+        let no_read = service_sas_for(OTHER, &OTHER_KEY, "w", far, "src", "a.txt");
+        let expired = service_sas_for(
+            OTHER,
+            &OTHER_KEY,
+            "r",
+            "2001-01-01T00:00:00Z",
+            "src",
+            "a.txt",
+        );
+        let wrong_key = service_sas_for(OTHER, &KEY, "r", far, "src", "a.txt");
+        let other_name = service_sas_for(ACCOUNT, &KEY, "r", far, "src", "a.txt");
+        let plain = format!("{}/{OTHER}/src/a.txt", emulator.base);
+        let unknown = format!("{}/ghost/src/a.txt?{valid}", emulator.base);
+        for (label, source) in [
+            ("no SAS", plain),
+            ("SAS without read", url(&no_read)),
+            ("expired SAS", url(&expired)),
+            ("SAS signed with the destination key", url(&wrong_key)),
+            ("SAS naming the destination account", url(&other_name)),
+            ("account that is not configured", unknown),
+        ] {
+            for reply in [copy("denied.txt", &source), range(&source)] {
+                assert_eq!(reply.status, 403, "{mode}: {label}: {}", reply.text());
+                assert_eq!(reply.header("x-ms-error-code"), "CannotVerifyCopySource");
+            }
+        }
+        expect_error(
+            emulator.send("HEAD", &format!("/{ACCOUNT}/dst/denied.txt"), &[], b""),
+            404,
+            "ResourceNotFound",
+        );
+        let snapshot = format!(
+            "{}/{OTHER}/src/a.txt?sharesnapshot=2020-01-01T00:00:00.0000000Z&{valid}",
+            emulator.base
+        );
+        expect_error(
+            copy("snap.txt", &snapshot),
+            400,
+            "SnapshotAcrossSharesNotSupported",
+        );
+        expect_error(range(&snapshot), 400, "SnapshotAcrossSharesNotSupported");
+
+        expect(as_other(&emulator, "DELETE", &file_path, &[], b""), 202);
+        expect(
+            as_other(
+                &emulator,
+                "DELETE",
+                &format!("/{OTHER}/src?restype=share"),
+                &[],
+                b"",
+            ),
+            202,
+        );
+        assert_eq!(
+            get(&emulator, "dst", "ok.txt", None).body,
+            b"hello",
+            "{mode}: the copy keeps its bytes after the source account's share is deleted"
+        );
+    }
 }

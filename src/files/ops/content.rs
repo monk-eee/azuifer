@@ -2,7 +2,7 @@
 
 use super::{Context, local_source, with_etag};
 use crate::{
-    checksum::Checksum,
+    checksum::{Checksum, Checksums as Digests},
     files::{
         auth::{Signed, verify_sas},
         error::{Error, Result},
@@ -74,19 +74,49 @@ pub(super) async fn put_range(ctx: &Context<'_>, body: Body) -> Result<Response>
                 (None, None) => None,
                 (Some(_), Some(_)) => return Err(Error::InvalidHeaderValue),
             };
-            write_range(ctx, (offset, length), checksum, last_write, body).await
+            write_range(ctx, (offset, length), checksum, last_write, None, body).await
         }
         _ => Err(Error::InvalidHeaderValue),
     }
 }
 
+/// What Put Range From URL requires of the bytes it read from the source: the
+/// `x-ms-source-if-match-crc64` and `x-ms-source-if-none-match-crc64` conditions.
+struct SourceConditions {
+    if_match: Option<u64>,
+    if_none_match: Option<u64>,
+}
+
+impl SourceConditions {
+    fn parse(ctx: &Context<'_>) -> Result<Self> {
+        Ok(Self {
+            if_match: ctx.headers.crc64("x-ms-source-if-match-crc64")?,
+            if_none_match: ctx.headers.crc64("x-ms-source-if-none-match-crc64")?,
+        })
+    }
+
+    fn check(&self, digests: &Digests) -> Result<()> {
+        let equals = |crc| digests.verify(Some(Checksum::Crc64(crc))).is_ok();
+        let unmet =
+            self.if_match.is_some_and(|crc| !equals(crc)) || self.if_none_match.is_some_and(equals);
+        if unmet {
+            Err(Error::ConditionNotMet)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// Stages `body` and publishes it at `range` (`offset`, `length`), as Put Range
-/// and Put Range From URL both do.
+/// and Put Range From URL both do. `source` is present for Put Range From URL, which
+/// always answers with the CRC64 of what it wrote and checks the source conditions
+/// before the range is published.
 async fn write_range(
     ctx: &Context<'_>,
     (offset, length): (u64, u64),
     checksum: Option<Checksum>,
     last_write: TimeSpec,
+    source: Option<&SourceConditions>,
     body: Body,
 ) -> Result<Response> {
     let mut upload = ctx.app.store.begin_upload(length).await?;
@@ -103,6 +133,9 @@ async fn write_range(
         .await
         .map_err(|_| Error::OperationTimedOut)??;
     let staged = upload.finish(checksum).await?;
+    if let Some(source) = source {
+        source.check(&staged.checksums)?;
+    }
     let checksums = (
         STANDARD_MD5.encode(staged.checksums.md5),
         staged.checksums.response(Some(Checksum::Crc64(0))).1,
@@ -121,7 +154,10 @@ async fn write_range(
         .await?;
     range_response(
         &node,
-        Some((checksums, matches!(checksum, Some(Checksum::Crc64(_))))),
+        Some((
+            checksums,
+            source.is_some() || matches!(checksum, Some(Checksum::Crc64(_))),
+        )),
     )
 }
 
@@ -158,7 +194,33 @@ async fn verify_source_sas(ctx: &Context<'_>, source: &Target, query: &Query) ->
         .map_err(refused)
 }
 
-/// Put Range From URL: writes a range read from a file on this instance and account.
+/// Resolves the source of Copy File or Put Range From URL and checks the caller may read
+/// it. A source in the destination's account is read with the request's own credentials
+/// unless its URL carries a SAS. A source in another account configured on this instance
+/// needs a SAS of that account: the request's Shared Key proves nothing there, as Learn's
+/// table of Copy File sources says (ADR-0037). A share snapshot of another account is
+/// refused with the documented `SnapshotAcrossSharesNotSupported`.
+async fn authorized_source(ctx: &Context<'_>, url: &str) -> Result<(Target, ShareRef)> {
+    let (source, query) = local_source(ctx, url)?;
+    let foreign = source.account != ctx.target.account;
+    if foreign && query.get("sig").is_none() {
+        return Err(Error::CopySourceNotAuthorized);
+    }
+    verify_source_sas(ctx, &source, &query).await?;
+    let snapshot = query.snapshot("sharesnapshot")?;
+    if foreign && snapshot.is_some() {
+        return Err(Error::SnapshotAcrossSharesNotSupported);
+    }
+    let from = ShareRef {
+        account: source.account.clone(),
+        share: source.share.clone().ok_or(Error::InvalidHeaderValue)?,
+        snapshot,
+    };
+    Ok((source, from))
+}
+
+/// Put Range From URL: writes a range read from a file on this instance. The bytes read
+/// must match `x-ms-source-content-crc64` and the source conditions, or nothing is written.
 pub(super) async fn put_range_from_url(ctx: &Context<'_>) -> Result<Response> {
     let (offset, length) = ctx
         .headers
@@ -174,16 +236,12 @@ pub(super) async fn put_range_from_url(ctx: &Context<'_>) -> Result<Response> {
         return Err(Error::InvalidHeaderValue);
     }
     let last_write = last_write_spec(ctx)?;
-    let (source, query) = local_source(ctx, ctx.headers.required("x-ms-copy-source")?)?;
-    if source.account != ctx.target.account {
-        return Err(Error::CannotVerifyCopySource);
-    }
-    verify_source_sas(ctx, &source, &query).await?;
-    let from = ShareRef {
-        account: source.account.clone(),
-        share: source.share.clone().ok_or(Error::InvalidHeaderValue)?,
-        snapshot: query.snapshot("sharesnapshot")?,
-    };
+    let checksum = ctx
+        .headers
+        .crc64("x-ms-source-content-crc64")?
+        .map(Checksum::Crc64);
+    let conditions = SourceConditions::parse(ctx)?;
+    let (source, from) = authorized_source(ctx, ctx.headers.required("x-ms-copy-source")?).await?;
     let read = ctx
         .app
         .store
@@ -211,8 +269,9 @@ pub(super) async fn put_range_from_url(ctx: &Context<'_>) -> Result<Response> {
     write_range(
         ctx,
         (offset, length),
-        None,
+        checksum,
         last_write,
+        Some(&conditions),
         Body::from_stream(read.body.into_stream()),
     )
     .await
@@ -271,16 +330,7 @@ pub(super) async fn list_ranges(ctx: &Context<'_>) -> Result<Response> {
 
 pub(super) async fn copy_file(ctx: &Context<'_>) -> Result<Response> {
     let url = ctx.headers.required("x-ms-copy-source")?;
-    let (source, query) = local_source(ctx, url)?;
-    if source.account != ctx.target.account {
-        return Err(Error::CannotVerifyCopySource);
-    }
-    verify_source_sas(ctx, &source, &query).await?;
-    let from = ShareRef {
-        account: source.account.clone(),
-        share: source.share.clone().ok_or(Error::InvalidHeaderValue)?,
-        snapshot: query.snapshot("sharesnapshot")?,
-    };
+    let (source, from) = authorized_source(ctx, url).await?;
     let copy_mode_override = match ctx.headers.get("x-ms-file-copy-mode")? {
         None | Some("source") => false,
         Some("override") => true,
