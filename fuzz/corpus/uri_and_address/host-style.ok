@@ -1,0 +1,4 @@
+GET /container/daily%20notes.txt?comp=metadata
+Host: testaccount.blob.localhost:10000
+Range: bytes=0-31
+If-Match: *

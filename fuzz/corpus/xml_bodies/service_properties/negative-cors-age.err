@@ -1,0 +1,9 @@
+<StorageServiceProperties>
+  <Cors>
+    <CorsRule>
+      <AllowedOrigins>https://app.example.test</AllowedOrigins>
+      <AllowedMethods>GET</AllowedMethods>
+      <MaxAgeInSeconds>-1</MaxAgeInSeconds>
+    </CorsRule>
+  </Cors>
+</StorageServiceProperties>

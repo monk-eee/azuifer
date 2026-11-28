@@ -1,0 +1,11 @@
+<StorageServiceProperties>
+  <Cors>
+    <CorsRule>
+      <AllowedOrigins>https://app.example.test</AllowedOrigins>
+      <AllowedMethods>GET,PUT</AllowedMethods>
+      <AllowedHeaders>content-type,x-ms-*</AllowedHeaders>
+      <ExposedHeaders>etag</ExposedHeaders>
+      <MaxAgeInSeconds>120</MaxAgeInSeconds>
+    </CorsRule>
+  </Cors>
+</StorageServiceProperties>

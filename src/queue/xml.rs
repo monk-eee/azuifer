@@ -481,6 +481,13 @@ pub(super) fn stats(last_sync_millis: i64) -> Result<Response> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_queue_xml_corpus() {
+        crate::hostile::replay("xml_bodies/queue_message", |input| {
+            message_text(input).is_ok_and(|message| message.is_some_and(|text| !text.is_empty()))
+        });
+    }
     use axum::body::to_bytes;
 
     async fn body(response: Response) -> String {

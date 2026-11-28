@@ -1,0 +1,1 @@
+$filter=Count%20gt&$select=Label,Count

@@ -1,0 +1,2 @@
+SELECT CAST(_1 AS INT) + 1 AS NextId, UPPER(_2) AS Label
+FROM BlobStorage WHERE CAST(_1 AS INT) >= 7

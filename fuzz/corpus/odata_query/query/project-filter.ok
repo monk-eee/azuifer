@@ -1,0 +1,1 @@
+$filter=PartitionKey%20eq%20%27north%27%20and%20Count%20ge%202&$select=Label,Count&$top=20

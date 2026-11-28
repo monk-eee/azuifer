@@ -1,0 +1,5 @@
+PUT /testaccount/container/daily%20notes.txt?timeout=5&comp=metadata
+x-ms-version: 2023-11-03
+Content-Length: 0
+x-ms-meta-label: plain   words "two  spaces"
+x-ms-date: Tue, 02 Jan 2024 03:04:05 GMT

@@ -1,0 +1,2 @@
+GET /testaccount/container/notes.txt
+If-Modified-Since: yesterday

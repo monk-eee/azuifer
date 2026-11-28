@@ -170,6 +170,8 @@ Use loopback defaults, explicit non-loopback opt-in, TLS on every service, and a
 
 Audit dependencies and releases, test parsers and signing canonicalization through fuzzing (URI, XML, OData, SAS, and Shared Key), sign release artifacts, and publish SBOMs. Document private reporting in the [security policy](../../SECURITY.md). Direct exposure to untrusted networks is unsupported.
 
+The [fixed parser corpus](../../fuzz/README.md) checks accepted and rejected synthetic inputs, including SAS time windows and Shared Key canonicalization. It does not contain signing keys, credentials, or captured traffic.
+
 ## 13. Packaging and distribution
 
 Release targets are Windows, Linux, and macOS binaries on x64 and ARM64, plus a multi-architecture Azure Linux OCI image. Publish checksums, signatures, provenance attestations, and SBOMs for binaries and images. Provide a Compose example and Testcontainers documentation.
@@ -179,6 +181,8 @@ Run all selected surfaces in one process. The image must run as non-root, expose
 ## 14. Testing and conformance
 
 Use Rust unit tests, serialization and authentication vectors, persistence and crash recovery, cross-service tests, SDK/CLI/AzCopy integration, differential tests, property and state-machine tests, fuzzing, upgrade/migration checks, and container smoke tests.
+
+Stable workspace tests replay the [parser corpus](../../fuzz/README.md) on Linux, macOS, and Windows. These cases cover URI, XML and batch inputs, OData and Edm values, SAS timestamps, Shared Key canonicalization, and Blob Query SQL. They are deterministic contract checks, not a coverage-guided fuzzing job.
 
 Every compatibility claim needs differential evidence for the stated operation, API version, authentication mode, and feature. Run the same scenario against Azuifer and an isolated Azure Storage test account. Compare statuses, headers, error codes, body shapes, state transitions, follow-up reads, listings, and concurrency. Normalize dynamic timestamps and request IDs only where the protocol permits a difference. Run live tests on protected infrastructure with explicit credentials; publish only sanitized fixtures, never credentials or customer data.
 
@@ -207,7 +211,8 @@ The following is a target, not a list of existing paths. Introduce pieces as the
 | --- | --- |
 | `Cargo.toml`, `crates/` | Candidate crates: `azuifer-server`, `azuifer-protocol`, `azuifer-auth`, `azuifer-core`, `azuifer-storage` (metadata and content modules), `azuifer-blob`, `azuifer-dfs`, `azuifer-files`, `azuifer-queue`, `azuifer-table`, `azuifer-telemetry`, `azuifer-cli`, and `azuifer-testkit`. Split only when there is a concrete boundary. |
 | `specs/` | Versioned API manifests and conformance inputs |
-| `tests/`, `fuzz/` | SDK, CLI, differential, crash, compatibility, and fuzz suites |
+| `tests/` | SDK, CLI, differential, crash, and compatibility suites |
+| [`fuzz/corpus/`](../../fuzz/README.md) | Checked-in synthetic cases replayed by stable Rust tests |
 | `docs/` | Specifications, architecture, compatibility, and [decision records](../adr.d/README.md) |
 | `packaging/` | Container, Compose, and Testcontainers material |
 | Repository root | Contributor and security guidance, code of conduct, and dual license texts |

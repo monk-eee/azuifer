@@ -1,0 +1,4 @@
+GET /testaccount/container?restype=container&comp=list
+x-ms-meta-category:
+x-ms-version: 2023-11-03
+Date: Tue, 02 Jan 2024 03:04:05 GMT

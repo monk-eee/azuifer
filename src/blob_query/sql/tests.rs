@@ -6,6 +6,19 @@ fn csv(fields: &[&str]) -> Row {
     Row::Csv(fields.iter().map(|field| (*field).to_owned()).collect())
 }
 
+#[test]
+fn replay_blob_query_sql_corpus() {
+    crate::hostile::replay("blob_query_sql", |input| {
+        let text = std::str::from_utf8(input).expect("text SQL case");
+        let Ok(query) = Query::parse(text.trim_end()) else {
+            return false;
+        };
+        let row = csv(&["7", "alpha"]);
+        let scope = Scope { headers: None };
+        query.matches(&row, &scope).is_ok_and(|value| value) && query.project(&row, &scope).is_ok()
+    });
+}
+
 fn select(sql: &str, row: &Row, headers: Option<&[String]>) -> Vec<(String, Value)> {
     let query = Query::parse(sql).unwrap();
     let scope = Scope { headers };

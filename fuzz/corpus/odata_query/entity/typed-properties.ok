@@ -1,0 +1,1 @@
+{"PartitionKey":"north","RowKey":"alpha","Observed@odata.type":"Edm.DateTime","Observed":"2024-02-29T01:00:00Z","Count@odata.type":"Edm.Int64","Count":"42","Data@odata.type":"Edm.Binary","Data":"AQID"}

@@ -395,6 +395,24 @@ pub(super) fn metadata_link(urls: &Urls, table: Option<&TableName>, single: bool
 mod tests {
     use super::*;
 
+    #[test]
+    fn replay_odata_and_edm_corpus() {
+        use crate::table::protocol;
+        use axum::http::{HeaderMap, Method};
+
+        crate::hostile::replay("odata_query/query", |input| {
+            let text = std::str::from_utf8(input)
+                .expect("text OData case")
+                .trim_end();
+            let Ok(query) = protocol::parse_query(Some(text)) else {
+                return false;
+            };
+            let target = protocol::parse_target("Fixture()").unwrap();
+            protocol::build(&Method::GET, target, &query, &HeaderMap::new(), &[]).is_ok()
+        });
+        crate::hostile::replay("odata_query/entity", |input| parse_entity(input).is_ok());
+    }
+
     fn urls() -> Urls {
         Urls {
             account: "acct".into(),
