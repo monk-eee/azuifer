@@ -1,6 +1,6 @@
 //! The admin listener: health, readiness, instance status, and optional Prometheus metrics.
 
-use crate::{config::Config, metrics::Metrics, telemetry::Telemetry};
+use crate::{compat, config::Config, metrics::Metrics, telemetry::Telemetry};
 use anyhow::Context as _;
 use axum::{
     Json, Router,
@@ -32,6 +32,10 @@ pub(crate) struct Status {
     pub(crate) admin_url: String,
     pub(crate) prometheus: bool,
     pub(crate) otlp: bool,
+    /// The compatibility mode and the names it ignores (ADR-0038). Absent from an instance
+    /// that predates the mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) compatibility: Option<compat::Report>,
 }
 
 #[derive(Clone)]
@@ -70,6 +74,7 @@ impl Admin {
                 admin_url,
                 prometheus: config.telemetry.prometheus,
                 otlp: telemetry.otlp_enabled(),
+                compatibility: Some(config.compat.report()),
             }),
             metrics: telemetry.prometheus(),
         })

@@ -6,6 +6,7 @@ use crate::{
     auth::{Query, header},
     blob_auth::Target,
     checksum::Checksum,
+    compat::Relax,
     conditions::{Guard, lease_id},
     config::Config,
     domain::{
@@ -304,17 +305,19 @@ pub(crate) fn parse_block_list(body: &[u8]) -> Result<Vec<BlockSelection>> {
 }
 
 /// Rejects query parameters and `x-ms-*` or conditional headers the operation
-/// does not implement, instead of silently ignoring them.
+/// does not implement, instead of silently ignoring them. The one exception is a name
+/// the compatibility mode lists (ADR-0038), which `relax` logs and lets through.
 pub(crate) fn check(
     query: &Query,
     headers: &HeaderMap,
     allowed_query: &[&str],
     allowed_headers: &[&[&str]],
     metadata: bool,
+    relax: &Relax<'_>,
 ) -> Result<()> {
     if query
         .keys()
-        .any(|key| key != "timeout" && !allowed_query.contains(&key.as_str()))
+        .any(|key| key != "timeout" && !allowed_query.contains(&key.as_str()) && !relax.query(key))
     {
         return Err(Error::Unsupported);
     }
@@ -352,6 +355,9 @@ pub(crate) fn check(
                     | "content-disposition"
             )
         {
+            if relax.header(key) {
+                continue;
+            }
             return Err(Error::Unsupported);
         }
     }

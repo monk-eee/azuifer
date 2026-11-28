@@ -208,7 +208,8 @@ impl Telemetry {
     /// Installs the process-wide logger and, when configured, the OTLP exporters.
     pub(crate) fn start(config: &Config) -> Result<Self> {
         let settings = &config.telemetry;
-        let redactor = Redactor::new(config.accounts.values().flatten().map(Vec::as_slice));
+        let redactor = Redactor::new(config.accounts.values().flatten().map(Vec::as_slice))
+            .masking(config.compat.query_names());
         let metrics = Arc::new(Metrics::new(config.services.iter().map(|s| s.name())));
         let providers = settings
             .otlp

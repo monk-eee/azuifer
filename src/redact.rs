@@ -22,6 +22,9 @@ const SENSITIVE_SCHEMES: [&str; 3] = ["sharedkeylite ", "sharedkey ", "bearer "]
 /// Masks configured account keys and credential-shaped text.
 pub(crate) struct Redactor {
     secrets: Vec<String>,
+    /// Query parameters, beyond the built-in list, whose values are masked: the ones the
+    /// compatibility mode ignores, whose values are unknown to Azuifer (ADR-0038).
+    names: Vec<String>,
 }
 
 impl Redactor {
@@ -33,7 +36,16 @@ impl Redactor {
             secrets.push(utf8_percent_encode(&encoded, NON_ALPHANUMERIC).to_string());
             secrets.push(encoded);
         }
-        Self { secrets }
+        Self {
+            secrets,
+            names: Vec::new(),
+        }
+    }
+
+    /// Also masks the value of each query parameter named, as it does for `sig`.
+    pub(crate) fn masking<'a>(mut self, names: impl IntoIterator<Item = &'a str>) -> Self {
+        self.names = names.into_iter().map(str::to_ascii_lowercase).collect();
+        self
     }
 
     /// Masks secrets, credential assignments such as `sig=...`, and Authorization credentials.
@@ -42,7 +54,7 @@ impl Redactor {
         for secret in &self.secrets {
             output = output.replace(secret, MASK);
         }
-        mask_schemes(&mask_assignments(&output))
+        mask_schemes(&mask_assignments(&output, &self.names))
     }
 
     /// Services recognize percent-encoded query names; mask their values at the wire boundary too.
@@ -58,9 +70,7 @@ impl Redactor {
             if let Some((name, _)) = pair.split_once('=')
                 && name.contains('%')
                 && let Ok(decoded) = percent_decode_str(name).decode_utf8()
-                && SENSITIVE_NAMES
-                    .iter()
-                    .any(|secret| decoded.eq_ignore_ascii_case(secret))
+                && sensitive_names(&self.names).any(|secret| decoded.eq_ignore_ascii_case(secret))
             {
                 query.push_str(name);
                 query.push('=');
@@ -81,7 +91,13 @@ fn is_value_end(byte: u8) -> bool {
     byte.is_ascii_whitespace() || matches!(byte, b'&' | b'"' | b'\'' | b'>' | b'<')
 }
 
-fn mask_assignments(input: &str) -> String {
+fn sensitive_names(extra: &[String]) -> impl Iterator<Item = &str> {
+    SENSITIVE_NAMES
+        .into_iter()
+        .chain(extra.iter().map(String::as_str))
+}
+
+fn mask_assignments(input: &str, extra: &[String]) -> String {
     let lower = input.to_ascii_lowercase().into_bytes();
     let bytes = input.as_bytes();
     let mut output = String::with_capacity(input.len());
@@ -89,7 +105,7 @@ fn mask_assignments(input: &str) -> String {
     let mut index = 0;
     while index < bytes.len() {
         let at_boundary = index == 0 || !is_name_byte(bytes[index - 1]);
-        let name = SENSITIVE_NAMES.iter().find(|name| {
+        let name = sensitive_names(extra).find(|name| {
             at_boundary
                 && lower[index..].starts_with(name.as_bytes())
                 && bytes.get(index + name.len()) == Some(&b'=')
@@ -200,5 +216,23 @@ mod tests {
             "GET comp=list /devstoreaccount1/c"
         );
         assert_eq!(Redactor::new([&b""[..]]).text("abc"), "abc");
+    }
+
+    #[test]
+    fn listed_query_parameters_are_masked_like_sig() {
+        let redactor = Redactor::new([&b""[..]]).masking(["CacheBust"]);
+        assert_eq!(
+            redactor.text("comp=list&cachebust=VALUE&x=1"),
+            "comp=list&cachebust=REDACTED&x=1"
+        );
+        assert_eq!(
+            redactor.query("comp=list&cache%62ust=VALUE"),
+            "comp=list&cache%62ust=REDACTED"
+        );
+        assert_eq!(
+            Redactor::new([&b""[..]]).text("cachebust=VALUE"),
+            "cachebust=VALUE",
+            "without the list nothing is masked"
+        );
     }
 }

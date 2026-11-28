@@ -20,6 +20,7 @@ mod blob_web;
 mod checksum;
 mod clock;
 mod commands;
+mod compat;
 mod conditions;
 mod config;
 mod conformance;
@@ -147,6 +148,6 @@ async fn main() -> Result<()> {
         }
         Command::Conformance {
             command: ConformanceCommand::Export { format },
-        } => conformance::export(format),
+        } => conformance::export(format, &cli.options.compat_policy()?),
     }
 }

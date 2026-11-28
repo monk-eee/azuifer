@@ -12,6 +12,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "ops_http/compat.rs"]
+mod compat;
 #[path = "ops_http/runtime.rs"]
 mod runtime;
 #[path = "ops_http/traces.rs"]

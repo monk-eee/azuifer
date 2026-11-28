@@ -4,7 +4,7 @@ use super::{
     headers::{content_headers, includes},
     *,
 };
-use crate::{domain::Include, lease::LeaseDuration};
+use crate::{compat::Relax, domain::Include, lease::LeaseDuration};
 
 #[test]
 fn include_values_are_case_insensitive() {
@@ -113,15 +113,23 @@ fn lease_headers_map_to_actions_and_reject_invalid_values() {
 
 #[test]
 fn unimplemented_headers_and_parameters_are_refused() {
+    let policy = crate::compat::Policy::default();
+    let relax = Relax::new(&policy, "blob", "test");
     let query = Query::from([("snapshot".to_owned(), "x".to_owned())]);
     assert_eq!(
-        check(&query, &headers(&[]), &[], &[], false),
+        check(&query, &headers(&[]), &[], &[], false, &relax),
         Err(Error::Unsupported)
     );
     let tags = headers(&[("x-ms-tags", "a=b")]);
     assert_eq!(
-        check(&Query::new(), &tags, &[], &[], false),
+        check(&Query::new(), &tags, &[], &[], false, &relax),
         Err(Error::Unsupported)
+    );
+    let browser = headers(&[("x-ms-useragent", "azsdk-js")]);
+    assert_eq!(
+        check(&Query::new(), &browser, &[], &[], false, &relax),
+        Err(Error::Unsupported),
+        "strict mode refuses the browser SDK's user-agent header"
     );
     let timeout = Query::from([("timeout".to_owned(), "30".to_owned())]);
     assert_eq!(
@@ -130,9 +138,41 @@ fn unimplemented_headers_and_parameters_are_refused() {
             &headers(&[("origin", "https://a.test")]),
             &[],
             &[],
-            false
+            false,
+            &relax
         ),
         Ok(())
+    );
+}
+
+#[test]
+fn lenient_mode_ignores_only_the_names_it_lists() {
+    let policy = crate::compat::Policy::resolve(
+        Some(crate::compat::Mode::Lenient),
+        Some("x-ms-trace-hint,cachebust"),
+    )
+    .unwrap();
+    let relax = Relax::new(&policy, "blob", "test");
+    let ignored = headers(&[("x-ms-useragent", "azsdk-js"), ("x-ms-trace-hint", "1")]);
+    let query = Query::from([("cachebust".to_owned(), "7".to_owned())]);
+    assert_eq!(check(&query, &ignored, &[], &[], false, &relax), Ok(()));
+    for refused in [
+        headers(&[("x-ms-tags", "a=b")]),
+        headers(&[("x-ms-encryption-scope", "scope")]),
+        headers(&[("content-md5", "AAAAAAAAAAAAAAAAAAAAAA==")]),
+        headers(&[("if-match", "*")]),
+        headers(&[("x-ms-unlisted", "1")]),
+    ] {
+        assert_eq!(
+            check(&Query::new(), &refused, &[], &[], false, &relax),
+            Err(Error::Unsupported),
+            "{refused:?}"
+        );
+    }
+    let snapshot = Query::from([("snapshot".to_owned(), "x".to_owned())]);
+    assert_eq!(
+        check(&snapshot, &headers(&[]), &[], &[], false, &relax),
+        Err(Error::Unsupported)
     );
 }
 

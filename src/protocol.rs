@@ -7,6 +7,7 @@ use crate::{
     blob_snapshot::{Removal, Selector},
     blob_tags::TagFilter,
     checksum::Checksum,
+    compat::Relax,
     conditions::{Conditions, Guard},
     config::Config,
     domain::{
@@ -271,10 +272,16 @@ struct Request<'a> {
     query: &'a Query,
     headers: &'a HeaderMap,
     config: &'a Config,
+    relax: &'a Relax<'a>,
 }
 
-pub(crate) fn parse(parts: &Parts, config: &Config, now: SystemTime) -> Result<ParsedRequest> {
-    parse_with(parts, config, now, None)
+pub(crate) fn parse(
+    parts: &Parts,
+    config: &Config,
+    now: SystemTime,
+    request_id: &str,
+) -> Result<ParsedRequest> {
+    parse_with(parts, config, now, request_id, None)
 }
 
 /// Parses a Submit Batch sub-request. It carries no `x-ms-version` of its own
@@ -283,15 +290,17 @@ pub(crate) fn parse_batched(
     parts: &Parts,
     config: &Config,
     now: SystemTime,
+    request_id: &str,
     version: &str,
 ) -> Result<ParsedRequest> {
-    parse_with(parts, config, now, Some(version))
+    parse_with(parts, config, now, request_id, Some(version))
 }
 
 fn parse_with(
     parts: &Parts,
     config: &Config,
     now: SystemTime,
+    request_id: &str,
     inherited: Option<&str>,
 ) -> Result<ParsedRequest> {
     let headers = &parts.headers;
@@ -340,11 +349,13 @@ fn parse_with(
     if matches!(credentials, Credentials::Sas(_)) {
         query.retain(|name, _| !blob_sas::is_sas_param(name));
     }
+    let relax = Relax::new(&config.compat, "blob", request_id);
     let request = Request {
         method: &parts.method,
         query: &query,
         headers,
         config,
+        relax: &relax,
     };
     let operation = match target.clone() {
         Target::Account(account) => request.account_operation(account),
@@ -419,7 +430,14 @@ impl Request<'_> {
     }
 
     fn check(&self, params: &[&str], headers: &[&[&str]], metadata: bool) -> Result<()> {
-        check(self.query, self.headers, params, headers, metadata)
+        check(
+            self.query,
+            self.headers,
+            params,
+            headers,
+            metadata,
+            self.relax,
+        )
     }
 
     fn listing(&self) -> Result<PageRequest> {

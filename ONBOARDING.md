@@ -31,7 +31,7 @@ Follow the [quick start](README.md#run-locally), then run the [merge checks](AGE
 
 | Area | Where to look |
 | --- | --- |
-| Startup, flags, `doctor`, `conformance export` | [main.rs](src/main.rs), [config.rs](src/config.rs), [commands.rs](src/commands.rs), [conformance.rs](src/conformance.rs) |
+| Startup, flags, `doctor`, `conformance export` | [main.rs](src/main.rs), [config.rs](src/config.rs), [commands.rs](src/commands.rs), [conformance.rs](src/conformance.rs), [compat.rs](src/compat.rs) (the named compatibility mode) |
 | HTTP edge, wire parsing, addressing | [server.rs](src/server.rs), [protocol/](src/protocol), [respond/](src/respond), [address.rs](src/address.rs), [wire.rs](src/wire.rs), [xml_tree.rs](src/xml_tree.rs) |
 | Authentication | [auth.rs](src/auth.rs), [sas.rs](src/sas.rs), [delegation.rs](src/delegation.rs), [oauth.rs](src/oauth.rs), [jwt.rs](src/jwt.rs), [tls.rs](src/tls.rs) |
 | Blob and DFS (one shared namespace) | [store/](src/store), [dfs/](src/dfs), the `blob_*.rs` modules such as [blob_copy.rs](src/blob_copy.rs) and [blob_lifecycle.rs](src/blob_lifecycle.rs), [blob_query/](src/blob_query) |

@@ -1,4 +1,5 @@
 use crate::{
+    compat,
     config::{CONFORMANCE, Service},
     domain::ApiVersion,
 };
@@ -285,9 +286,10 @@ struct JsonReport<'a> {
     services: &'a Catalog,
     operation_summary: OperationSummary,
     live_azure_evidence: EvidenceSummary,
+    compatibility: compat::Description,
 }
 
-fn json_report(catalog: &Catalog) -> Result<JsonReport<'_>> {
+fn json_report<'a>(catalog: &'a Catalog, policy: &compat::Policy) -> Result<JsonReport<'a>> {
     let blob = catalog
         .get(Service::Blob.name())
         .context("Blob manifest missing")?;
@@ -325,10 +327,15 @@ fn json_report(catalog: &Catalog) -> Result<JsonReport<'_>> {
         services: catalog,
         operation_summary,
         live_azure_evidence,
+        compatibility: policy.description(),
     })
 }
 
-fn markdown_report(output: &mut impl Write, catalog: &Catalog) -> io::Result<()> {
+fn markdown_report(
+    output: &mut impl Write,
+    catalog: &Catalog,
+    policy: &compat::Policy,
+) -> io::Result<()> {
     fn cell(text: &str) -> String {
         text.replace('\\', "\\\\")
             .replace('|', "\\|")
@@ -386,6 +393,7 @@ fn markdown_report(output: &mut impl Write, catalog: &Catalog) -> io::Result<()>
             coverage.matched_operation_auth.len()
         )?;
     }
+    policy.description().write_markdown(output)?;
     for (service, manifest) in catalog {
         writeln!(output, "\n## {service} (`{}`)\n", manifest.api_version)?;
         writeln!(
@@ -413,15 +421,15 @@ fn markdown_report(output: &mut impl Write, catalog: &Catalog) -> io::Result<()>
     Ok(())
 }
 
-pub(crate) fn export(format: Format) -> Result<()> {
+pub(crate) fn export(format: Format, policy: &compat::Policy) -> Result<()> {
     let catalog = catalog()?;
     let mut output = io::BufWriter::new(io::stdout().lock());
     match format {
         Format::Json => {
-            serde_json::to_writer_pretty(&mut output, &json_report(&catalog)?)?;
+            serde_json::to_writer_pretty(&mut output, &json_report(&catalog, policy)?)?;
             writeln!(output)?;
         }
-        Format::Markdown => markdown_report(&mut output, &catalog)?,
+        Format::Markdown => markdown_report(&mut output, &catalog, policy)?,
     }
     output.flush().context("could not write conformance report")
 }

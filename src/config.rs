@@ -49,6 +49,15 @@ pub(crate) struct Options {
     upload_timeout_seconds: Option<u64>,
     #[arg(long, env = "AZUIFER_SKIP_API_VERSION_CHECK", global = true, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     skip_api_version_check: Option<bool>,
+    /// `strict` (the default) rejects every unknown query parameter and `x-ms-*` header an
+    /// operation does not implement; `lenient` also ignores the names on a short list and logs
+    /// each one.
+    #[arg(long, env = "AZUIFER_COMPATIBILITY_MODE", global = true, value_enum)]
+    compatibility_mode: Option<crate::compat::Mode>,
+    /// Comma-separated extra names `lenient` may ignore: `x-ms-*` names are headers, others
+    /// are query parameters. Names that carry protocol meaning are refused.
+    #[arg(long, env = "AZUIFER_COMPATIBILITY_ALLOW", global = true)]
+    compatibility_allow: Option<String>,
     #[arg(long, env = "AZUIFER_SERVICES", global = true)]
     services: Option<String>,
     #[arg(long, env = "AZUIFER_QUEUE_PORT", global = true)]
@@ -140,6 +149,8 @@ struct FileConfig {
     test_clock: Option<bool>,
     upload_timeout_seconds: Option<u64>,
     skip_api_version_check: Option<bool>,
+    compatibility_mode: Option<crate::compat::Mode>,
+    compatibility_allow: Option<String>,
     services: Option<String>,
     queue_port: Option<u16>,
     table_port: Option<u16>,
@@ -187,6 +198,7 @@ pub(crate) struct Config {
     pub(crate) test_clock: bool,
     pub(crate) upload_timeout: Duration,
     pub(crate) skip_api_version_check: bool,
+    pub(crate) compat: crate::compat::Policy,
     pub(crate) accounts: HashMap<AccountName, Vec<Vec<u8>>>,
     pub(crate) hns_accounts: HashSet<AccountName>,
     pub(crate) versioning_accounts: HashSet<AccountName>,
@@ -199,19 +211,36 @@ pub(crate) struct Config {
     pub(crate) telemetry: telemetry::Settings,
 }
 
+fn read_file(path: Option<&PathBuf>) -> Result<FileConfig> {
+    let Some(path) = path else {
+        return Ok(FileConfig::default());
+    };
+    let text = std::fs::read_to_string(path).context("could not read configuration")?;
+    toml::from_str::<FileConfig>(&text).map_err(|error| {
+        anyhow::anyhow!(
+            "invalid configuration TOML at byte {}",
+            error.span().map_or(0, |span| span.start)
+        )
+    })
+}
+
+impl Options {
+    /// The compatibility policy these options select (command line, then environment, then
+    /// the TOML file), for commands that do not load the whole configuration.
+    pub(crate) fn compat_policy(&self) -> Result<crate::compat::Policy> {
+        let file = read_file(self.config.as_ref())?;
+        crate::compat::Policy::resolve(
+            self.compatibility_mode.or(file.compatibility_mode),
+            self.compatibility_allow
+                .as_deref()
+                .or(file.compatibility_allow.as_deref()),
+        )
+    }
+}
+
 impl Config {
     pub(crate) fn load(options: Options) -> Result<Self> {
-        let file = if let Some(path) = options.config {
-            let text = std::fs::read_to_string(path).context("could not read configuration")?;
-            toml::from_str::<FileConfig>(&text).map_err(|error| {
-                anyhow::anyhow!(
-                    "invalid configuration TOML at byte {}",
-                    error.span().map_or(0, |span| span.start)
-                )
-            })?
-        } else {
-            FileConfig::default()
-        };
+        let file = read_file(options.config.as_ref())?;
         let binding = options
             .bind
             .or(file.bind)
@@ -385,6 +414,13 @@ impl Config {
                 .skip_api_version_check
                 .or(file.skip_api_version_check)
                 .unwrap_or(false),
+            compat: crate::compat::Policy::resolve(
+                options.compatibility_mode.or(file.compatibility_mode),
+                options
+                    .compatibility_allow
+                    .as_deref()
+                    .or(file.compatibility_allow.as_deref()),
+            )?,
             accounts,
             hns_accounts,
             versioning_accounts,
