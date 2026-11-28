@@ -18,7 +18,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - id: version
@@ -58,7 +58,7 @@ jobs:
       RELEASE_BINARY: ${{ endsWith(matrix.target, '-linux-musl') && 'release-bin/azuifer' || format('target/{0}/release/azuifer{1}', matrix.target, endsWith(matrix.target, '-windows-msvc') && '.exe' || '') }}
       RUSTFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
@@ -100,7 +100,7 @@ jobs:
     env:
       RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - run: mkdir dist
@@ -170,7 +170,7 @@ jobs:
       DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
       RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - name: Validate the Docker Hub destination
