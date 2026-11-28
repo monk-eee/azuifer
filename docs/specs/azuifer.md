@@ -197,6 +197,8 @@ State-machine tests drive thousands of seeded random operation sequences against
 
 Stream large payloads within bounded memory, apply backpressure, bound internal queues, and keep blocking SQLite and filesystem work off the async executor. Recover from abrupt termination and preserve committed metadata and content. Expose contention, support parallel test workers and quotas, and make time injectable for TTL, leases, and SAS expiry. Publish release-over-release benchmarks as regression measurements, not comparisons claiming Azure performance equivalence.
 
+The [benchmark runner](../benchmarks.md) measures throughput, latency, and peak process memory for all five services in both storage modes, and compares versioned reports from matching environments.
+
 ## 16. Planned repository layout
 
 The following is a target, not a list of existing paths. Introduce pieces as their first consumer lands.
