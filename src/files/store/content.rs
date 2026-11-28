@@ -332,7 +332,9 @@ pub(super) fn recover(db: &Connection, dir: &Path) -> anyhow::Result<()> {
             false
         };
         if orphan && entry.file_type()?.is_file() {
+            let bytes = entry.metadata()?.len();
             std::fs::remove_file(entry.path())?;
+            crate::runtime_metrics::removed(crate::runtime_metrics::Removal::Recovered, bytes);
         }
     }
     Ok(())

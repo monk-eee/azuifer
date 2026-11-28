@@ -7,6 +7,7 @@ use crate::{
     config::{Config, Service},
     metrics::{LATENCY_BUCKETS, Metrics},
     redact::Redactor,
+    runtime_metrics::{self, Kind},
 };
 use anyhow::{Context as _, Result, bail, ensure};
 use axum::{
@@ -21,7 +22,7 @@ use clap::{Args, ValueEnum};
 use futures_util::StreamExt as _;
 use opentelemetry::{
     KeyValue,
-    metrics::{Counter, Histogram, MeterProvider as _, UpDownCounter},
+    metrics::{AsyncInstrument, Counter, Histogram, MeterProvider as _, UpDownCounter},
     trace::TracerProvider as _,
 };
 use opentelemetry_otlp::{MetricExporter, Protocol, SpanExporter, WithExportConfig as _};
@@ -218,6 +219,9 @@ impl Telemetry {
         let instruments = providers
             .as_ref()
             .map(|providers| instruments(&providers.meter));
+        if let Some(providers) = &providers {
+            observe_runtime(&providers.meter);
+        }
         let otel_layer = providers.as_ref().map(|providers| {
             tracing_opentelemetry::layer()
                 .with_location(false)
@@ -370,6 +374,40 @@ fn instruments(meter: &SdkMeterProvider) -> Instruments {
         active: meter
             .i64_up_down_counter("azuifer.http.server.active_requests")
             .build(),
+    }
+}
+
+/// Exports the store gauges and counters, read from the same source as /metrics.
+fn observe_runtime(provider: &SdkMeterProvider) {
+    let meter = provider.meter("azuifer");
+    for (index, spec) in runtime_metrics::SPECS.iter().enumerate() {
+        let read = move |instrument: &dyn AsyncInstrument<f64>| {
+            for (labels, value) in runtime_metrics::collect(index) {
+                let attributes: Vec<KeyValue> = labels
+                    .into_iter()
+                    .map(|(name, value)| KeyValue::new(name, value))
+                    .collect();
+                instrument.observe(value, &attributes);
+            }
+        };
+        match spec.kind {
+            Kind::Counter => {
+                meter
+                    .f64_observable_counter(spec.otel)
+                    .with_description(spec.help)
+                    .with_unit(spec.unit)
+                    .with_callback(read)
+                    .build();
+            }
+            Kind::Gauge => {
+                meter
+                    .f64_observable_gauge(spec.otel)
+                    .with_description(spec.help)
+                    .with_unit(spec.unit)
+                    .with_callback(read)
+                    .build();
+            }
+        }
     }
 }
 

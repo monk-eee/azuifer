@@ -172,15 +172,16 @@ impl Metrics {
             "Seconds since the process started serving.",
         );
         sample(&mut out, "azuifer_uptime_seconds", "", &uptime.as_secs());
+        crate::runtime_metrics::render(&mut out);
         out
     }
 }
 
-fn family(out: &mut String, name: &str, kind: &str, help: &str) {
+pub(crate) fn family(out: &mut String, name: &str, kind: &str, help: &str) {
     let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} {kind}");
 }
 
-fn sample(out: &mut String, name: &str, labels: &str, value: &dyn std::fmt::Display) {
+pub(crate) fn sample(out: &mut String, name: &str, labels: &str, value: &dyn std::fmt::Display) {
     if labels.is_empty() {
         let _ = writeln!(out, "{name} {value}");
     } else {

@@ -12,6 +12,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "ops_http/runtime.rs"]
+mod runtime;
+
 struct Server {
     child: Child,
     urls: HashMap<String, String>,
@@ -33,9 +36,11 @@ impl Server {
             "0",
             "--admin-port",
             "0",
-            "--in-memory",
             "--shutdown-on-stdin-eof",
         ]);
+        if !args.contains(&"--location") {
+            command.arg("--in-memory");
+        }
         command.args(args);
         let mut child = command
             .stdin(Stdio::piped())

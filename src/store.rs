@@ -14,7 +14,9 @@ mod listing;
 mod namespace;
 mod page_history;
 mod pages;
+mod probe;
 mod readers;
+mod recovery;
 mod schema;
 mod service;
 mod snapshots;
@@ -28,6 +30,7 @@ use crate::domain::{
 };
 use crate::extent_readers::Readers;
 use crate::lease::{LeaseId, LeaseKind, StoredLease};
+use crate::runtime_metrics::{self, Failure};
 use crate::stamp::Ticks;
 use anyhow::Context as _;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -198,16 +201,20 @@ impl Store {
         namespace::restore_parents(&mut db, &hns_accounts, clock.now_millis())?;
         snapshots::load_pins(&db, &mode).context("could not load retained content")?;
         if let Mode::Disk { extents, .. } = &mode {
-            recover(&db, extents).context("could not recover unreferenced content")?;
+            recovery::recover(&db, extents).context("could not recover unreferenced content")?;
         }
         snapshots::purge_at_open(&db, &mode, clock.now_millis())
             .context("could not purge expired deleted content")?;
-        Ok(Self(Arc::new(Inner {
+        let inner = Arc::new(Inner {
             db: Mutex::new(db),
             mode,
             clock,
             hns_accounts,
-        })))
+        });
+        runtime_metrics::register(
+            Arc::downgrade(&inner) as std::sync::Weak<dyn runtime_metrics::Probe>
+        );
+        Ok(Self(inner))
     }
 
     fn hierarchical(&self, key: &ContainerKey) -> bool {
@@ -223,9 +230,7 @@ impl Store {
     {
         let inner = self.0.clone();
         tokio::task::spawn_blocking(move || {
-            let mut db = inner
-                .db
-                .lock()
+            let mut db = runtime_metrics::lock(runtime_metrics::Store::Namespace, &inner.db)
                 .map_err(|_| internal("poisoned metadata lock"))?;
             let now = inner.clock.now_millis();
             expiry::sweep(&mut db, &inner.mode, now)?;
@@ -720,35 +725,6 @@ fn extent(dir: &Path, id: Uuid) -> PathBuf {
     dir.join(format!("extent-{}", id.simple()))
 }
 
-fn recover(db: &Connection, dir: &Path) -> anyhow::Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let orphan = if name.starts_with("incoming-") {
-            true
-        } else if let Some(id) = name
-            .strip_prefix("extent-")
-            .and_then(|id| Uuid::parse_str(id).ok())
-        {
-            !db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM blobs WHERE id=?1 UNION ALL SELECT 1 FROM staged_blocks WHERE id=?1 UNION ALL SELECT 1 FROM blob_ranges WHERE extent=?1
-                 UNION ALL SELECT 1 FROM dfs_staged WHERE extent=?1
-                 UNION ALL SELECT 1 FROM history_ranges WHERE extent=?1
-                 UNION ALL SELECT 1 FROM blob_history WHERE content_id=?1)",
-                [id],
-                |row| row.get::<_, bool>(0),
-            )?
-        } else {
-            false
-        };
-        if orphan && entry.file_type()?.is_file() {
-            fs::remove_file(entry.path())?;
-        }
-    }
-    Ok(())
-}
-
 fn require_directory(path: &Path) -> std::io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_dir() || is_link(&metadata) {
@@ -778,15 +754,18 @@ fn is_link(metadata: &fs::Metadata) -> bool {
 
 fn db_error(error: rusqlite::Error) -> Error {
     tracing::error!(code = ?error.sqlite_error_code(), "metadata operation failed");
+    runtime_metrics::database_failure(runtime_metrics::Store::Namespace, &error);
     Error::Internal
 }
 
 fn io_error(error: std::io::Error) -> Error {
     tracing::error!(kind = ?error.kind(), "content operation failed");
+    runtime_metrics::failure(runtime_metrics::Store::Namespace, Failure::Io);
     Error::Internal
 }
 
 fn internal(reason: &'static str) -> Error {
     tracing::error!(reason, "storage operation failed");
+    runtime_metrics::failure(runtime_metrics::Store::Namespace, Failure::Internal);
     Error::Internal
 }

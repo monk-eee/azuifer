@@ -2,7 +2,11 @@ use super::{
     error::{QueueError, Result},
     model::{AccessPolicy, Metadata, PropertiesPatch, ServiceProperties},
 };
-use crate::{clock::Clock, domain::AccountName};
+use crate::{
+    clock::Clock,
+    domain::AccountName,
+    runtime_metrics::{self, Failure, Gauges, Probe},
+};
 use anyhow::Context as _;
 use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
 use std::{
@@ -94,11 +98,13 @@ impl Store {
         );
         db.execute_batch(SCHEMA)?;
         db.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        Ok(Self(Arc::new(Inner {
+        let inner = Arc::new(Inner {
             db: Mutex::new(db),
             clock,
             _lock: lock,
-        })))
+        });
+        runtime_metrics::register(Arc::downgrade(&inner) as std::sync::Weak<dyn Probe>);
+        Ok(Self(inner))
     }
 
     /// Runs one operation as a single immediate transaction off the async executor,
@@ -110,10 +116,11 @@ impl Store {
     {
         let inner = self.0.clone();
         tokio::task::spawn_blocking(move || {
-            let mut db = inner.db.lock().map_err(|_| {
-                tracing::error!("queue metadata lock is poisoned");
-                QueueError::Internal
-            })?;
+            let mut db =
+                runtime_metrics::lock(runtime_metrics::Store::Queue, &inner.db).map_err(|_| {
+                    tracing::error!("queue metadata lock is poisoned");
+                    internal()
+                })?;
             let now = inner.clock.now_millis();
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let value = action(&tx, now)?;
@@ -123,7 +130,7 @@ impl Store {
         .await
         .map_err(|_| {
             tracing::error!("queue metadata operation did not complete");
-            QueueError::Internal
+            internal()
         })?
     }
 
@@ -275,17 +282,55 @@ impl Store {
     }
 }
 
+/// The internal error, counted as a backend failure.
+fn internal() -> QueueError {
+    runtime_metrics::failure(runtime_metrics::Store::Queue, Failure::Internal);
+    QueueError::Internal
+}
+
+impl Probe for Inner {
+    fn sample(&self, gauges: &mut Gauges) {
+        let Ok(db) = self.db.lock() else { return };
+        let now = self.clock.now_millis();
+        let depths = db.prepare(
+            "SELECT q.account, q.name,
+                    COALESCE(SUM(m.visible <= ?1), 0), COALESCE(SUM(m.visible > ?1), 0)
+             FROM queues q LEFT JOIN messages m
+               ON m.account = q.account AND m.queue = q.name AND (m.expires IS NULL OR m.expires > ?1)
+             GROUP BY q.account, q.name",
+        );
+        let Ok(mut depths) = depths else { return };
+        let rows = depths.query_map([now], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        });
+        let Ok(rows) = rows else { return };
+        for (account, queue, visible, invisible) in rows.flatten() {
+            gauges.queue(
+                &account,
+                &queue,
+                u64::try_from(visible).unwrap_or(0),
+                u64::try_from(invisible).unwrap_or(0),
+            );
+        }
+    }
+}
+
 fn encode<T: serde::Serialize>(value: &T) -> Result<String> {
     serde_json::to_string(value).map_err(|_| {
         tracing::error!("could not encode queue state");
-        QueueError::Internal
+        internal()
     })
 }
 
 fn decode<T: serde::de::DeserializeOwned>(text: &str) -> Result<T> {
     serde_json::from_str(text).map_err(|_| {
         tracing::error!("stored queue state is unreadable");
-        QueueError::Internal
+        internal()
     })
 }
 

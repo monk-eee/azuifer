@@ -11,7 +11,7 @@ use super::{
     },
     service::AccessPolicy,
 };
-use crate::domain::AccountName;
+use crate::{domain::AccountName, runtime_metrics};
 use anyhow::Context as _;
 use rusqlite::{Connection, OptionalExtension as _, params, params_from_iter};
 use std::{
@@ -154,9 +154,7 @@ impl Store {
     {
         let inner = self.0.clone();
         tokio::task::spawn_blocking(move || {
-            let mut db = inner
-                .db
-                .lock()
+            let mut db = runtime_metrics::lock(runtime_metrics::Store::Table, &inner.db)
                 .map_err(|_| internal("poisoned Table metadata lock"))?;
             action(&mut db)
         })

@@ -97,11 +97,14 @@ async fn status(State(admin): State<Admin>) -> Json<Status> {
 }
 
 async fn metrics(State(admin): State<Admin>) -> Response {
-    let body = admin
-        .metrics
-        .as_ref()
-        .map(|metrics| metrics.render(admin.started.elapsed()))
-        .unwrap_or_default();
+    let uptime = admin.started.elapsed();
+    // Rendering samples the stores, which can wait for their metadata locks.
+    let body = match admin.metrics.clone() {
+        Some(metrics) => tokio::task::spawn_blocking(move || metrics.render(uptime))
+            .await
+            .unwrap_or_default(),
+        None => String::new(),
+    };
     (
         [(
             header::CONTENT_TYPE,

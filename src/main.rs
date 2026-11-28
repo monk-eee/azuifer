@@ -40,6 +40,7 @@ mod queue;
 mod ranges;
 mod redact;
 mod respond;
+mod runtime_metrics;
 mod sas;
 mod server;
 mod service_props;

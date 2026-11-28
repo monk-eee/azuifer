@@ -1,5 +1,6 @@
 //! Read plans keep immutable extent files alive after the metadata lock is released.
 
+use crate::runtime_metrics::{self, Failure, Removal};
 use axum::body::Bytes;
 use futures_util::{
     StreamExt as _,
@@ -91,10 +92,14 @@ impl Drop for Pins {
 }
 
 fn remove(path: &Path) {
-    if let Err(error) = std::fs::remove_file(path)
-        && error.kind() != io::ErrorKind::NotFound
-    {
-        tracing::warn!(kind = ?error.kind(), "content cleanup deferred until recovery");
+    let bytes = std::fs::metadata(path).map_or(0, |metadata| metadata.len());
+    match std::fs::remove_file(path) {
+        Ok(()) => runtime_metrics::removed(Removal::Reclaimed, bytes),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(kind = ?error.kind(), "content cleanup deferred until recovery");
+            runtime_metrics::failure(runtime_metrics::Store::Content, Failure::Io);
+        }
     }
 }
 
@@ -221,7 +226,13 @@ struct DiskRead {
 }
 
 impl DiskRead {
-    fn read_chunk(mut self) -> io::Result<(Bytes, Self)> {
+    fn read_chunk(self) -> io::Result<(Bytes, Self)> {
+        self.read().inspect_err(|_| {
+            runtime_metrics::failure(runtime_metrics::Store::Content, Failure::Io);
+        })
+    }
+
+    fn read(mut self) -> io::Result<(Bytes, Self)> {
         let file = match &mut self.file {
             Some(file) => file,
             slot @ None => slot.insert(self.slice.open()?),
