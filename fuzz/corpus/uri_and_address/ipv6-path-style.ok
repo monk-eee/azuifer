@@ -1,0 +1,3 @@
+GET http://[::1]:10000/testaccount/container/notes.txt
+Range: bytes=10-
+If-Modified-Since: Tue, 02 Jan 2024 03:04:05 GMT

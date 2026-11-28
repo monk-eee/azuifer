@@ -4,6 +4,9 @@
 //! recurse until the stack overflows, or take time that grows faster than the input. These
 //! helpers build the inputs; each parser's tests decide what a correct answer is.
 
+mod corpus;
+pub(crate) use corpus::replay;
+
 /// Fragments that break parsers: quotes, brackets, separators, escapes, numbers at the edge
 /// of their type, control and non-ASCII characters.
 const NASTY: &[&str] = &[

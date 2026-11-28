@@ -1,0 +1,10 @@
+<SignedIdentifiers>
+  <SignedIdentifier>
+    <Id>fixture-read</Id>
+    <AccessPolicy>
+      <Start>2024-01-01T00:00:00Z</Start>
+      <Expiry>2024-01-02T00:00:00Z</Expiry>
+      <Permission>r</Permission>
+    </AccessPolicy>
+  </SignedIdentifier>
+</SignedIdentifiers>

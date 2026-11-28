@@ -124,6 +124,13 @@ pub(super) fn parse_permission(body: &[u8]) -> Result<(String, Option<String>)> 
 mod tests {
     use super::*;
 
+    #[test]
+    fn replay_file_acl_corpus() {
+        crate::hostile::replay("xml_bodies/file_acl", |input| {
+            parse_access_policies(input).is_ok()
+        });
+    }
+
     const DOCUMENT: &str = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
         <SignedIdentifiers><SignedIdentifier><Id>policy1</Id><AccessPolicy>\
         <Start>2023-01-01T00:00:00.0000000Z</Start><Expiry>2030-01-01T00:00:00Z</Expiry>\
