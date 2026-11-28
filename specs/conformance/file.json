@@ -24,7 +24,7 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Same-instance, same-account sources only, including a share snapshot source; the copy completes synchronously with x-ms-copy-status success and shares the source's extents. The host-style name {account}.file.* of a configured account is treated as local. Blob, external and cross-account sources return NotImplemented or CannotVerifyCopySource. A SAS on the source URL must allow reading that file (signature, expiry, resource, stored policy, read permission) or the copy is 403 CannotVerifyCopySource; a source URL without a SAS is read with the request's own credentials. The status for a bad source SAS is unverified (ADR-0032). NFS: NFS shares: x-ms-file-mode-copy-mode and x-ms-file-owner-copy-mode (source by default, an unverified default); a symbolic link as source or destination is 400 XNfs4FileTypeUnsupportedException (unverified). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
+      "notes": "Same-instance sources, including a share snapshot source in the destination's account; the copy completes synchronously with x-ms-copy-status success and shares the source's extents. The host-style name {account}.file.* of a configured account is treated as local. Blob and external sources return NotImplemented. A file in another account configured on this instance needs a read SAS of that account (ADR-0037): the destination's Shared Key, a SAS signed with another key, no SAS, or an unconfigured account is 403 CannotVerifyCopySource, and a share snapshot of it is 400 SnapshotAcrossSharesNotSupported. These codes are unverified until F-29 is recorded. A SAS on the source URL must allow reading that file (signature, expiry, resource, stored policy, read permission) or the copy is 403 CannotVerifyCopySource; a source URL without a SAS is read with the request's own credentials. The status for a bad source SAS is unverified (ADR-0032). NFS: NFS shares: x-ms-file-mode-copy-mode and x-ms-file-owner-copy-mode (source by default, an unverified default); a symbolic link as source or destination is 400 XNfs4FileTypeUnsupportedException (unverified). Nothing about the NFS behavior is recorded from Azure (ADR-0029)."
     },
     {
       "name": "Create Directory",
@@ -357,7 +357,7 @@
         "ServiceSAS",
         "Bearer"
       ],
-      "notes": "Same-instance sources in the same account only, which is what AzCopy's file-to-file copy needs. Like Copy File, a SAS on the source URL must allow reading that file or Azuifer returns 403 CannotVerifyCopySource (ADR-0032). Source-SAS errors and newer copy diagnostics are pending live recording (F-24 and F-25). On NFS shares a symbolic link as source or destination returns 400 XNfs4FileTypeUnsupportedException locally; NFS behavior is not recorded from Azure (ADR-0029)."
+      "notes": "Same-instance sources: the destination's account, or another configured account with a read SAS of that account (ADR-0037), which is what AzCopy's file-to-file copy needs. x-ms-source-content-crc64 is compared with the bytes read before the range is published (400 Crc64Mismatch, nothing written); x-ms-source-if-match-crc64 and x-ms-source-if-none-match-crc64 answer 412 ConditionNotMet when unmet; the response carries x-ms-content-crc64. Azure defines no source MD5 or x-ms-source-if-* header for Files, so none is checked. The 412 code is unverified until F-28 is recorded. Like Copy File, a SAS on the source URL must allow reading that file or Azuifer returns 403 CannotVerifyCopySource (ADR-0032). Source-SAS errors and newer copy diagnostics are pending live recording (F-24 and F-25). On NFS shares a symbolic link as source or destination returns 400 XNfs4FileTypeUnsupportedException locally; NFS behavior is not recorded from Azure (ADR-0029)."
     },
     {
       "name": "Read Symbolic Link",
@@ -510,7 +510,7 @@
   ],
   "live_azure_evidence": {
     "cassettes": 0,
-    "target_exchanges": 322,
+    "target_exchanges": 335,
     "recorded_exchanges": 0,
     "matched_exchanges": 0,
     "matched_operation_auth": {},

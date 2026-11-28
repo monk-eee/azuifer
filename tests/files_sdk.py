@@ -38,6 +38,9 @@ from azure.storage.fileshare import (
 
 ACCOUNT = "testaccount"
 KEY = base64.b64encode(bytes(range(32))).decode()
+# A second configured account, the source of the cross-account copies.
+OTHER = "otheraccount"
+OTHER_KEY = base64.b64encode(bytes(range(32, 64))).decode()
 API_VERSION = "2023-11-03"
 PASSED = []
 
@@ -54,8 +57,11 @@ class Server:
         env = {k: v for k, v in os.environ.items() if not k.startswith("AZUIFER_")}
         env["AZUIFER_ACCOUNT_NAME"] = ACCOUNT
         env["AZUIFER_ACCOUNT_KEY"] = KEY
+        handle, self.config = tempfile.mkstemp(suffix=".toml")
+        with os.fdopen(handle, "w") as accounts:
+            accounts.write(f'[[accounts]]\nname = "{OTHER}"\nkeys = ["{OTHER_KEY}"]\n')
         command = [binary, "serve", "--port", "0", "--admin-port", "0", "--services", "file",
-                   "--skip-api-version-check", "--shutdown-on-stdin-eof"]
+                   "--skip-api-version-check", "--shutdown-on-stdin-eof", "--config", self.config]
         command += ["--location", location] if location else ["--in-memory"]
         self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.DEVNULL, env=env, text=True)
@@ -82,9 +88,15 @@ class Server:
         return ShareServiceClient.from_connection_string(self.connection_string,
                                                          api_version=API_VERSION)
 
+    def other_service(self):
+        connection = (f"DefaultEndpointsProtocol=http;AccountName={OTHER};AccountKey={OTHER_KEY};"
+                      f"FileEndpoint={self.urls['file']}/{OTHER};")
+        return ShareServiceClient.from_connection_string(connection, api_version=API_VERSION)
+
     def stop(self):
         self.process.stdin.close()
         self.process.wait(timeout=15)
+        os.unlink(self.config)
 
 
 def sdk_flows(server):
@@ -278,6 +290,60 @@ def permission_format_flows(server):
               error.status_code == 403 and error.error_code == "CannotVerifyCopySource")
     service.delete_share("binshare")
 
+def crc64_nvme(data):
+    """CRC-64/NVME, the checksum Azuifer compares source ranges with, as the 8 bytes the SDK sends."""
+    crc = 0xFFFFFFFFFFFFFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = (crc >> 1) ^ (0x9A6C9329AC4BC9B5 if crc & 1 else 0)
+    return (crc ^ 0xFFFFFFFFFFFFFFFF).to_bytes(8, "little")
+
+
+def expect_error(call, status, code):
+    try:
+        call()
+    except HttpResponseError as error:
+        check(f"{code} ({status})", error.status_code == status and error.error_code == code,
+              f"{error.status_code} {error.error_code}")
+        return
+    raise AssertionError(f"expected {status} {code}, but the call succeeded")
+
+
+def source_checksum_and_cross_account_flows(server):
+    check("crc64 test vector", crc64_nvme(b"123456789") == (0xAE8B14860A799888).to_bytes(8, "little"))
+    source = server.other_service().create_share("crosssrc").get_file_client("data.bin")
+    source.upload_file(b"0123456789")
+    expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
+    read = generate_file_sas(OTHER, "crosssrc", ["data.bin"], OTHER_KEY,
+                             permission=FileSasPermissions(read=True), expiry=expiry)
+    local = generate_file_sas(ACCOUNT, "crosssrc", ["data.bin"], KEY,
+                              permission=FileSasPermissions(read=True), expiry=expiry)
+    share = server.service().create_share("crossdst")
+
+    copy = share.get_file_client("copied.bin")
+    copy.start_copy_from_url(f"{source.url}?{read}")
+    check("copy from another account with its SAS", copy.download_file().readall() == b"0123456789")
+    expect_error(lambda: share.get_file_client("refused.bin").start_copy_from_url(source.url),
+                 403, "CannotVerifyCopySource")
+    expect_error(lambda: share.get_file_client("refused.bin").start_copy_from_url(
+        f"{source.url}?{local}"), 403, "CannotVerifyCopySource")
+
+    target = share.get_file_client("ranged.bin")
+    target.create_file(10)
+    url = f"{source.url}?{read}"
+    expect_error(lambda: target.upload_range_from_url(
+        url, offset=0, length=5, source_offset=5, source_content_crc64=crc64_nvme(b"other")),
+        400, "Crc64Mismatch")
+    check("a rejected source range writes nothing", target.download_file().readall() == bytes(10))
+    target.upload_range_from_url(
+        url, offset=0, length=5, source_offset=5, source_content_crc64=crc64_nvme(b"56789"))
+    check("range from another account with a verified CRC64",
+          target.download_file(offset=0, length=5).readall() == b"56789")
+    server.service().delete_share("crossdst")
+    server.other_service().delete_share("crosssrc")
+
+
 def cli_flows(server, workdir):
     az = shutil.which("az") or shutil.which("az.cmd")
     if not az:
@@ -346,6 +412,7 @@ def main():
         try:
             sdk_flows(server)
             permission_format_flows(server)
+            source_checksum_and_cross_account_flows(server)
             if not args.skip_cli:
                 cli_flows(server, workdir)
         finally:

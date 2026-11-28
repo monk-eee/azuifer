@@ -8,10 +8,10 @@ The target is the five Azure Storage REST services, using the operations and aut
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Blob | 55 | 303 | 1 | 277 | 244 | 521 |
 | DFS | 18 | 106 | 0 | 117 | 86 | 203 |
-| FileREST | 44 | 197 | 0 | 169 | 153 | 322 |
+| FileREST | 44 | 197 | 0 | 182 | 153 | 335 |
 | Queue | 17 | 72 | 0 | 49 | 52 | 101 |
 | Table | 19 | 72 | 1 | 65 | 52 | 117 |
-| **Total** | **153** | **750** | **2** | **677** | **587** | **1,264** |
+| **Total** | **153** | **750** | **2** | **690** | **587** | **1,277** |
 
 This is a finite coverage target, not a claim that every possible input is covered. It tests each advertised operation/auth pair once and adds separate exchanges for meaningful branches: conditions, checksums and limits, continuations, post-mutation state, failure atomicity, expiry, feature switches, and shared Blob/DFS state. It does not multiply every branch by every credential. Add a row when an API version, profile, or new variant changes contract behavior. Keep newer-version evidence separate until that version is adopted; a client reaching the emulator through version fallback is not evidence for the newer version. SMB and NFS wire exchanges, control-plane APIs, infrastructure performance, and emulator-only fault injection are out of scope.
 
@@ -58,7 +58,7 @@ The current target supports `flat`, same-account Blob `copy` with an authorized 
 
 Corporate storage controls (for example Secure Future Initiative restrictions)
 can disallow Shared Key and public blob access. This affects what an approved
-target can record, not Azuifer's advertised scope or the full **1,264-exchange**
+target can record, not Azuifer's advertised scope or the full **1,277-exchange**
 target. The `Auth` and `Profile` columns describe separate prerequisites:
 
 | Requirement | What can be recorded |
@@ -168,7 +168,7 @@ probes another version. Keep those live recordings separate from the
 `2023-11-03` baseline; an emulator response obtained through version fallback
 is not evidence that the newer Azure version is implemented.
 
-F-24 through F-27 track [ADR-0032](../adr.d/0032-check-copy-source-sas-and-convert-binary-security-descriptors.md).
+F-24 through F-27 track [ADR-0032](../adr.d/0032-check-copy-source-sas-and-convert-binary-security-descriptors.md). F-28 and F-29 track [ADR-0037](../adr.d/0037-files-copy-checksums-and-cross-account-sources.md).
 Use disposable SMB shares in a separate Shared Key-enabled target. Record
 the `2024-02-04` copy diagnostics and the versioned permission calls separately
 from the baseline.
@@ -202,6 +202,8 @@ from the baseline.
 | F-25 | files + keys + copy | SharedKey | Try Copy File with a tampered source SAS at `2024-02-04` and check source error headers and body; check for a destination; try Put Range From URL with an expired source SAS at the same version and check source diagnostics; verify destination is unchanged | 4 | pending |
 | F-26 | files + keys (SMB) | SharedKey | Create Permission with a known binary descriptor at `2024-11-04`; Get Permission as binary; get as SDDL and compare alias and flag spelling; create equivalent SDDL and compare the returned key; try malformed binary; try a descriptor with a SACL; try an object ACE; try a callback ACE; try an unknown body format; try an unknown Get Permission header format; send valid SDDL with a binary format label at `2023-11-03`; get that permission at `2023-11-03` and check response fields | 12 | pending |
 | F-27 | files + keys (SMB) | SharedKey | Create File with a binary permission header at `2025-01-05`; read the stored permission key; Set File Properties with a different binary permission; read the new key; Create Directory with a binary permission; read the stored key; Set Directory Properties with a different binary permission; read the new key; try a valid binary header at the 8 KiB base64 boundary; try one above the boundary; send SDDL with the binary format header at `2024-11-04`; read that permission back | 12 | pending |
+| F-28 | files + keys + copy | SharedKey | Put Range From URL with a matching source CRC64; Put Range From URL with a wrong source CRC64; verify the destination range is unchanged; Put Range From URL with a matching source-if-match CRC64; Put Range From URL with a source-if-match CRC64 that differs; Put Range From URL with a source-if-none-match CRC64 equal to the source; Put Range From URL with x-ms-source-content-md5 | 7 | pending |
+| F-29 | files + keys + copy | SharedKey | Copy File from a file of a second approved account with a read SAS of that account; read copied bytes; Copy File from the second account without a SAS; Copy File from the second account with a SAS signed by the destination account; Put Range From URL from the second account with a read SAS; Copy File from a share snapshot of the second account | 6 | pending |
 
 ### Queue
 
