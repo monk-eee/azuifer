@@ -1,5 +1,12 @@
 use super::{CLIENTS, Method, Reply, Server, race};
-use std::{collections::BTreeSet, fs};
+use std::{
+    collections::BTreeSet,
+    fs,
+    io::Read as _,
+    path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
+};
 
 fn tags<'a>(xml: &'a str, tag: &str) -> Vec<&'a str> {
     let open = format!("<{tag}>");
@@ -32,6 +39,117 @@ fn put_range(server: &Server, path: &str, start: usize, data: &[u8]) -> Reply {
         &[("x-ms-write", "update"), ("x-ms-range", &range)],
         data,
     )
+}
+
+fn extent_paths(dir: &Path) -> BTreeSet<PathBuf> {
+    fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect()
+}
+
+#[test]
+fn files_keep_unopened_extents_until_the_last_download_is_closed() {
+    const SIZE: usize = 32 * 1024 * 1024;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("file").join("content");
+    let server = Server::start("file", Some(root.path()), &[]);
+    let file = "/streaming/sparse";
+    server
+        .send(Method::PUT, "/streaming?restype=share", &[], b"")
+        .status(201);
+    create_file(&server, file, SIZE);
+    put_range(&server, file, 0, b"head").status(201);
+    let head = extent_paths(&dir);
+    put_range(&server, file, SIZE - 4, b"tail").status(201);
+    let original = extent_paths(&dir);
+    let tail = original.difference(&head).next().unwrap();
+    assert_eq!(original.len(), 2);
+
+    let start = || {
+        let mut response = server.request(Method::GET, file, &[], b"");
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.content_length(), Some(SIZE as u64));
+        let mut first = [0; 4];
+        response.read_exact(&mut first).unwrap();
+        assert_eq!(&first, b"head");
+        response
+    };
+    let reader = start();
+    let mut finishing = start();
+    // The unread hole exceeds the transport buffers, so these readers haven't reached
+    // the tail. On Windows, an exclusive open also checks it isn't already open.
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(tail)
+            .expect("the distant extent must not have an open download handle");
+    }
+    put_range(&server, file, SIZE - 4, b"next").status(201);
+    assert!(tail.is_file(), "overwriting reclaimed an unread extent");
+    server.send(Method::DELETE, file, &[], b"").status(202);
+    server
+        .send(Method::GET, file, &[], b"")
+        .error(404, "ResourceNotFound");
+    assert_eq!(
+        extent_paths(&dir),
+        original,
+        "only unpinned extents can be reclaimed"
+    );
+
+    let mut rest = Vec::new();
+    finishing.read_to_end(&mut rest).unwrap();
+    assert_eq!(rest.len(), SIZE - 4);
+    assert!(rest[..SIZE - 8].iter().all(|&byte| byte == 0));
+    assert_eq!(&rest[SIZE - 8..], b"tail");
+    drop(finishing);
+    assert_eq!(
+        extent_paths(&dir),
+        original,
+        "the second reader still holds each extent"
+    );
+    drop(reader);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !extent_paths(&dir).is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "extents not reclaimed after the last reader closed"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn files_stream_a_fragmented_download_below_the_descriptor_limit() {
+    use std::process::Command;
+
+    const SEGMENTS: usize = 192;
+    let root = tempfile::tempdir().unwrap();
+    let mut command = Command::new("sh");
+    command.args([
+        "-c",
+        r#"ulimit -n 128 && exec "$@""#,
+        "sh",
+        env!("CARGO_BIN_EXE_azuifer"),
+    ]);
+    let server = Server::spawn(command, "file", Some(root.path()), &[]);
+    let file = "/fragmented/sparse";
+    server
+        .send(Method::PUT, "/fragmented?restype=share", &[], b"")
+        .status(201);
+    create_file(&server, file, SEGMENTS * 2);
+    let mut expected = Vec::new();
+    for i in 0..SEGMENTS {
+        let byte = i as u8 + 1;
+        put_range(&server, file, 2 * i, &[byte]).status(201);
+        expected.extend([byte, 0]);
+    }
+    let actual = server.send(Method::GET, file, &[], b"").status(200);
+    assert_eq!(actual.body, expected);
 }
 
 fn usage(server: &Server, share: &str) -> usize {

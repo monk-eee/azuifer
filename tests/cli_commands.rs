@@ -38,7 +38,11 @@ struct Server {
 
 impl Server {
     fn start(args: &[&str]) -> Self {
-        let mut child = azuifer()
+        Self::spawn(azuifer(), args)
+    }
+
+    fn spawn(mut command: Command, args: &[&str]) -> Self {
+        let mut child = command
             .args([
                 "serve",
                 "--port",
@@ -481,9 +485,83 @@ fn status_reports_storage_exporters_and_a_long_uptime() {
 fn doctor_recognises_the_running_instance_it_is_asked_about() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
-    let server = Server::start(&["--location", path(&data), "--services", "blob"]);
+    let mut command = azuifer();
+    command.current_dir(dir.path());
+    let server = Server::spawn(command, &["--location", "data", "--services", "blob"]);
     let admin_port = server.admin.rsplit(':').next().unwrap().to_owned();
+    let status = run(&["status", "--admin-url", &server.admin, "--json"]);
+    assert!(status.status.success(), "{}", stderr(&status));
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    let port = status["services"][0]["url"]
+        .as_str()
+        .unwrap()
+        .rsplit(':')
+        .next()
+        .unwrap();
 
+    let output = run(&[
+        "doctor",
+        "--location",
+        path(&data),
+        "--services",
+        "blob",
+        "--port",
+        port,
+        "--admin-port",
+        &admin_port,
+    ]);
+    let text = stdout(&output);
+    assert!(output.status.success(), "{text}{}", stderr(&output));
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("[PASS] Port: blob ")
+                && line.contains("is served by the running Azuifer instance")),
+        "{text}"
+    );
+    assert!(
+        text.contains("[PASS] Directory lock: held by the running Azuifer instance"),
+        "{text}"
+    );
+}
+
+#[test]
+fn doctor_does_not_credit_an_unrelated_port_or_storage_lock_to_a_healthy_instance() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("intended");
+    let unrelated = dir.path().join("other");
+    let server = Server::start(&["--location", path(&unrelated), "--services", "blob"]);
+    let _holder = Server::start(&["--location", path(&data), "--services", "file"]);
+    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = occupied.local_addr().unwrap().port().to_string();
+    let admin_port = server.admin.rsplit(':').next().unwrap();
+
+    let output = run(&[
+        "doctor",
+        "--location",
+        path(&data),
+        "--services",
+        "file",
+        "--file-port",
+        &port,
+        "--admin-port",
+        admin_port,
+    ]);
+    let text = stdout(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("[FAIL] Port: file ") && line.contains("already in use")),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("[FAIL] Directory lock: ")
+                && line.contains("another process")),
+        "{text}"
+    );
+
+    let same_data = Server::start(&["--location", path(&data), "--services", "blob"]);
+    let admin_port = same_data.admin.rsplit(':').next().unwrap();
     let output = run(&[
         "doctor",
         "--location",
@@ -493,17 +571,16 @@ fn doctor_recognises_the_running_instance_it_is_asked_about() {
         "--port",
         "0",
         "--admin-port",
-        &admin_port,
+        admin_port,
     ]);
-    let text = stdout(&output);
-    assert!(output.status.success(), "{text}{}", stderr(&output));
+    assert!(!output.status.success(), "{}", stdout(&output));
     assert!(
-        text.contains("is served by the running Azuifer instance"),
-        "{text}"
-    );
-    assert!(
-        text.contains("[PASS] Directory lock: held by the running Azuifer instance"),
-        "{text}"
+        stdout(&output).contains(&format!(
+            "{} is held by another process",
+            data.join("file").join("azuifer.lock").display()
+        )),
+        "{}",
+        stdout(&output)
     );
 }
 

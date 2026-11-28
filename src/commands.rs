@@ -15,12 +15,13 @@ use std::{
 
 const GIB: u64 = 1024 * 1024 * 1024;
 const MIB: u64 = 1024 * 1024;
+type LockFile = (&'static str, &'static [&'static str]);
 /// Lock files taken by the services that persist state, relative to the location.
-const LOCK_FILES: [&str; 4] = [
-    "azuifer.lock",
-    "queue/queue.lock",
-    "table/table.lock",
-    "file/azuifer.lock",
+const LOCK_FILES: [LockFile; 4] = [
+    ("azuifer.lock", &["blob", "dfs"]),
+    ("queue/queue.lock", &["queue"]),
+    ("table/table.lock", &["table"]),
+    ("file/azuifer.lock", &["file"]),
 ];
 /// Everything Azuifer writes directly under the location. Other files are never touched.
 const STATE_ENTRIES: [&str; 8] = [
@@ -162,8 +163,9 @@ pub(crate) fn doctor(options: Options) -> Result<()> {
     match Config::load(options) {
         Ok(config) => {
             report.add(Outcome::Pass, "Configuration", "valid");
-            check_ports(&config, &mut report);
-            check_storage(&config, &mut report);
+            let running = running_instance(&config);
+            check_ports(&config, running.as_ref(), &mut report);
+            check_storage(&config, running.as_ref(), &mut report);
             check_telemetry(&config, &mut report);
             check_container(&config, &mut report);
         }
@@ -185,15 +187,19 @@ fn probe_address(address: SocketAddr) -> String {
     }
 }
 
-/// Whether an Azuifer admin listener answers at the configured admin address.
-fn running_instance(config: &Config) -> bool {
-    config.admin.port() != 0
-        && http_get(&probe_address(config.admin), "/healthz")
-            .is_ok_and(|(code, body)| code == 200 && body.trim() == "ok")
+/// Reads the instance's actual listeners and data location, not just its health.
+fn running_instance(config: &Config) -> Option<Status> {
+    if config.admin.port() == 0 {
+        return None;
+    }
+    let (200, body) = http_get(&probe_address(config.admin), "/status").ok()? else {
+        return None;
+    };
+    let status: Status = serde_json::from_str(&body).ok()?;
+    (status.admin_url == format!("http://{}", config.admin)).then_some(status)
 }
 
-fn check_ports(config: &Config, report: &mut Report) {
-    let running = running_instance(config);
+fn check_ports(config: &Config, running: Option<&Status>, report: &mut Report) {
     let listeners = Service::ALL
         .into_iter()
         .filter(|service| config.services.contains(service))
@@ -219,11 +225,22 @@ fn check_ports(config: &Config, report: &mut Report) {
         }
         match TcpListener::bind(address) {
             Ok(_) => report.add(Outcome::Pass, "Port", format!("{name} {address} is free")),
-            Err(error) if running && error.kind() == std::io::ErrorKind::AddrInUse => report.add(
-                Outcome::Pass,
-                "Port",
-                format!("{name} {address} is served by the running Azuifer instance"),
-            ),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AddrInUse
+                    && running.is_some_and(|status| {
+                        name == "admin"
+                            || status.services.iter().any(|listener| {
+                                listener.name == name
+                                    && listener.url == format!("{}://{address}", config.scheme())
+                            })
+                    }) =>
+            {
+                report.add(
+                    Outcome::Pass,
+                    "Port",
+                    format!("{name} {address} is served by the running Azuifer instance"),
+                )
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => report.add(
                 Outcome::Fail,
                 "Port",
@@ -247,9 +264,9 @@ fn nearest_existing(path: &Path) -> &Path {
 }
 
 /// Paths of the lock files that are currently held by another process.
-fn held_locks(location: &Path) -> Result<Vec<PathBuf>> {
+fn held_locks(location: &Path) -> Result<Vec<LockFile>> {
     let mut held = Vec::new();
-    for name in LOCK_FILES {
+    for (name, services) in LOCK_FILES {
         let path = location.join(name);
         let file = match OpenOptions::new().read(true).write(true).open(&path) {
             Ok(file) => file,
@@ -260,7 +277,7 @@ fn held_locks(location: &Path) -> Result<Vec<PathBuf>> {
         };
         match file.try_lock() {
             Ok(()) => {}
-            Err(TryLockError::WouldBlock) => held.push(path),
+            Err(TryLockError::WouldBlock) => held.push((name, services)),
             Err(TryLockError::Error(error)) => {
                 return Err(error).with_context(|| format!("could not lock {}", path.display()));
             }
@@ -269,7 +286,7 @@ fn held_locks(location: &Path) -> Result<Vec<PathBuf>> {
     Ok(held)
 }
 
-fn check_storage(config: &Config, report: &mut Report) {
+fn check_storage(config: &Config, running: Option<&Status>, report: &mut Report) {
     let Some(location) = &config.location else {
         report.add(
             Outcome::Pass,
@@ -313,7 +330,7 @@ fn check_storage(config: &Config, report: &mut Report) {
             ),
         ),
     }
-    check_lock(config, location, report);
+    check_lock(location, running, report);
     check_space(probe, report);
 }
 
@@ -333,24 +350,51 @@ fn check_wal(directory: &Path, report: &mut Report) {
     }
 }
 
-fn check_lock(config: &Config, location: &Path, report: &mut Report) {
+fn check_lock(location: &Path, running: Option<&Status>, report: &mut Report) {
     match held_locks(location) {
         Ok(held) if held.is_empty() => {
-            report.add(Outcome::Pass, "Directory lock", "not held by another process");
+            report.add(
+                Outcome::Pass,
+                "Directory lock",
+                "not held by another process",
+            );
         }
-        Ok(_) if running_instance(config) => report.add(
-            Outcome::Pass,
-            "Directory lock",
-            "held by the running Azuifer instance",
-        ),
-        Ok(held) => report.add(
-            Outcome::Fail,
-            "Directory lock",
-            format!(
-                "{} is held by another process; stop the other Azuifer instance or use a different --location",
-                held[0].display()
-            ),
-        ),
+        Ok(held) => {
+            let owner = running.filter(|instance| {
+                let Some(path) = instance.location.as_deref() else {
+                    return false;
+                };
+                location.canonicalize().ok().is_some_and(|location| {
+                    Path::new(path)
+                        .canonicalize()
+                        .is_ok_and(|path| path == location)
+                })
+            });
+            let foreign = held.into_iter().find(|(_, services)| {
+                owner.is_none_or(|instance| {
+                    !instance
+                        .services
+                        .iter()
+                        .any(|service| services.contains(&service.name.as_str()))
+                })
+            });
+            if let Some((name, _)) = foreign {
+                report.add(
+                    Outcome::Fail,
+                    "Directory lock",
+                    format!(
+                        "{} is held by another process; stop the other Azuifer instance or use a different --location",
+                        location.join(name).display()
+                    ),
+                );
+            } else {
+                report.add(
+                    Outcome::Pass,
+                    "Directory lock",
+                    "held by the running Azuifer instance",
+                );
+            }
+        }
         Err(error) => report.add(Outcome::Fail, "Directory lock", format!("{error:#}")),
     }
 }
@@ -470,7 +514,7 @@ pub(crate) fn reset(config: &Config, yes: bool) -> Result<()> {
         return Ok(());
     }
     let mut locks = Vec::new();
-    for name in LOCK_FILES {
+    for (name, _) in LOCK_FILES {
         let path = location.join(name);
         if path.symlink_metadata().is_err() {
             continue;

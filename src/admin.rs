@@ -1,6 +1,7 @@
 //! The admin listener: health, readiness, instance status, and optional Prometheus metrics.
 
 use crate::{config::Config, metrics::Metrics, telemetry::Telemetry};
+use anyhow::Context as _;
 use axum::{
     Json, Router,
     extract::State,
@@ -46,8 +47,14 @@ impl Admin {
         services: Vec<ServiceStatus>,
         admin_url: String,
         telemetry: &Telemetry,
-    ) -> Self {
-        Self {
+    ) -> anyhow::Result<Self> {
+        let location = config
+            .location
+            .as_ref()
+            .map(std::path::absolute)
+            .transpose()
+            .context("could not resolve the data directory for admin status")?;
+        Ok(Self {
             started: Instant::now(),
             status: Arc::new(Status {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -58,17 +65,14 @@ impl Admin {
                     "in-memory"
                 }
                 .to_owned(),
-                location: config
-                    .location
-                    .as_ref()
-                    .map(|location| location.display().to_string()),
+                location: location.map(|path| path.display().to_string()),
                 services,
                 admin_url,
                 prometheus: config.telemetry.prometheus,
                 otlp: telemetry.otlp_enabled(),
             }),
             metrics: telemetry.prometheus(),
-        }
+        })
     }
 }
 

@@ -161,7 +161,7 @@ pub(crate) async fn serve(config: Config, shutdown_on_stdin_eof: bool) -> anyhow
         bound,
         format!("http://{admin_address}"),
         &telemetry,
-    ));
+    )?);
     if config.test_clock {
         admin_router = admin_router.merge(clock::router(clock.clone()));
     }
