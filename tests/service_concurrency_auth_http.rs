@@ -16,6 +16,8 @@ use std::{
 
 #[path = "service_concurrency_auth_http/admin.rs"]
 mod admin;
+#[path = "service_concurrency_auth_http/early_error.rs"]
+mod early_error;
 #[path = "service_concurrency_auth_http/files.rs"]
 mod files;
 

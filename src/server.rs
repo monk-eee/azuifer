@@ -143,6 +143,7 @@ pub(crate) async fn serve(config: Config, shutdown_on_stdin_eof: bool) -> anyhow
             Service::Table => table::router(config.clone(), address, clock.clone()).await?,
             Service::File => files::router(config.clone(), address, clock.clone()).await?,
         };
+        let router = router.layer(axum::middleware::from_fn(crate::wire::drain_unread_body));
         let router = telemetry::instrument(router, &telemetry, service);
         tracing::info!(service = service.name(), %address, "listening");
         println!("{}_url={}://{address}", service.name(), config.scheme());
