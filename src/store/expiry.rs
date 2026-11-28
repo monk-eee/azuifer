@@ -151,6 +151,20 @@ pub(super) fn clear(db: &Connection, key: &BlobKey) -> Result<()> {
     Ok(())
 }
 
+/// Clears only the immutability policy and legal hold of the current blob after
+/// a versioned write retires the previous version into `blob_history` (ADR-0039).
+pub(super) fn clear_protection(db: &Connection, key: &BlobKey) -> Result<()> {
+    let [account, container, name] = blob_params(key);
+    db.prepare_cached(
+        "UPDATE blob_lifecycle SET immutable_until=NULL, immutability_mode='', legal_hold=0
+         WHERE account=?1 AND container=?2 AND name=?3",
+    )
+    .map_err(db_error)?
+    .execute(params![account, container, name])
+    .map_err(db_error)?;
+    Ok(())
+}
+
 fn blob_key(account: &str, container: &str, name: &str) -> Option<BlobKey> {
     Some(BlobKey {
         container: ContainerKey {

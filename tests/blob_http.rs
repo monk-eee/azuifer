@@ -688,7 +688,7 @@ fn listing_uses_opaque_markers_and_rejects_unimplemented_options() {
     error(
         server.request(
             Method::GET,
-            "/testaccount/container?restype=container&comp=list&include=immutabilitypolicy",
+            "/testaccount/container?restype=container&comp=list&include=permissions",
             &[],
             b"",
         ),

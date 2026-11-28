@@ -58,10 +58,13 @@ impl PolicyRequest {
 }
 
 pub(crate) fn parse_legal_hold(headers: &HeaderMap) -> Result<bool> {
-    match header(headers, "x-ms-legal-hold")?.ok_or(Error::MissingHeader)? {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        _ => Err(Error::InvalidHeader),
+    let value = header(headers, "x-ms-legal-hold")?.ok_or(Error::MissingHeader)?;
+    if value.eq_ignore_ascii_case("true") {
+        Ok(true)
+    } else if value.eq_ignore_ascii_case("false") {
+        Ok(false)
+    } else {
+        Err(Error::InvalidHeader)
     }
 }
 

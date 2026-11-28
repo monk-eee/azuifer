@@ -412,6 +412,7 @@ pub(crate) fn list_blobs(
                     &mut xml,
                     &info,
                     include.contains(&Include::Copy),
+                    include.contains(&Include::LegalHold),
                     hierarchical,
                     &[],
                 )?;
@@ -442,6 +443,7 @@ pub(crate) fn blob_properties(
     xml: &mut Xml,
     info: &BlobInfo,
     copy: bool,
+    force_legal_hold: bool,
     hierarchical: bool,
     extra: &[(&str, String)],
 ) -> Result<()> {
@@ -498,7 +500,7 @@ pub(crate) fn blob_properties(
         xml.element("CopyCompletionTime", &http_date(copy.completed)?);
     }
     xml.element("ServerEncrypted", "true");
-    crate::blob_lifecycle::lifecycle_elements(xml, &info.lifecycle)?;
+    crate::blob_lifecycle::lifecycle_elements(xml, &info.lifecycle, force_legal_hold)?;
     for (name, value) in extra {
         xml.element(name, value);
     }

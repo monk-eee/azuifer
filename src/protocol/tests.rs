@@ -191,7 +191,13 @@ fn listing_includes_name_what_they_support() {
         4
     );
     assert_eq!(
-        includes(Some("immutabilitypolicy")).err(),
+        includes(Some("immutabilitypolicy,legalhold"))
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        includes(Some("permissions")).err(),
         Some(Error::Unsupported)
     );
     assert!(includes(None).unwrap().is_empty());

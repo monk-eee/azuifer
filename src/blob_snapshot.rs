@@ -146,6 +146,7 @@ fn list_response(mut xml: Xml, listing: ExtendedListing, include: &[Include]) ->
                     &mut xml,
                     &blob.info,
                     include.contains(&Include::Copy),
+                    include.contains(&Include::LegalHold),
                     false,
                     &extra,
                 )?;

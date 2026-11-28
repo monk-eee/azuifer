@@ -22,10 +22,14 @@ import time
 import traceback
 import uuid
 
+from datetime import datetime, timedelta, timezone
+
 from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 from azure.storage.blob import (
     BlobBlock,
+    BlobImmutabilityPolicyMode,
     BlobServiceClient,
+    ImmutabilityPolicy,
     RetentionPolicy,
     StandardBlobTier,
 )
@@ -250,6 +254,64 @@ def block_versions(ctx):
     blob.upload_blob(b"flat", overwrite=True)
     committed, _ = blob.get_block_list("committed", version_id=first) if False else (None, None)
     require(blob.download_blob(version_id=first).readall() == b"onetwo!", "old block blob content")
+
+
+@check("version immutability policies and legal holds")
+def version_immutability(ctx):
+    if not ctx.versioned:
+        return "skip"
+    blob = ctx.blob("worm-ver.txt")
+    v1 = blob.upload_blob(b"first", overwrite=True)["version_id"]
+    until = (datetime.now(timezone.utc) + timedelta(minutes=10)).replace(microsecond=0)
+    policy = ImmutabilityPolicy(expiry_time=until, policy_mode=BlobImmutabilityPolicyMode.UNLOCKED)
+
+    blob.set_immutability_policy(policy, version_id=v1)
+    blob.set_legal_hold(True, version_id=v1)
+    v2 = blob.upload_blob(b"second", overwrite=True)["version_id"]
+    require(v1 != v2, "distinct version ids")
+
+    v1_props = blob.get_blob_properties(version_id=v1)
+    require(
+        v1_props.immutability_policy.policy_mode == "unlocked"
+        and v1_props.immutability_policy.expiry_time is not None
+        and v1_props.has_legal_hold is True,
+        f"v1 properties {v1_props.immutability_policy} {v1_props.has_legal_hold}",
+    )
+    v2_props = blob.get_blob_properties(version_id=v2)
+    require(
+        v2_props.immutability_policy.policy_mode is None and not v2_props.has_legal_hold,
+        f"v2 properties {v2_props.immutability_policy} {v2_props.has_legal_hold}",
+    )
+
+    listed = {
+        item.version_id: item
+        for item in ctx.container.list_blobs(
+            name_starts_with="worm-ver",
+            include=["versions", "immutabilitypolicy", "legalhold"],
+        )
+    }
+    require(
+        listed[v1].immutability_policy.policy_mode == "unlocked"
+        and listed[v1].has_legal_hold is True,
+        f"listed v1 {listed[v1].immutability_policy} {listed[v1].has_legal_hold}",
+    )
+    require(
+        listed[v2].immutability_policy.policy_mode is None
+        and listed[v2].has_legal_hold is False,
+        f"listed v2 {listed[v2].immutability_policy} {listed[v2].has_legal_hold}",
+    )
+
+    expect(HttpResponseError, "BlobImmutableDueToLegalHold", lambda: blob.delete_blob(version_id=v1))
+    blob.set_legal_hold(False, version_id=v1)
+    expect(HttpResponseError, "BlobImmutableDueToPolicy", lambda: blob.delete_blob(version_id=v1))
+    blob.delete_immutability_policy(version_id=v1)
+    v1_cleared = blob.get_blob_properties(version_id=v1)
+    require(
+        v1_cleared.immutability_policy.policy_mode is None and not v1_cleared.has_legal_hold,
+        f"v1 cleared {v1_cleared.immutability_policy} {v1_cleared.has_legal_hold}",
+    )
+    blob.delete_blob(version_id=v1)
+    expect(HttpResponseError, "BlobNotFound", lambda: blob.get_blob_properties(version_id=v1))
 
 
 @check("clean up")
