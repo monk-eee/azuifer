@@ -107,7 +107,7 @@ jobs:
       - name: Generate the Cargo workspace SBOM
         uses: anchore/sbom-action@dfcb83b97731532d72be422cbc51ee64adb6fd56
         with:
-          path: .
+          file: Cargo.lock
           format: spdx-json
           output-file: dist/azuifer-${{ env.RELEASE_VERSION }}-cargo.spdx.json
           upload-artifact: false

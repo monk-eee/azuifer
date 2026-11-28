@@ -1,6 +1,7 @@
 import argparse
 import gzip
 import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -64,12 +65,49 @@ def make_archive(binary, target, release_version, directory):
     return dest
 
 
+def check_cargo_inventory(sbom):
+    document = json.loads(sbom.read_text(encoding="utf-8"))
+    if (
+        not isinstance(document, dict)
+        or document.get("spdxVersion") != "SPDX-2.3"
+        or document.get("SPDXID") != "SPDXRef-DOCUMENT"
+        or not isinstance(document.get("packages"), list)
+    ):
+        raise ValueError(f"{sbom.name}: expected an SPDX 2.3 package inventory")
+    with (ROOT / "Cargo.lock").open("rb") as lockfile:
+        expected = {
+            f"{package['name']}@{package['version']}"
+            for package in tomllib.load(lockfile)["package"]
+            if package.get("source", "").startswith("registry+")
+        }
+    recorded = set()
+    for package in document["packages"]:
+        if not isinstance(package, dict):
+            raise ValueError(f"{sbom.name}: invalid SPDX package")
+        references = package.get("externalRefs", [])
+        if not isinstance(references, list):
+            raise ValueError(f"{sbom.name}: invalid SPDX external references")
+        if any(
+            isinstance(reference, dict)
+            and reference.get("referenceType") == "purl"
+            and isinstance(reference.get("referenceLocator"), str)
+            and reference["referenceLocator"].startswith("pkg:cargo/")
+            for reference in references
+        ):
+            recorded.add(f"{package.get('name')}@{package.get('versionInfo')}")
+    missing = sorted(expected - recorded)
+    if missing:
+        raise ValueError(f"{sbom.name}: missing {len(missing)} locked Cargo packages: {', '.join(missing[:8])}")
+
+
 def write_checksums(release_version, directory):
     expected = {archive_name(release_version, target) for target in TARGETS}
-    expected.add(f"azuifer-{release_version}-cargo.spdx.json")
+    sbom = f"azuifer-{release_version}-cargo.spdx.json"
+    expected.add(sbom)
     actual = {path.name for path in directory.iterdir() if path.is_file()}
     if actual != expected:
         raise ValueError(f"release asset mismatch: missing {sorted(expected - actual)}, unexpected {sorted(actual - expected)}")
+    check_cargo_inventory(directory / sbom)
     with (directory / "SHA256SUMS").open("x", encoding="ascii", newline="\n") as checksums:
         for name in sorted(expected):
             with (directory / name).open("rb") as file:
