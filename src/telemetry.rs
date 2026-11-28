@@ -1,7 +1,7 @@
 //! Opt-in observability: structured logs, request spans, metrics, and OTLP export (ADR-0007).
 //!
-//! Nothing leaves the process unless `--otlp-endpoint` is set. Every value placed on a
-//! span or metric passes through the [`Redactor`] first.
+//! Nothing leaves the process unless `--otlp-endpoint` is set. Request text recorded
+//! on spans passes through the [`Redactor`] first.
 
 use crate::{
     config::{Config, Service},
@@ -279,6 +279,43 @@ pub(crate) fn instrument(router: Router, telemetry: &Telemetry, service: Service
     ))
 }
 
+pub(crate) fn authenticate_span() -> tracing::Span {
+    tracing::info_span!("authenticate")
+}
+
+/// The operation name is chosen by the typed handler, never taken from the source URL.
+pub(crate) enum CopyTrace {
+    Local(&'static str),
+    External(&'static str),
+}
+
+impl CopyTrace {
+    fn span(self) -> tracing::Span {
+        let (operation, source_kind) = match self {
+            Self::Local(operation) => (operation, "local"),
+            Self::External(operation) => (operation, "external"),
+        };
+        tracing::info_span!(
+            "copy",
+            "azuifer.copy.operation" = operation,
+            "azuifer.copy.source_kind" = source_kind,
+        )
+    }
+}
+
+pub(crate) async fn storage<T>(work: impl Future<Output = T>, copy: Option<CopyTrace>) -> T {
+    // Both spans are created under the request, before either is entered.
+    let copy = copy.map(CopyTrace::span);
+    async move {
+        match copy {
+            Some(span) => work.instrument(span).await,
+            None => work.await,
+        }
+    }
+    .instrument(tracing::info_span!("storage"))
+    .await
+}
+
 fn log_layer(
     settings: &Settings,
 ) -> Result<Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>> {
@@ -449,9 +486,9 @@ async fn observe(
         "azuifer.operation" = %operation,
         "azuifer.request_id" = tracing::field::Empty,
         "azuifer.client_request_id" = %redactor.text(header_text(request.headers(), "x-ms-client-request-id")),
-        "http.request.method" = %method,
+        "http.request.method" = %redactor.text(method.as_str()),
         "url.path" = %redactor.text(request.uri().path()),
-        "url.query" = %redactor.text(query),
+        "url.query" = %redactor.query(query),
         "http.response.status_code" = tracing::field::Empty,
     );
     let request_bytes = declared_length(request.headers()).unwrap_or(0);

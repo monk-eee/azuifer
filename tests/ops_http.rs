@@ -14,6 +14,8 @@ use std::{
 
 #[path = "ops_http/runtime.rs"]
 mod runtime;
+#[path = "ops_http/traces.rs"]
+mod traces;
 
 struct Server {
     child: Child,
@@ -411,7 +413,7 @@ fn spans_and_metrics_reach_a_configured_otlp_http_collector_without_secrets() {
     let client = client();
     let response = client
         .get(format!(
-            "{}/devstoreaccount1?comp=list&sig=SEEDEDSASSIGNATURE",
+            "{}/devstoreaccount1?comp=list&%73ig=SEEDEDENCODEDKEYSAS",
             server.url("queue")
         ))
         .header(
@@ -479,6 +481,7 @@ fn spans_and_metrics_reach_a_configured_otlp_http_collector_without_secrets() {
         for secret in [
             key.as_str(),
             "SEEDEDSASSIGNATURE",
+            "SEEDEDENCODEDKEYSAS",
             "SEEDEDSHAREDKEYSIGNATURE",
         ] {
             assert!(

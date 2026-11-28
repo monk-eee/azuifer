@@ -8,9 +8,7 @@ use crate::{
     config::{Config, PERMIT_WAIT, Service},
     dfs,
     domain::{AccountName, Error, Result},
-    files, oauth,
-    protocol::{self, Operation},
-    queue,
+    files, oauth, protocol, queue,
     respond::{self, error_response, set},
     store::Store,
     table,
@@ -337,18 +335,13 @@ pub(crate) async fn dispatch(State(app): State<Arc<App>>, request: Request) -> R
 /// Authenticates, authorizes, and runs one request.
 async fn handle(app: &App, parts: &Parts, body: Body, request_id: &str) -> Result<Response> {
     if let Some(account) = crate::blob_web::account_of(parts) {
-        return crate::blob_web::serve(app, parts, account, request_id).await;
+        return telemetry::storage(
+            crate::blob_web::serve(app, parts, account, request_id),
+            None,
+        )
+        .await;
     }
     let now = app.clock.now();
-    let parsed = protocol::parse(parts, &app.config, now)?;
-    if parsed.requested_version != app.config.api_version {
-        tracing::info!(
-            %request_id,
-            requested_api_version = parsed.requested_version.as_str(),
-            effective_api_version = app.config.api_version.as_str(),
-            "using the configured Blob protocol baseline"
-        );
-    }
     let connection = Connection {
         now,
         client_ip: parts
@@ -357,16 +350,29 @@ async fn handle(app: &App, parts: &Parts, body: Body, request_id: &str) -> Resul
             .map(|info| info.0.ip()),
         https: app.config.tls.is_some(),
     };
-    blob_auth::authorize(
-        &app.store,
-        Authorization {
-            credentials: &parsed.credentials,
-            target: &parsed.target,
-            need: &parsed.need,
-            connection: &connection,
-        },
-    )
-    .instrument(tracing::info_span!("authenticate"))
+    let parsed = async {
+        let parsed = protocol::parse(parts, &app.config, now)?;
+        if parsed.requested_version != app.config.api_version {
+            tracing::info!(
+                %request_id,
+                requested_api_version = parsed.requested_version.as_str(),
+                effective_api_version = app.config.api_version.as_str(),
+                "using the configured Blob protocol baseline"
+            );
+        }
+        blob_auth::authorize(
+            &app.store,
+            Authorization {
+                credentials: &parsed.credentials,
+                target: &parsed.target,
+                need: &parsed.need,
+                connection: &connection,
+            },
+        )
+        .await?;
+        Ok::<_, Error>(parsed)
+    }
+    .instrument(telemetry::authenticate_span())
     .await?;
     let context = Context {
         host: protocol::host(parts),
@@ -375,10 +381,12 @@ async fn handle(app: &App, parts: &Parts, body: Body, request_id: &str) -> Resul
         connection: &connection,
         request_id,
     };
-    let operation: Operation = parsed.operation;
-    blob_exec::execute(app, operation, body, &context)
-        .instrument(tracing::info_span!("storage"))
-        .await
+    let copy = blob_exec::copy_trace(app, &parsed.operation, &context);
+    telemetry::storage(
+        blob_exec::execute(app, parsed.operation, body, &context),
+        copy,
+    )
+    .await
 }
 
 /// The account a request addresses, for CORS lookups made before parsing succeeds.

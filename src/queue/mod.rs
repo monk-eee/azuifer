@@ -18,6 +18,7 @@ use crate::{
     clock::Clock,
     config::Config,
     domain::{ApiVersion, Page},
+    telemetry,
 };
 use anyhow::Context as _;
 use axum::{
@@ -33,6 +34,7 @@ use protocol::Operation;
 use serde::Deserialize;
 use std::{net::SocketAddr, sync::Arc};
 use store::{Created, NewMessage, QueueListing, Store};
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 const MANIFEST: &str = include_str!("../../specs/conformance/queue.json");
@@ -145,8 +147,10 @@ async fn handle(app: &App, parts: &Parts, body: Body) -> Result<Response> {
             .await?;
         return cors::preflight(&properties.cors, preflight);
     }
-    auth::authorize(app, parts, &request).await?;
-    execute(app, request, body).await
+    auth::authorize(app, parts, &request)
+        .instrument(telemetry::authenticate_span())
+        .await?;
+    telemetry::storage(execute(app, request, body), None).await
 }
 
 fn check_version(app: &App, parts: &Parts) -> Result<()> {

@@ -1,7 +1,7 @@
 //! Removes credentials from text before it reaches a log, span, metric, or exporter (ADR-0007).
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 
 pub(crate) const MASK: &str = "REDACTED";
 
@@ -43,6 +43,33 @@ impl Redactor {
             output = output.replace(secret, MASK);
         }
         mask_schemes(&mask_assignments(&output))
+    }
+
+    /// Services recognize percent-encoded query names; mask their values at the wire boundary too.
+    pub(crate) fn query(&self, input: &str) -> String {
+        if !input.contains('%') {
+            return self.text(input);
+        }
+        let mut query = String::with_capacity(input.len());
+        for (index, pair) in input.split('&').enumerate() {
+            if index != 0 {
+                query.push('&');
+            }
+            if let Some((name, _)) = pair.split_once('=')
+                && name.contains('%')
+                && let Ok(decoded) = percent_decode_str(name).decode_utf8()
+                && SENSITIVE_NAMES
+                    .iter()
+                    .any(|secret| decoded.eq_ignore_ascii_case(secret))
+            {
+                query.push_str(name);
+                query.push('=');
+                query.push_str(MASK);
+            } else {
+                query.push_str(pair);
+            }
+        }
+        self.text(&query)
     }
 }
 
