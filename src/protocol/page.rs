@@ -4,7 +4,7 @@
 
 use super::{
     BLOB_PROPERTIES, CHECKSUMS, CONDITIONS, LEASE, PLAIN_PROPERTIES, Request, SOURCE,
-    SOURCE_BEARER, TAGS, UploadOptions, blob_write, upload_options,
+    SOURCE_BEARER, SOURCE_CHECKSUMS, TAGS, UploadOptions, blob_write, upload_options,
 };
 use crate::{
     auth::header,
@@ -153,6 +153,7 @@ impl Request<'_> {
             &[
                 SOURCE,
                 SOURCE_BEARER,
+                SOURCE_CHECKSUMS,
                 CONDITIONS,
                 LEASE,
                 SEQUENCE_CONDITIONS,
@@ -246,6 +247,7 @@ impl Request<'_> {
             &[
                 SOURCE,
                 SOURCE_BEARER,
+                SOURCE_CHECKSUMS,
                 CONDITIONS,
                 LEASE,
                 APPEND_CONDITIONS,

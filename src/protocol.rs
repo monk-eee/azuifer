@@ -73,6 +73,9 @@ const SOURCE: &[&str] = &[
     "x-ms-source-lease-id",
 ];
 const SOURCE_BEARER: &[&str] = &["x-ms-copy-source-authorization"];
+/// The hash of the source bytes, which Put Blob From URL takes only as MD5.
+const SOURCE_MD5: &[&str] = &["x-ms-source-content-md5"];
+const SOURCE_CHECKSUMS: &[&str] = &["x-ms-source-content-md5", "x-ms-source-content-crc64"];
 const LEASE_HEADERS: &[&str] = &[
     "x-ms-lease-action",
     "x-ms-lease-id",
@@ -123,6 +126,10 @@ pub(crate) struct SourceRequest {
     pub(crate) bearer: Option<SourceBearer>,
     pub(crate) guard: Guard,
     pub(crate) range: Option<ByteRange>,
+    /// The x-ms-source-content-md5 or -crc64 the bytes read from the source must match.
+    pub(crate) checksum: Option<Checksum>,
+    /// Copy Blob: x-ms-seal-blob sets whether an append destination is sealed.
+    pub(crate) seal: Option<bool>,
     /// Put Blob From URL: take content properties from the source (the default).
     pub(crate) copy_properties: bool,
     /// Copy Blob: any `x-ms-meta-*` header replaces the source metadata.

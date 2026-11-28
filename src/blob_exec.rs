@@ -304,6 +304,7 @@ pub(crate) async fn execute(
         Operation::CopyBlob(key, options, request) => {
             let choices = (request.replace_metadata, request.copy_tags);
             let (source, display) = if is_external(app, ctx, &request) {
+                require_append_to_seal(request.seal)?;
                 read_source(app, ctx, request).await?
             } else {
                 let resolved = resolve_source(app, ctx, &request).await?;
@@ -312,6 +313,7 @@ pub(crate) async fn execute(
                 {
                     return Ok(response);
                 }
+                require_append_to_seal(request.seal)?;
                 read_resolved(app, resolved, request).await?
             };
             let write = copy_write(options, &source.info, choices, display);
@@ -351,11 +353,25 @@ async fn read_source(
     ctx: &Context<'_>,
     request: SourceRequest,
 ) -> Result<(SourceBytes, String)> {
-    if is_external(app, ctx, &request) {
-        return read_external(app, request).await;
+    let expected = request.checksum;
+    let (source, display) = if is_external(app, ctx, &request) {
+        read_external(app, request).await?
+    } else {
+        let resolved = resolve_source(app, ctx, &request).await?;
+        read_resolved(app, resolved, request).await?
+    };
+    // Nothing is written unless the bytes that arrived are the ones the caller hashed.
+    source.upload.checksums.verify(expected)?;
+    Ok((source, display))
+}
+
+/// Only an append blob can be sealed: a copy of any other type that asks for it is invalid.
+fn require_append_to_seal(seal: Option<bool>) -> Result<()> {
+    if seal == Some(true) {
+        Err(Error::InvalidHeader)
+    } else {
+        Ok(())
     }
-    let resolved = resolve_source(app, ctx, &request).await?;
-    read_resolved(app, resolved, request).await
 }
 
 fn is_external(app: &App, ctx: &Context<'_>, request: &SourceRequest) -> bool {

@@ -107,7 +107,7 @@ The [required CI check](https://github.com/monk-eee/azuifer/actions/workflows/ru
 
 See [how to run the same matrix locally](docs/compatibility/blob.md#azure-cli). CI also runs official Azure SDK suites in [Python](.github/workflows/rust.yml), [.NET](tests/dotnet_sdk/Program.cs), [JavaScript](tests/js_sdk/probe.js), [Java](tests/java_sdk/src/main/java/probe/Probe.java), and [Go](tests/go_sdk/main.go). They exercise all five services, including NFS FileREST links and shared Blob/DFS workflows. Those jobs show client interoperability with Azuifer, not wire equivalence with Azure.
 
-The [Azure contract harness](docs/compatibility/azure-contracts.md) has **51 reviewed Azure cassettes** and **270 of 1,243 planned exchanges matched**. The baseline recordings cover Blob, Queue, and Table; live DFS and FileREST are still pending. The [wire ledger](docs/compatibility/wire-discrepancies.json) tracks 31 pinned discrepancies between documentation, SDK behavior, and live responses. The regular Rust suite replays the fixtures without Azure credentials.
+The [Azure contract harness](docs/compatibility/azure-contracts.md) has **51 reviewed Azure cassettes** and **270 of 1,264 planned exchanges matched**. The baseline recordings cover Blob, Queue, and Table; live DFS and FileREST are still pending. The [wire ledger](docs/compatibility/wire-discrepancies.json) tracks 31 pinned discrepancies between documentation, SDK behavior, and live responses. The regular Rust suite replays the fixtures without Azure credentials.
 
 From the built binary, run `azuifer conformance export --format markdown` for the operation states and the matching evidence by service, operation, and auth mode. The default format is JSON. From the quickstart image:
 

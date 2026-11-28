@@ -2,12 +2,12 @@
 
 use super::headers::{
     blob_content_md5, blob_write, content_headers, lease_action, metadata, range_checksum,
-    upload_options,
+    seal_blob, source_checksum, upload_options,
 };
 use super::{
     BLOB_PROPERTIES, CHECKSUMS, CONDITIONS, LEASE, LEASE_HEADERS, MAX_BLOCK_LIST_BYTES,
-    MAX_XML_BODY_BYTES, Operation, PLAIN_PROPERTIES, Request, SOURCE, SOURCE_BEARER, SourceRequest,
-    TAG_CONDITION, TAGS,
+    MAX_XML_BODY_BYTES, Operation, PLAIN_PROPERTIES, Request, SOURCE, SOURCE_BEARER,
+    SOURCE_CHECKSUMS, SOURCE_MD5, SourceRequest, TAG_CONDITION, TAGS,
 };
 use crate::{
     auth::header,
@@ -71,6 +71,7 @@ impl Request<'_> {
                             TAGS,
                             SOURCE,
                             SOURCE_BEARER,
+                            SOURCE_MD5,
                             CONDITIONS,
                             LEASE,
                             BLOB_PROPERTIES,
@@ -95,6 +96,7 @@ impl Request<'_> {
                                 "x-ms-access-tier",
                                 "x-ms-rehydrate-priority",
                                 "x-ms-copy-source-tag-option",
+                                "x-ms-seal-blob",
                             ],
                             TAGS,
                             SOURCE,
@@ -127,6 +129,7 @@ impl Request<'_> {
                     &[
                         SOURCE,
                         SOURCE_BEARER,
+                        SOURCE_CHECKSUMS,
                         LEASE,
                         &["x-ms-source-range", "content-md5", "x-ms-content-crc64"],
                     ],
@@ -379,6 +382,8 @@ impl Request<'_> {
                 lease: lease_id(self.headers, "x-ms-source-lease-id")?,
             },
             range,
+            checksum: source_checksum(self.headers)?,
+            seal: seal_blob(self.headers)?,
             copy_properties,
             replace_metadata: self
                 .headers

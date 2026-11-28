@@ -93,18 +93,43 @@ pub(crate) fn upload_options(headers: &HeaderMap, limit: u64) -> Result<UploadOp
     if length > limit {
         return Err(Error::TooLarge);
     }
-    let md5 = decode_hash(header(headers, "content-md5")?)?;
-    let crc64 = decode_hash(header(headers, "x-ms-content-crc64")?)?;
-    let checksum = match (md5, crc64) {
-        (Some(_), Some(_)) => return Err(Error::InvalidHeader),
-        (Some(md5), None) => Some(Checksum::Md5(md5)),
-        (None, Some(crc64)) => Some(Checksum::Crc64(u64::from_le_bytes(crc64))),
-        (None, None) => None,
-    };
+    let checksum = declared_checksum(headers, "content-md5", "x-ms-content-crc64")?;
     Ok(UploadOptions {
         length: ContentLength(length),
         checksum,
     })
+}
+
+/// The MD5 or CRC64 a request declares in the named headers; naming both is invalid.
+fn declared_checksum(headers: &HeaderMap, md5: &str, crc64: &str) -> Result<Option<Checksum>> {
+    let md5 = decode_hash(header(headers, md5)?)?;
+    let crc64 = decode_hash(header(headers, crc64)?)?;
+    match (md5, crc64) {
+        (Some(_), Some(_)) => Err(Error::InvalidHeader),
+        (Some(md5), None) => Ok(Some(Checksum::Md5(md5))),
+        (None, Some(crc64)) => Ok(Some(Checksum::Crc64(u64::from_le_bytes(crc64)))),
+        (None, None) => Ok(None),
+    }
+}
+
+/// The hash of the source bytes a From-URL write declares (`x-ms-source-content-*`).
+pub(super) fn source_checksum(headers: &HeaderMap) -> Result<Option<Checksum>> {
+    declared_checksum(
+        headers,
+        "x-ms-source-content-md5",
+        "x-ms-source-content-crc64",
+    )
+}
+
+/// `x-ms-seal-blob` of Copy Blob; `None` leaves the destination unsealed.
+pub(super) fn seal_blob(headers: &HeaderMap) -> Result<Option<bool>> {
+    header(headers, "x-ms-seal-blob")?
+        .map(|value| match value {
+            value if value.eq_ignore_ascii_case("true") => Ok(true),
+            value if value.eq_ignore_ascii_case("false") => Ok(false),
+            _ => Err(Error::InvalidHeader),
+        })
+        .transpose()
 }
 
 pub(super) fn decode_hash<const N: usize>(value: Option<&str>) -> Result<Option<[u8; N]>> {

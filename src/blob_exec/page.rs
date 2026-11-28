@@ -101,6 +101,7 @@ pub(super) async fn copy_ranges(
             source.selector,
             request.guard.clone(),
             key.clone(),
+            request.seal,
             move |info: &BlobInfo| copy_write(options, info, choices, display),
         )
         .await?;
