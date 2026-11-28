@@ -1,6 +1,6 @@
 //! Immutable content extents, staging, range-map persistence, and reclamation.
 
-use super::{Env, Mode, Store, db_error, from_sql, fs, internal, io_error, to_sql};
+use super::{Env, Mode, Store, db_error, from_sql, internal, io_error, to_sql};
 use crate::{
     checksum::{Checksum, Checksums, Hasher},
     extent_readers::{ExtentSlice, Piece, ReadBody},
@@ -127,7 +127,7 @@ impl Staged {
                     .persist_noclobber(extent_path(extents, id))
                     .map_err(|error| io_error(error.error))?;
                 committed.sync_all().map_err(io_error)?;
-                fs::sync_directory(extents).map_err(io_error)
+                crate::store::guard::sync_directory(extents).map_err(io_error)
             }
             (Data::Memory(bytes), Mode::Memory { .. }) => db
                 .execute(
@@ -371,7 +371,7 @@ impl FileBody {
                 } => match &env.mode {
                     Mode::Disk { extents, .. } => {
                         let path = extent_path(extents, &extent);
-                        fs::require_file_if_present(&path).map_err(io_error)?;
+                        crate::store::guard::require_file_if_present(&path).map_err(io_error)?;
                         let size = std::fs::metadata(&path).map_err(io_error)?.len();
                         if size < extent_offset + length {
                             return Err(internal("extent is shorter than its range"));

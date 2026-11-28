@@ -176,9 +176,20 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (6, V6),
 ];
 
-pub(super) fn migrate(db: &mut Connection) -> rusqlite::Result<()> {
+/// The newest schema this build writes.
+pub(super) fn supported() -> i64 {
+    MIGRATIONS
+        .iter()
+        .map(|(version, _)| *version)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Brings the database to the newest schema, or refuses one a newer release wrote.
+pub(super) fn migrate(db: &mut Connection) -> anyhow::Result<()> {
+    let current = super::guard::user_version(db)?;
+    super::guard::require_known_schema(current, supported(), "Blob and DFS")?;
     db.execute_batch(BASE)?;
-    let current: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     for (version, migration) in MIGRATIONS.iter().filter(|(version, _)| *version > current) {
         let tx = db.transaction()?;
         tx.execute_batch(migration)?;
@@ -323,6 +334,24 @@ mod tests {
             0,
             "deleting a blob drops its lifecycle row"
         );
+    }
+
+    #[test]
+    fn a_database_from_a_newer_release_is_refused_and_left_alone() {
+        let mut db = Connection::open_in_memory().unwrap();
+        migrate(&mut db).unwrap();
+        db.execute_batch("PRAGMA user_version = 99; CREATE TABLE added_later (x)")
+            .unwrap();
+        let error = migrate(&mut db).unwrap_err().to_string();
+        assert!(
+            error.contains("newer Azuifer") && error.contains("99"),
+            "{error}"
+        );
+        let version: i64 = db
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 99, "the version is not lowered");
+        assert_eq!(supported(), 6);
     }
 
     #[test]

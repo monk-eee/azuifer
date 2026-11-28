@@ -7,7 +7,6 @@
 //! snapshot copies the share's rows, which share extents with the live share.
 
 mod content;
-mod fs;
 #[cfg(test)]
 mod model;
 mod nodes;
@@ -34,7 +33,15 @@ use super::{
     },
     name::EntryPath,
 };
-use crate::{clock::Clock, extent_readers::Readers, runtime_metrics};
+use crate::{
+    clock::Clock,
+    extent_readers::Readers,
+    runtime_metrics,
+    store::guard::{
+        self, require_database, require_directory, require_file_if_present, require_known_schema,
+        sync_directory,
+    },
+};
 use anyhow::Context as _;
 use rusqlite::{Connection, OptionalExtension as _, Row, params};
 use std::{
@@ -43,6 +50,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 use uuid::Uuid;
+
+/// The schema stamped in `PRAGMA user_version`. Databases written before it was stamped read
+/// as 0 and are upgraded by `migrate`.
+pub(crate) const SCHEMA_VERSION: i64 = 1;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS shares (
@@ -130,9 +141,9 @@ impl Store {
             let root = root.join("file");
             std::fs::create_dir_all(&root)
                 .context("could not create the file storage directory")?;
-            fs::require_directory(&root)?;
+            require_directory(&root)?;
             let lock_path = root.join("azuifer.lock");
-            fs::require_file_if_present(&lock_path)?;
+            require_file_if_present(&lock_path)?;
             let lock = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -143,15 +154,9 @@ impl Store {
                 .context("the file storage directory is already in use")?;
             let extents = root.join("content");
             std::fs::create_dir_all(&extents)?;
-            fs::require_directory(&extents)?;
-            fs::sync_directory(&root)?;
-            for name in [
-                "metadata.sqlite3",
-                "metadata.sqlite3-wal",
-                "metadata.sqlite3-shm",
-            ] {
-                fs::require_file_if_present(&root.join(name))?;
-            }
+            require_directory(&extents)?;
+            sync_directory(&root)?;
+            require_database(&root, "metadata.sqlite3")?;
             let db = Connection::open(root.join("metadata.sqlite3"))
                 .context("could not open file metadata")?;
             let journal: String = db.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
@@ -177,10 +182,12 @@ impl Store {
             )
         };
         db.pragma_update(None, "foreign_keys", true)?;
+        require_known_schema(guard::user_version(&db)?, SCHEMA_VERSION, "Files")?;
         migrate(&db).context("could not upgrade the file metadata")?;
         db.execute_batch(SCHEMA)?;
         db.execute_batch(super::service::SCHEMA)?;
         db.execute_batch(soft_delete::SCHEMA)?;
+        db.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         if let Mode::Disk { extents, .. } = &mode {
             content::recover(&db, extents).context("could not recover unreferenced content")?;
         }

@@ -644,3 +644,92 @@ fn reset_removes_a_symlinked_state_entry_without_following_it() {
         "the link is removed, not what it points at"
     );
 }
+
+#[test]
+fn doctor_reports_each_store_directory_and_fails_on_a_newer_corrupt_or_linked_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    drop(Server::start(&[
+        "--location",
+        path(&data),
+        "--services",
+        "blob,queue,table,file",
+    ]));
+    let doctor = |data: &Path| {
+        run(&[
+            "doctor",
+            "--location",
+            path(data),
+            "--port",
+            "0",
+            "--admin-port",
+            "0",
+        ])
+    };
+    let healthy = doctor(&data);
+    for store in ["Blob and DFS", "Files", "Queue", "Table"] {
+        assert!(
+            stdout(&healthy).contains(&format!("[PASS] {store} store:")),
+            "{}",
+            stdout(&healthy)
+        );
+    }
+
+    let queue = data.join("queue").join("queue.sqlite3");
+    rusqlite::Connection::open(&queue)
+        .unwrap()
+        .pragma_update(None, "user_version", 9999)
+        .unwrap();
+    let newer = doctor(&data);
+    assert!(!newer.status.success());
+    assert!(
+        stdout(&newer).contains("[FAIL] Queue store:") && stdout(&newer).contains("newer Azuifer"),
+        "{}",
+        stdout(&newer)
+    );
+
+    std::fs::write(data.join("table").join("table.sqlite3"), vec![7u8; 8192]).unwrap();
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(data.join("table").join(format!("table.sqlite3{suffix}")));
+    }
+    let corrupt = doctor(&data);
+    assert!(
+        stdout(&corrupt).contains("[FAIL] Table store:")
+            && stdout(&corrupt).contains("table.sqlite3"),
+        "{}",
+        stdout(&corrupt)
+    );
+
+    let blob = data.join("content");
+    let moved = data.join("content.real");
+    std::fs::rename(&blob, &moved).unwrap();
+    if link_to(&moved, &blob) {
+        let linked = doctor(&data);
+        assert!(
+            stdout(&linked).contains("[FAIL] Blob and DFS store:")
+                && stdout(&linked).contains("is a link"),
+            "{}",
+            stdout(&linked)
+        );
+    }
+}
+
+/// Links `at` to the directory `target`, with a junction where Windows will not make a symbolic
+/// link. False when neither can be made.
+fn link_to(target: &Path, at: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, at).is_ok()
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_dir(target, at).is_ok()
+            || Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(at)
+                .arg(target)
+                .stdout(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+    }
+}

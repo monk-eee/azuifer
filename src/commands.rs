@@ -331,7 +331,21 @@ fn check_storage(config: &Config, running: Option<&Status>, report: &mut Report)
         ),
     }
     check_lock(location, running, report);
+    check_stores(location, report);
     check_space(probe, report);
+}
+
+/// Looks inside each store's directory for what would stop it opening: links, a database from
+/// a newer release, or corruption.
+fn check_stores(location: &Path, report: &mut Report) {
+    for layout in crate::store::guard::layouts(location) {
+        let name = format!("{} store", layout.store);
+        match crate::store::guard::inspect(&layout) {
+            Ok(None) => {}
+            Ok(Some(note)) => report.add(Outcome::Pass, &name, note),
+            Err(error) => report.add(Outcome::Fail, &name, format!("{error:#}")),
+        }
+    }
 }
 
 fn check_wal(directory: &Path, report: &mut Report) {
