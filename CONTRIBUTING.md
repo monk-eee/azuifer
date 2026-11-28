@@ -1,6 +1,6 @@
 # Contributing to Azuifer
 
-Start with the [onboarding guide](ONBOARDING.md) and [product and technical specification](docs/specs/azuifer.md). Discuss a material change to protocol behavior, storage, security, or distribution in a public GitHub issue before implementing it. For security reports, use the [private reporting path](SECURITY.md) instead.
+Start with the [onboarding guide](ONBOARDING.md) and [product and technical specification](docs/specs/azuifer.md). Discuss a material change to protocol behavior, storage, security, or distribution in a public GitHub issue before implementing it. For security reports, use the [private reporting path](SECURITY.md) instead. Participation in this project is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Design and review
 
@@ -18,7 +18,7 @@ Update the matching [service manifest](specs/conformance) alongside changes to s
 
 Use the [Azure contract tests](docs/compatibility/azure-contracts.md) to record a scenario against a dedicated test account and replay its response contract offline. Never publish raw traffic or live credentials. Review the normalized cassette and verify its provenance before promoting it to an offline fixture.
 
-For docs-only changes, check that links resolve, ADRs are indexed, and public docs contain no credentials or private references.
+For docs-only changes, run `python scripts/audit-docs.py`: it checks that links, anchors and code-formatted paths resolve, ADRs are indexed, and documented operation, cassette, exchange and discrepancy counts match the conformance manifests. Also confirm that public docs contain no credentials or private references.
 
 ## Governor and wire evidence
 
@@ -35,6 +35,7 @@ for the audit scripts):
 ```sh
 python scripts/audit-azure-recording-plan.py
 python scripts/audit-wire-discrepancies.py
+python scripts/audit-docs.py
 python -m unittest discover -s scripts -p "test_*.py"
 ```
 

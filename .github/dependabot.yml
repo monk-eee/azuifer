@@ -1,0 +1,57 @@
+# Weekly, grouped update pull requests. Every ecosystem folds its minor and patch
+# bumps into one pull request; a major bump arrives on its own so it gets a real review.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
+
+  - package-ecosystem: gomod
+    directory: /tests/go_sdk
+    schedule:
+      interval: monthly
+    groups:
+      go-sdk-test-deps:
+        patterns: ["*"]
+
+  - package-ecosystem: maven
+    directory: /tests/java_sdk
+    schedule:
+      interval: monthly
+    groups:
+      java-sdk-test-deps:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /tests/js_sdk
+    schedule:
+      interval: monthly
+    groups:
+      js-sdk-test-deps:
+        patterns: ["*"]
+
+  - package-ecosystem: nuget
+    directory: /tests/dotnet_sdk
+    schedule:
+      interval: monthly
+    groups:
+      dotnet-sdk-test-deps:
+        patterns: ["*"]

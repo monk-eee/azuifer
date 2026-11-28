@@ -7,6 +7,11 @@
       "command": ["python", "scripts/audit-wire-discrepancies.py"]
     },
     {
+      "name": "public-docs",
+      "when_exists": "scripts/audit-docs.py",
+      "command": ["python", "scripts/audit-docs.py"]
+    },
+    {
       "name": "azure-recording-plan",
       "when_exists": "scripts/audit-azure-recording-plan.py",
       "command": ["python", "scripts/audit-azure-recording-plan.py"]
