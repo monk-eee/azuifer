@@ -14,7 +14,7 @@ use crate::{
 };
 use std::path::Path;
 
-fn key(name: &str) -> BlobKey {
+pub(super) fn key(name: &str) -> BlobKey {
     BlobKey {
         container: ContainerKey {
             account: AccountName::parse("acct").unwrap(),
@@ -61,7 +61,7 @@ async fn open(root: &Path) -> Store {
     store
 }
 
-fn extents(root: &Path) -> usize {
+pub(super) fn extents(root: &Path) -> usize {
     std::fs::read_dir(root.join("content"))
         .unwrap()
         .filter(|entry| {
@@ -75,14 +75,14 @@ fn extents(root: &Path) -> usize {
         .count()
 }
 
-fn removal(selector: Option<Selector>, snapshots: DeleteSnapshots) -> Removal {
+pub(super) fn removal(selector: Option<Selector>, snapshots: DeleteSnapshots) -> Removal {
     Removal {
         selector,
         snapshots,
     }
 }
 
-fn options() -> BlobWrite {
+pub(super) fn options() -> BlobWrite {
     BlobWrite {
         headers: ContentHeaders::default(),
         metadata: Metadata::new(),

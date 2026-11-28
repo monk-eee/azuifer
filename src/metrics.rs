@@ -78,7 +78,14 @@ impl Metrics {
     }
 
     /// Renders every series in the Prometheus text exposition format.
+    /// The request metrics and the store metrics.
     pub(crate) fn render(&self, uptime: Duration) -> String {
+        let mut out = self.render_requests(uptime);
+        crate::runtime_metrics::render(&mut out);
+        out
+    }
+
+    fn render_requests(&self, uptime: Duration) -> String {
         let state = self.state();
         let mut out = String::new();
         family(
@@ -172,7 +179,6 @@ impl Metrics {
             "Seconds since the process started serving.",
         );
         sample(&mut out, "azuifer_uptime_seconds", "", &uptime.as_secs());
-        crate::runtime_metrics::render(&mut out);
         out
     }
 }
@@ -226,7 +232,7 @@ mod tests {
         metrics.record("blob", 200, Duration::from_millis(30), 5);
         metrics.record("blob", 404, Duration::from_secs(20), 0);
         metrics.add_response_bytes("blob", 100);
-        let text = metrics.render(Duration::from_secs(7));
+        let text = metrics.render_requests(Duration::from_secs(7));
 
         assert_eq!(
             line(
@@ -260,7 +266,7 @@ mod tests {
         let metrics = Metrics::new(["table"]);
         metrics.adjust_active("table", 1);
         metrics.adjust_active("table", -1);
-        let text = metrics.render(Duration::ZERO);
+        let text = metrics.render_requests(Duration::ZERO);
         assert!(text.contains("azuifer_http_active_requests{service=\"table\"} 0"));
     }
 }

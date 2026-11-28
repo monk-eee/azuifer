@@ -42,7 +42,7 @@ SMB-only request headers (`x-ms-file-attributes`, `x-ms-file-permission*`, `x-ms
 
 Every `nodes` row stays the inode and its first name. A new table `links` holds each further name: `(share_id, entry_id, file_id, parent_id, name, key)`, unique on `(share_id, parent_id, key)`, and removed with its inode (`ON DELETE CASCADE`). The one name-lookup function `child` reads `nodes` and then `links`, so every create, copy and link path that already resolves a destination sees both. A looked-up alias returns the inode's `NodeInfo` with its own `parent_id` and `name` and an `entry` marker; `save_node` of an alias updates the inode's properties and never its name or parent. The link count is one plus the number of `links` rows of the inode, computed when the node is read. Deleting a name removes the `links` row; deleting the first name while others exist moves the oldest link's name into the inode row and removes that row, so the content and file id survive; deleting the last name frees the content as today. A directory is empty only if neither `nodes` nor `links` has a child. Listing merges both tables in key order. Share snapshots copy both, with explicit column lists. Quota counts a shared file once because content is keyed by inode.
 
-Rename is SMB only, so NFS names never move and no link rename logic is needed.
+Rename is SMB only, so no request moves an NFS name. The store still handles it, because a state-machine test drives it directly: a hard link's name moves in its own row, and renaming one name of a file onto another name of the same file does nothing, as in POSIX.
 
 ### 4. Link operations and their routing
 

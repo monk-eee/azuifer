@@ -15,7 +15,7 @@ use crate::{
 use content::Staged;
 use std::{path::Path, time::Duration};
 
-fn share_ref(name: &str) -> ShareRef {
+pub(super) fn share_ref(name: &str) -> ShareRef {
     ShareRef {
         account: AccountName::parse("testaccount").unwrap(),
         share: ShareName::parse(name).unwrap(),
@@ -23,11 +23,11 @@ fn share_ref(name: &str) -> ShareRef {
     }
 }
 
-fn path(value: &str) -> EntryPath {
+pub(super) fn path(value: &str) -> EntryPath {
     EntryPath::parse(value, false).unwrap()
 }
 
-async fn stage(store: &Store, bytes: &[u8]) -> Staged {
+pub(super) async fn stage(store: &Store, bytes: &[u8]) -> Staged {
     let mut upload = store.begin_upload(bytes.len() as u64).await.unwrap();
     upload.append(bytes).await.unwrap();
     upload.finish(None).await.unwrap()
@@ -86,7 +86,7 @@ async fn read(store: &Store, share: &str, name: &str) -> Vec<u8> {
     chunks.concat()
 }
 
-fn extent_files(location: &Path) -> Vec<String> {
+pub(super) fn extent_files(location: &Path) -> Vec<String> {
     let mut names: Vec<_> = std::fs::read_dir(location.join("file").join("content"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())

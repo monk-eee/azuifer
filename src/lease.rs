@@ -320,6 +320,9 @@ impl StoredLease {
 }
 
 #[cfg(test)]
+mod model;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

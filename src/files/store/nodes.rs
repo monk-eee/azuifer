@@ -520,6 +520,15 @@ impl Store {
             }
             let resolved = resolve(&tx, share.id, &dest)?;
             let parent = resolved.parent.ok_or(Error::ParentNotFound)?;
+            // Two names of one file: as in POSIX, renaming one onto the other does nothing.
+            if !node.directory
+                && resolved
+                    .node
+                    .as_ref()
+                    .is_some_and(|other| other.file_id == node.file_id && other.entry != node.entry)
+            {
+                return Ok(node);
+            }
             let mut reclaim = content::Reclaim::default();
             if let Some(existing) = resolved
                 .node
@@ -561,6 +570,16 @@ impl Store {
                 lease::after_write(Kind::File, &mut node.lease, now);
             }
             save_node(&tx, share.id, &node)?;
+            // The inode's own row keeps its name when the node was reached through a hard
+            // link, so a link name moves in its row of `links`.
+            if let Some(entry) = node.entry {
+                tx.execute(
+                    "UPDATE links SET parent_id=?3, name=?4, key=?5
+                     WHERE share_id=?1 AND entry_id=?2",
+                    params![share.id, entry, parent.file_id, node.name, fold(&node.name)],
+                )
+                .map_err(db_error)?;
+            }
             finish(tx, env, reclaim)?;
             Ok(node)
         })
